@@ -1,0 +1,59 @@
+<div class="vertical-layout page_loader" id="customers" style="display: none">
+    <!-- Customers on LIST_PAGE_UX_STANDARD.md - third speaker. Full-width
+         list first; a row click opens the dossier pane: lifetime stats,
+         contact grid, and the sales history with named columns. -->
+    <div id="containerbar">
+        <div class="breadcrumbbar crumbbar_padding">
+            <div class="row align-items-center row_filter">
+                <div class="col-auto">
+                    <h4 class="page-title break_title mb-0"><lang class="lang_customers_title">Customers</lang></h4>
+                </div>
+                <div class="col">
+                    <div class="lf-panel" id="customers_filter_panel" style="display:none;"></div>
+                </div>
+                <div class="col-auto text-right">
+                    <div class="widgetbar" id="customers_controls">
+                        <a data-module="customer" data-access="write" href="#/customers" class="btn btn-primary-rgba"
+                            onclick="PosnicPro.importTableFile('customers'); return false;"
+                            data-toggle="tooltip" title="Import from CSV/Excel" data-t-title="lang_import_from_csv_excel" aria-label="Import customers" data-t-aria-label="lang_import_customers">
+                            <i class="feather icon-download"></i>
+                        </a>
+                        <div class="btn-group">
+                        <button type="button" class="btn btn-primary-rgba dropdown-toggle" data-toggle="dropdown"
+                            aria-haspopup="true" aria-expanded="false" title="Export CSV" data-t-title="lang_export_csv" aria-label="Export CSV" data-t-aria-label="lang_export_csv">
+                            <i class="feather icon-share"></i>
+                        </button>
+                        <div class="dropdown-menu dropdown-menu-right">
+                            <a class="dropdown-item" href="javascript:void(0)" onclick="PosnicPro.customers.exportCsv(); return false;"><lang class="lang_this_page_what_is_shown">This page (what is shown)</lang></a>
+                            <a class="dropdown-item" href="javascript:void(0)" onclick="PosnicPro.customers.exportAllCsv(); return false;"><lang class="lang_everything_matching_the_filter">Everything matching the filter</lang></a>
+                        </div>
+                        </div>
+                        <button type="button" class="btn btn-primary-rgba lf-btn" id="customers_filter_btn"
+                            data-toggle="tooltip" title="Filter customers" data-t-title="lang_filter_customers">
+                            <i class="feather icon-filter mr-2"></i><lang class="lang_filter">Filter</lang>
+                        </button>
+                        <a data-module="customer" data-access="write" href="#/customers/new"
+                            class="btn btn-primary-rgba customer_new_shortcut" data-toggle="tooltip" title="New customer" data-t-title="lang_new_customer">
+                            <i class="feather icon-plus mr-2"></i><lang class="lang_addvariant_title">New</lang>
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="contentbar">
+            <div id="customers_split">
+                <div class="card m-b-30 md-rail" id="customers_list_card">
+                    <div class="card-body">
+                        <div id="customers_list_rows" class="md-rail-rows text-muted"><lang class="lang_loading_customers">Loading customers ...</lang></div>
+                        <div class="q-pager" id="customers_list_paging"></div>
+                    </div>
+                </div>
+                <div class="card m-b-30 md-detail" id="customers_detail_card" style="display:none;">
+                    <div id="customers_doc"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+

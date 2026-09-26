@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+    <!-- The browser chrome follows the page, so a dark phone does not
+         frame a dark page in a white bar. -->
+    <meta name="theme-color" content="#0b0f19" media="(prefers-color-scheme: dark)">
+    <!--
+        WHERE EVERY RELATIVE PATH ON THIS PAGE POINTS.
+        A printed code can be three segments deep - /order/AZ100/venue/RC/123
+        for a hotel room - and without this the browser looks for each asset
+        under /order/AZ100/venue/, a directory that does not exist. The page
+        loads and shows nothing, which is the worst kind of broken: a blank
+        screen with no error anybody sees.
+        Pinned to the mount rather than left to the arriving URL, so one file
+        serves the shop address, a table and a venue alike.
+    -->
+    <base href="/order/" />
+    <title>Order</title>
+    <!--
+        One stylesheet for the whole walk - this page, the order, paying, the
+        token - so the four feel like one place. Bootstrap and the Font
+        Awesome CDN are gone: a phone at a table on a bad connection was
+        fetching a framework and an icon font from another host to draw one
+        basket glyph, which is drawn inline now.
+    -->
+    <link href="assets/order.css?v=20260912-design" rel="stylesheet">
+    <script src="assets/i18n.js?v=20260912-design"></script>
+    <script src="assets/jquery-3.7.1.min.js?v=20260912-design"></script>
+    <script src="config.js?v=20260912-design"></script>
+    <!-- Says so when the shop is slow to answer, on every request this
+         page makes. Loaded before anything that fetches. assets/working.js -->
+    <script src="assets/working.js?v=20260912-design"></script>
+    <link href="assets/channel-state.css?v=20260912-design" rel="stylesheet">
+    <script src="assets/channel-state.js?v=20260912-design"></script>
+    <script src="assets/service-point.js?v=20260912-design"></script>
+    <script src="assets/shop-address.js?v=20260912-design"></script>
+    <!-- The bell an order makes when the kitchen takes it. Synthesised,
+         so there is no file to fetch and nothing for the CSP to allow. -->
+    <script src="assets/ting.js?v=20260912-design"></script>
+    <script src="assets/kiosk-core.js?v=20260912-design"></script>
+    <script src="assets/spice.js?v=20260912-design"></script>
+    <script src="indexedDB.js?v=20260912-design"></script>
+</head>
+
+<body>
+
+    <!-- Up until the first cards are drawn, and taken down by the same
+         render. The shape of a menu, not a wheel: a page that already looks
+         like what it is about to be reads as fast. -->
+    <div id="page-loader" role="status" aria-label="Loading the menu">
+        <div class="skeleton-list" aria-hidden="true">
+            <div class="skeleton-card"><div class="sk-body"><div class="sk sk-line"></div><div class="sk sk-line short"></div><div class="sk sk-line price"></div></div><div class="sk sk-media"></div></div>
+            <div class="skeleton-card"><div class="sk-body"><div class="sk sk-line"></div><div class="sk sk-line short"></div><div class="sk sk-line price"></div></div><div class="sk sk-media"></div></div>
+            <div class="skeleton-card"><div class="sk-body"><div class="sk sk-line"></div><div class="sk sk-line short"></div><div class="sk sk-line price"></div></div><div class="sk sk-media"></div></div>
+            <div class="skeleton-card"><div class="sk-body"><div class="sk sk-line"></div><div class="sk sk-line short"></div><div class="sk sk-line price"></div></div><div class="sk sk-media"></div></div>
+        </div>
+    </div>
+
+    <div id="popup" role="status">
+        Need more than that? The counter can help.
+        <button type="button" onclick="hidePopup()" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="content-wrapper order-layout">
+        <!--
+            THE SHOP, THE SEARCH, THE SECTIONS - stuck to the top.
+
+            The same three rows as the digital menu, in the same order, so a
+            customer who read the menu and tapped "Order now" finds the page
+            they already know. The name replaces "Self-Ordering", which named
+            the software and not the restaurant.
+        -->
+        <header class="top">
+            <div class="wrap">
+                <div class="top-row">
+                    <div class="shop">
+                        <img id="shop-logo" class="shop-logo" alt="" hidden>
+                        <div class="shop-text">
+                            <h1 id="shop-name" class="shop-name">Menu</h1>
+                            <p class="shop-sub"><span id="shop-sub" hidden></span><span id="shop-place" class="shop-place" hidden></span></p>
+                        </div>
+                    </div>
+                    <!-- Ask about the menu: the shop's own assistant, where the shop
+                         has switched it on. Hidden until the storefront says so. -->
+                    <button type="button" class="icon-btn ask-ai" id="ask-ai" aria-label="Ask about the menu" hidden>
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"></path>
+                            <path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z"></path>
+                        </svg>
+                    </button>
+                    <!-- Said once per phone: the spark is easy to miss, and a customer
+                         who never learns it is there never asks. -->
+                    <div class="assistant-hint" id="assistant-hint" role="status" hidden>
+                        <button type="button" class="assistant-hint-open" id="assistant-hint-open">
+                            <span class="assistant-hint-title">New</span>
+                            <span class="assistant-hint-text" id="assistant-hint-text">Ask me what's good, or just talk</span>
+                        </button>
+                        <button type="button" class="assistant-hint-close" id="assistant-hint-close" aria-label="Dismiss">&times;</button>
+                    </div>
+                    <!-- The other language, named in itself. Painted by i18n.js. -->
+                    <button type="button" class="lang-toggle" data-lang-toggle hidden>தமிழ்</button>
+                    <!-- What this phone has ordered before, which is the only
+                         order history there can be without an account. -->
+                    <button type="button" class="icon-btn top-history" id="top-history" aria-label="Your orders" hidden>
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 8v5l3 2"></path>
+                            <path d="M3 12a9 9 0 109-9 9 9 0 00-7 3.5V3"></path>
+                        </svg>
+                    </button>
+                    <!-- The order so far, as a glyph with the count on it. -->
+                    <button type="button" class="icon-btn top-cart next-page" id="top-cart" aria-label="Your order">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M6 7h12l1 13H5L6 7z"></path>
+                            <path d="M9 7V6a3 3 0 016 0v1"></path>
+                        </svg>
+                        <span class="badge" id="mobile-cart-count" data-zero="true">0</span>
+                    </button>
+                </div>
+
+                <!--
+                    SEARCH, across every category.
+
+                    Somebody typing "biryani" is asking the restaurant a
+                    question, not the Mains tab. Searching is a mode: the shop
+                    name and the sections stand down while the keyboard has
+                    half the screen, and the arrow is the way back.
+                -->
+                <section class="order-search">
+                    <div class="search-row">
+                        <button type="button" id="product-search-back" class="icon-btn search-back"
+                                aria-label="Back to the menu" hidden>&#8592;</button>
+                        <div class="search-field">
+                            <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                                 stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+                                <circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path>
+                            </svg>
+                            <label for="product-search" hidden>Search the menu</label>
+                            <input type="search" id="product-search" class="search-input"
+                                   autocomplete="off" placeholder="Search the menu">
+                            <!-- The browser's own recogniser; hidden where there is none. -->
+                            <button type="button" id="product-search-mic" class="search-mic"
+                                    aria-label="Search by voice" hidden>
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M12 14a3 3 0 003-3V6a3 3 0 00-6 0v5a3 3 0 003 3zm5-3a5 5 0 01-10 0H5a7 7 0 006 6.9V21h2v-3.1A7 7 0 0019 11h-2z"/>
+                                </svg>
+                            </button>
+                            <button type="button" id="product-search-clear" class="search-clear"
+                                    aria-label="Clear search" hidden>&times;</button>
+                        </div>
+                    </div>
+
+                </section>
+
+                <!--
+                    THE SECTIONS AND THE TOOLS SHARE ONE ROW.
+
+                    Sorting had a row of its own, 70px of the busiest screen in
+                    the product, above the food, for the least-used control on
+                    the page - and "Catalogue order" sat there alone saying
+                    nothing a customer wanted. Filters belong at the END of the
+                    section strip, which is where every menu worth copying puts
+                    them: the chips scroll, the tools stay put.
+                -->
+                <div class="section-row">
+                    <nav class="fixed-categories" aria-label="Menu sections">
+                        <div class="category-scroll-container" id="category-list"></div>
+                    </nav>
+                    <div class="order-tools">
+                        <button type="button" class="order-tool" id="order-filter-veg" aria-pressed="false">
+                            <span class="order-diet" aria-hidden="true"></span>Veg only
+                        </button>
+                        <!--
+                            Owner: "filter options. not too annoying make it
+                            very very professional and neat."
+
+                            Hidden unless this menu can actually answer
+                            something. A shop that has entered no nutrition
+                            and ticked no dietary tags gets no button, rather
+                            than a button that opens an empty sheet - which is
+                            what "not annoying" means on a screen where most
+                            shops will have filled in nothing.
+                        -->
+                        <button type="button" class="order-tool" id="order-filter-more" aria-haspopup="dialog" hidden>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                                 stroke-linecap="round" aria-hidden="true" class="order-tool-icon">
+                                <path d="M3 6h18M7 12h10M10 18h4"></path>
+                            </svg>
+                            <span>Filters</span>
+                            <span class="order-tool-count" id="order-filter-count" hidden></span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- On a wide screen the sections are a rail down the left; the
+             chip strip in the header stands down. Same items, same handler. -->
+        <aside class="category-rail" id="category-rail" aria-label="Menu sections"></aside>
+
+        <main class="scrollable-products wrap">
+            <div class="fixed-heading">
+                <h2 class="section-heading" id="category-heading">Our Menu</h2>
+            </div>
+            <!-- "Come to table seven." Only where the shop runs tables and the
+             printed code named one; see callTheWaiter in indexedDB.js. -->
+        <button type="button" id="call-waiter" class="call-waiter" hidden
+                onclick="callTheWaiter()">Call waiter</button>
+        <!-- A PLAIN BLOCK, not a grid. It holds sections now, and each of
+                 those carries its own .product-grid; a search wraps its flat
+                 results in one. It used to be the grid itself, which on a wide
+                 screen quietly made it a two-column grid OF SECTIONS with a
+                 second grid inside each - every card squeezed to about 200px
+                 with the photo sitting on top of the name and the price. -->
+            <!-- How busy the kitchen is, when it is. Empty and hidden
+                 otherwise; see kitchenNoticeHtml in indexedDB.js. -->
+            <div id="kitchen-notice" hidden></div>
+            <div id="product-list"></div>
+        </main>
+
+        <!-- And the order so far on the right, building as dishes are added,
+             where the bottom bar would be on a phone. -->
+        <aside class="order-panel" id="order-panel" aria-label="Your order">
+            <div class="order-panel-head">Your order</div>
+            <div class="order-panel-lines" id="order-panel-lines">
+                <p class="order-panel-empty">Nothing yet. Add a dish to start.</p>
+            </div>
+            <div class="order-panel-foot">
+                <div class="order-panel-total"><span>Total</span><span id="order-panel-total"></span></div>
+                <button type="button" class="btn-primary btn-block checkout-btn" id="order-panel-next"
+                        onclick="window.location.href='cart.html'" disabled>Review order</button>
+            </div>
+        </aside>
+    </div>
+
+    <!--
+        THE BILL BAR. What has been ordered so far and the one way forward,
+        fixed to the bottom and gone while the order is empty. "Back" is gone
+        with it: a customer who scanned a code has nowhere behind them to go.
+    -->
+    <footer class="cart-footer is-empty" id="bill-bar">
+        <div class="cart-footer-inner">
+            <div class="floating-cart next-page" role="button" tabindex="0" aria-label="Your order">
+                <span class="floating-cart-count"><span id="cart-qty">0</span> <span id="cart-qty-word">items</span></span>
+                <span class="floating-cart-total" id="cart-total"></span>
+            </div>
+            <button type="button" class="btn-primary checkout-btn" id="next-btn"
+                    onclick="window.location.href='cart.html'" disabled>
+                View order
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                     stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M5 12h14M13 6l6 6-6 6"></path>
+                </svg>
+            </button>
+        </div>
+    </footer>
+
+    <dialog id="filters" class="sheet filters-sheet" aria-labelledby="filters-title">
+        <div class="sheet-handle" aria-hidden="true"></div>
+        <button type="button" id="filters-close" class="icon-btn sheet-close" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+        </button>
+        <div class="sheet-body">
+            <h2 class="sheet-title" id="filters-title">Sort and filter</h2>
+
+            <!--
+                SORT LIVES HERE NOW, NOT IN THE SECTION ROW.
+
+                It had a seat beside the sections, and once the Filters button
+                arrived beside it the two together left room for one chip and
+                the first letter of the next - so the strip a customer steers
+                with had been squeezed out by two controls they touch once.
+
+                Sorting and filtering are the same kind of act and the same
+                rarity, so they share one sheet, and the sections get the row
+                back. This is also where every menu worth copying puts them.
+            -->
+            <section class="filters-group">
+                <h3 class="filters-group-name">Sort</h3>
+                <div class="filters-pills" id="filters-sort">
+                    <label class="filters-pill" data-on="true">
+                        <input type="radio" name="order-sort-choice" value="menu" checked>
+                        <span>Menu order</span>
+                    </label>
+                    <label class="filters-pill">
+                        <input type="radio" name="order-sort-choice" value="popular">
+                        <span>Most ordered</span>
+                    </label>
+                    <label class="filters-pill">
+                        <input type="radio" name="order-sort-choice" value="price_asc">
+                        <span>Price: low to high</span>
+                    </label>
+                    <label class="filters-pill">
+                        <input type="radio" name="order-sort-choice" value="price_desc">
+                        <span>Price: high to low</span>
+                    </label>
+                </div>
+            </section>
+
+            <div class="filters-groups" id="filters-groups"></div>
+        </div>
+        <div class="filters-foot">
+            <button type="button" class="filters-clear" id="filters-clear">Clear all</button>
+            <button type="button" class="btn-primary filters-apply" id="filters-apply">Show dishes</button>
+        </div>
+    </dialog>
+
+    <!--
+        THE MENU BUTTON.
+
+        Owner: "coz inside there is not menu button. thats actually good. its
+        grouping the menu and easy to navigate. add it here too."
+
+        The page is grouped now, which was the larger half of that sentence.
+        This is the other half. A chip strip is fine for five sections and
+        real work for twenty-nine: the one on a live shop runs Soup, Starters
+        Veg, Salad, Prawn Starters, Squid Starters, Crab Starters, and a guest
+        looking for dessert is swiping a strip a chip at a time to find out
+        what the restaurant even has.
+
+        So: every section at once, with its count, one tap to any of them.
+        It is the contents page of the menu, and it is the one control on this
+        screen that answers "what do they serve here" rather than "show me
+        this bit".
+
+        Bottom right, above the bill bar, because it is reached with a thumb
+        while reading - and it is the only floating control on the page, so
+        there is nothing for it to compete with.
+    -->
+    <button type="button" class="menu-index-btn" id="menu-index-btn" aria-haspopup="dialog" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+             stroke-linecap="round" aria-hidden="true">
+            <path d="M4 7h16M4 12h16M4 17h10"></path>
+        </svg>
+        <span>Menu</span>
+    </button>
+
+    <dialog id="menu-index" class="sheet menu-index" aria-labelledby="menu-index-title">
+        <div class="sheet-handle" aria-hidden="true"></div>
+        <button type="button" id="menu-index-close" class="icon-btn sheet-close" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+        </button>
+        <div class="sheet-body">
+            <h2 class="sheet-title" id="menu-index-title">Menu sections</h2>
+            <nav class="menu-index-list" id="menu-index-list" aria-label="Menu sections"></nav>
+        </div>
+    </dialog>
+
+    <!--
+        THE DISH, OPENED. Same sheet as the menu - every photo in a strip,
+        the whole description, what the shop has said about it - and here,
+        because this page can, the way to add it.
+    -->
+    <dialog id="dish" class="sheet" aria-labelledby="dish-title">
+        <div class="sheet-handle" aria-hidden="true"></div>
+        <button type="button" id="dish-close" class="icon-btn sheet-close" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+        </button>
+        <div id="dish-gallery" class="sheet-gallery" hidden>
+            <div class="sheet-strip" id="dish-strip"></div>
+            <div class="sheet-dots" id="dish-dots" aria-hidden="true"></div>
+        </div>
+        <span id="dish-icon" class="sheet-icon" aria-hidden="true" hidden></span>
+        <div class="sheet-body">
+            <h2 class="sheet-title"><span id="dish-diet"></span><span id="dish-title"></span></h2>
+            <p id="dish-desc" class="sheet-desc" hidden></p>
+            <dl id="dish-facts" class="sheet-facts" hidden></dl>
+            <!--
+                WHAT THE SHOP OFFERS ON TOP.
+
+                Above the chillies and the note, because it changes the price
+                and the other two do not: somebody reading down the sheet
+                should meet the thing that costs money before the thing that
+                does not.
+
+                A group with max 1 draws radios and one with more draws
+                checkboxes, which is the only honest way to show a rule the
+                shop set - a tick that silently refuses to stay ticked is
+                worse than one that visibly replaces another.
+            -->
+            <div class="sheet-options" id="dish-options-box" hidden></div>
+            <!-- HOW HOT. Shown only for a dish the kitchen said it can cook to
+                 order, because a customer who asks for mild and gets hot is
+                 worse off than one who never asked. Drawn by assets/spice.js. -->
+            <div class="sheet-spice" id="dish-spice-box" hidden></div>
+            <!-- "Less spicy", "no onion": a note the kitchen reads under the
+                 dish. Only where there is a kitchen. Kept as it is typed, and
+                 carried onto the line the moment the dish is added. -->
+            <div class="sheet-note" id="dish-note-box" hidden>
+                <label class="field-label" for="dish-note">Any request for this dish?</label>
+                <textarea id="dish-note" class="note-field" rows="2" maxlength="200"
+                          placeholder="Less spicy, no onion, extra gravy..."></textarea>
+            </div>
+            <div class="sheet-foot">
+                <p class="sheet-price" id="dish-price"></p>
+                <div class="sheet-add" id="dish-add" data-qty="0" aria-label="Quantity">
+                    <button type="button" class="sheet-less" id="dish-less" aria-label="One fewer">&minus;</button>
+                    <span class="sheet-qty" id="dish-qty" aria-live="polite">0</span>
+                    <button type="button" class="sheet-more" id="dish-more" aria-label="Add one">
+                        <span class="add-word">Add</span><span class="add-plus" aria-hidden="true">+</span>
+                    </button>
+                </div>
+                <p class="sheet-off" id="dish-off" hidden></p>
+            </div>
+        </div>
+    </dialog>
+
+    <!--
+        ASK ABOUT THE MENU.
+
+        The shop's own model, on the shop's own account, answering from this
+        menu and nothing else. It proposes; the page applies, through the
+        same code a tap on "Add" uses, and says so in the conversation. It
+        never places, pays or asks for a phone number.
+    -->
+    <dialog id="assistant" class="sheet assistant" aria-labelledby="assistant-title">
+        <div class="sheet-handle" aria-hidden="true"></div>
+        <button type="button" id="assistant-close" class="icon-btn sheet-close" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+        </button>
+        <div class="sheet-body assistant-body">
+            <h2 class="sheet-title assistant-title" id="assistant-title">
+                <svg class="assistant-spark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"></path></svg>
+                <span>Ask about the menu</span>
+            </h2>
+            <div class="assistant-log" id="assistant-log" role="log" aria-live="polite"></div>
+            <!-- While the customer is talking, the order itself stands in for a
+                 transcript nobody reads back. Owner: "no need to show
+                 conversation as text in the chat. just hide." -->
+            <div class="assistant-order" id="assistant-order" hidden>
+                <div class="assistant-order-head">
+                    <h3 class="assistant-order-title" id="assistant-order-title">Your order</h3>
+                    <!-- The customer works the top half by hand while the
+                         assistant listens at the bottom. Both at once, which
+                         is the point: it is a helper, not a turn-taker. -->
+                    <button type="button" class="assistant-add" id="assistant-add">
+                        <span aria-hidden="true">+</span>
+                        <span>Add item</span>
+                    </button>
+                </div>
+                <ul class="assistant-order-list" id="assistant-order-list"></ul>
+
+                <!--
+                    Things that go with it. A WRAPPED row, not a sideways
+                    scroller - owner: "cross selling i saw horrizontal scroll.
+                    not soo good." A row that scrolls hides most of itself and
+                    asks for a gesture nobody makes on a screen they are
+                    reading downwards.
+                -->
+                <div class="assistant-more" id="assistant-more" hidden>
+                    <h4 class="assistant-more-title">Anything else?</h4>
+                    <div class="assistant-more-row" id="assistant-more-row"></div>
+                </div>
+            </div>
+            <!--
+                THE LINE, AND THE ONE THING TO DO WITH IT.
+
+                Owner: "hold to talk is works. its good. but stop talking
+                button not required. hold button need some animation. like
+                finger press and hold first time. big more size ... after
+                press proper animation that user pressed and listerning. like
+                waves ... have some solid and satisfyig feeling over holing."
+
+                One control, as big as a thumb wants it, with the waves
+                driven by the customer's OWN voice rather than a loop - the
+                level is already measured to decide whether they are close
+                enough to the phone (voice.js, watchTheRoom), so the same
+                number moves the bars. The way out is the X at the top of the
+                sheet, which is where every sheet on this phone closes.
+            -->
+            <div class="voice" id="voice" hidden>
+                <div class="voice-orb" id="voice-orb" data-state="" aria-hidden="true"></div>
+                <p class="voice-status" id="voice-status" role="status"></p>
+                <button type="button" class="voice-start" id="voice-start" hidden>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 003-3V6a3 3 0 00-6 0v5a3 3 0 003 3zm5-3a5 5 0 01-10 0H5a7 7 0 006 6.9V21h2v-3.1A7 7 0 0019 11h-2z"/></svg>
+                    <span>Tap to talk</span>
+                </button>
+
+                <!--
+                    HOLD IT AND THE LINE HEARS YOU, whatever the room is
+                    doing. The page judges by distance - a voice at arm's
+                    length against the room's own noise floor - and that is a
+                    measurement, so it can be wrong. This cannot.
+                -->
+                <button type="button" class="voice-hold" id="voice-hold" aria-describedby="voice-hold-say">
+                    <!-- Driven by the real input level while held, so the
+                         bars answer the customer's voice instead of running
+                         on a timer. Six, because a waveform needs enough
+                         bars to read as one and few enough to stay calm. -->
+                    <span class="voice-wave" id="voice-wave" aria-hidden="true">
+                        <i></i><i></i><i></i><i></i><i></i><i></i>
+                    </span>
+                    <span class="voice-hold-word" id="voice-hold-word">Hold to talk</span>
+                    <!-- Shown once, until they have held it: a fingertip
+                         coming down and staying down. It is the whole
+                         instruction, and a sentence nobody reads is not. -->
+                    <span class="voice-finger" id="voice-finger" aria-hidden="true"></span>
+                </button>
+                <p class="voice-hold-say" id="voice-hold-say">Press and hold while you speak</p>
+            </div>
+            <audio id="voice-out" autoplay playsinline hidden></audio>
+            <div class="assistant-chips" id="assistant-chips">
+                <button type="button" class="assistant-chip" data-ask="What do you recommend?">What do you recommend?</button>
+                <button type="button" class="assistant-chip" data-ask="Something vegetarian and spicy">Something vegetarian and spicy</button>
+                <button type="button" class="assistant-chip" data-ask="A meal for two">A meal for two</button>
+                <button type="button" class="assistant-chip" data-ask="What is quick to make?">What is quick to make?</button>
+            </div>
+            <!--
+                TALK, OR TYPE. Owner: "have ai talk button seperate, type
+                button seperate ... coz when user try to talk half screen
+                showing keypad. not good."
+
+                The sheet used to open onto a text box and put the cursor in
+                it, which raises the keyboard over half the screen before
+                anybody has said what they want to do - and the microphone was
+                a small button beside it, which reads as the afterthought. So
+                the choice is made first and the keyboard only ever appears
+                for somebody who asked to type.
+            -->
+            <div class="assistant-choose" id="assistant-choose" hidden>
+                <button type="button" class="assistant-choose-talk" id="assistant-choose-talk">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 003-3V6a3 3 0 00-6 0v5a3 3 0 003 3zm5-3a5 5 0 01-10 0H5a7 7 0 006 6.9V21h2v-3.1A7 7 0 0019 11h-2z"/></svg>
+                    <span>Talk to order</span>
+                </button>
+                <button type="button" class="assistant-choose-type" id="assistant-choose-type">Type instead</button>
+            </div>
+            <form class="assistant-ask" id="assistant-form" autocomplete="off">
+                <label for="assistant-input" hidden>Your message</label>
+                <input type="text" id="assistant-input" class="assistant-input" maxlength="400" placeholder="Ask anything about the menu...">
+                <!-- Talk instead of type, beside the arrow where every messaging app
+                     keeps it. Shown where the shop lets customers talk. -->
+                <button type="button" class="assistant-talk" id="assistant-talk" aria-label="Talk to order" aria-pressed="false" hidden>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 003-3V6a3 3 0 00-6 0v5a3 3 0 003 3zm5-3a5 5 0 01-10 0H5a7 7 0 006 6.9V21h2v-3.1A7 7 0 0019 11h-2z"/></svg>
+                </button>
+                <button type="submit" class="assistant-send" id="assistant-send" aria-label="Send">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15M13 6l6 6-6 6"></path></svg>
+                </button>
+            </form>
+            <!--
+                The order has gone. This is where the customer finds that out:
+                in the sheet they were just talking into, not on a screen the
+                page jumped to. A tick, then a pan with the steam coming off
+                it, then the token. Nothing moves until they tap Done.
+            -->
+            <div class="placed" id="assistant-placed" hidden>
+                <!--
+                    The order going to the kitchen, drawn: a docket flies to the
+                    hatch, the bell rings, and the scene settles into a pan with
+                    a flame under it. assets/assistant/kitchen-scene.js. Drawn
+                    rather than filmed so it takes the page's own colours, costs
+                    no download, and is sharp on any phone.
+                -->
+                <canvas class="placed-art" id="placed-art" width="280" height="170" aria-hidden="true"></canvas>
+                <p class="placed-said" id="placed-said" role="status">Sent to the kitchen</p>
+                <div class="placed-token">
+                    <span class="placed-token-label">Token</span>
+                    <span class="placed-token-number" id="placed-token">--</span>
+                </div>
+
+                <!--
+                    THE ORDER'S OWN SCREEN, which opens as the scene settles.
+                    Before this the confirmation stopped at a token and a Done
+                    button, so the conversation had been replaced by a dead
+                    end - the owner read it as having the call cut on him.
+                    From here the order can still be changed, added to, or
+                    called off, and the line stays up throughout.
+                -->
+                <div class="placed-order" id="placed-order" hidden>
+                    <div class="placed-order-head">
+                        <h3 class="placed-order-title">Your order</h3>
+                        <span class="placed-clock" id="placed-clock"></span>
+                    </div>
+                    <!-- Past the minute the plus and minus still work, but
+                         they ask the shop instead of changing it outright.
+                         Said here so nobody taps twice wondering why nothing
+                         moved. -->
+                    <p class="placed-mode" id="placed-mode" hidden></p>
+                    <ul class="placed-lines" id="placed-lines"></ul>
+
+                    <!-- Things that go with what they ordered. One row, tapped
+                         to add; never a catalogue, and never a second ask. -->
+                    <div class="placed-more" id="placed-more" hidden>
+                        <h4 class="placed-more-title">Anything else?</h4>
+                        <div class="placed-more-row" id="placed-more-row"></div>
+                    </div>
+
+                    <!--
+                        NOTHING LEAVES THE PHONE UNTIL THIS IS PRESSED. The
+                        plus and the minus move a number on this screen; this
+                        sends the whole edit in one request. Owner: "customer
+                        cant change in one touch. after changes. he need to
+                        review and click confirmation."
+                    -->
+                    <div class="placed-confirm-bar" id="placed-confirm-bar" hidden>
+                        <span class="placed-confirm-count" id="placed-confirm-count"></span>
+                        <div class="placed-confirm-row">
+                            <button type="button" class="placed-discard" id="placed-discard">Undo</button>
+                            <button type="button" class="placed-confirm" id="placed-confirm">Confirm the change</button>
+                        </div>
+                    </div>
+
+                    <div class="placed-actions">
+                        <button type="button" class="placed-cancel" id="placed-cancel">Cancel the order</button>
+                    </div>
+                </div>
+
+                <button type="button" class="placed-done" id="placed-done">Done</button>
+            </div>
+            <!-- The way out of the conversation and into the order. The page's
+                 own order bar sits under this sheet, so "tap Review order" needs
+                 a button that is actually on screen. Shown once the order holds
+                 something. -->
+            <!--
+                The one thing this screen asks before it can send: how the
+                food travels. One tap, and only where the shop offers more
+                than one way and the code that was scanned did not settle it.
+            -->
+            <div class="assistant-ways" id="assistant-ways" hidden>
+                <h4 class="assistant-ways-title">How are you having it?</h4>
+                <div class="assistant-ways-row" id="assistant-ways-row"></div>
+            </div>
+
+            <!--
+                ONE BUTTON, NOT TWO. This used to say "Review order" and walk
+                the customer to the basket page to send it from there. The
+                review is now the minute AFTER it goes, when they are looking
+                at what the kitchen actually has - so this sends it.
+            -->
+            <button type="button" class="assistant-confirm" id="assistant-review" hidden>
+                <span>Confirm &amp; send</span>
+                <span class="assistant-review-sum" id="assistant-review-sum"></span>
+            </button>
+            <p class="assistant-foot">Answers come from this shop's menu. Please confirm allergies at the counter.</p>
+        </div>
+    </dialog>
+
+    <script src="assets/products/script.js?v=20260912-design"></script>
+    <!-- The docket flying to the hatch, the bell, and the pan settling over a
+         flame. It was written, styled and given a canvas in the sheet above -
+         and never loaded here, so window.KitchenScene did not exist and the
+         confirmation fell through to its no-canvas path: the bell rang, the
+         words changed, and nothing moved. Which is exactly what the owner
+         reported, twice: "i saw ting sound but never see anitmation".
+         Before script.js, which plays it. -->
+    <script src="assets/assistant/kitchen-scene.js?v=20260912-design"></script>
+    <script src="assets/assistant/script.js?v=20260912-design"></script>
+    <!-- The orb follows the voice actually coming back, rather than
+         pulsing on a loop. Before voice.js, which hands it the stream. -->
+    <!-- Every event on the line, on the screen, when ?transcript=1 asks for
+         it. Loaded before voice.js, which reports into it. -->
+    <script src="assets/assistant/debug.js?v=20260912-design"></script>
+    <script src="assets/assistant/talking.js?v=20260912-design"></script>
+    <script src="assets/assistant/voice.js?v=20260912-design"></script>
+</body>
+</html>

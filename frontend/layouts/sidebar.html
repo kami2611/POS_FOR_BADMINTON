@@ -1,0 +1,642 @@
+<div class="leftbar">
+    <!-- Start Sidebar -->
+    <div class="sidebar">
+        <!-- Start Navigationbar -->
+        <div class="navigationbar scroll_width">
+            <div class="vertical-menu-icon">
+                <div class="nav flex-column nav-pills" id="v-pills-tab" role="tablist" aria-orientation="vertical">
+                    <div class="logobar">
+                        <a href="#" class="logo logo-small"><img src="static/images/logo/posnic-logo.svg"
+                                class="img-fluid" alt="logo" loading="lazy" decoding="async"></a>
+                    </div>
+                    <a class="nav-link nav-link-active" id="v-pills-dashboard-tab" data-toggle="pill"
+                        href="#v-pills-dashboard" role="tab" aria-controls="v-pills-dashboard"
+                        aria-selected="false"><img src="static/images/svg-icon/frontend.svg" class="img-fluid"
+                            alt="Dashboard" data-toggle="tooltip" data-placement="top" title="Home" data-t-title="lang_home_title" loading="lazy" decoding="async"></a>
+                    <!-- Order is the owner's: Home, Purchase, Inventory. -->
+                    <a data-module="receiving" data-access="read||write||delete" class="nav-link nav-link-active"
+                        id="v-pills-purchase-tab" data-toggle="pill" href="#v-pills-purchase" role="tab"
+                        aria-controls="v-pills-purchase" aria-selected="true"><img
+                            src="static/images/svg-icon/shopping-cart.svg" class="img-fluid" alt="Purchase"
+                            data-toggle="tooltip" data-placement="top" title="Purchase" data-t-title="lang_newpurchase_title" loading="lazy" decoding="async"></a>
+                    <a class="nav-link nav-link-active" id="v-pills-inventory-tab" data-toggle="pill"
+                        href="#v-pills-inventory" role="tab" aria-controls="v-pills-inventory"
+                        aria-selected="false"><img src="static/images/svg-icon/clipboard.svg" class="img-fluid"
+                            alt="Inventory" data-toggle="tooltip" data-placement="top" title="Inventory" data-t-title="lang_inventory_title" loading="lazy" decoding="async"></a>
+                    <a data-module="customer" data-access="read||write||delete" class="nav-link nav-link-active"
+                        id="v-pills-customer-tab" data-toggle="pill" href="#v-pills-customer" role="tab"
+                        aria-controls="v-pills-customer" aria-selected="false"><img src="static/images/svg-icon/crm.svg"
+                            class="img-fluid" alt="customer" data-toggle="tooltip" data-placement="top"
+                            title="Customers" data-t-title="lang_customer_title" loading="lazy" decoding="async"></a>
+                    <a data-module="report" data-access="read" class="nav-link nav-link-active" id="v-pills-report-tab"
+                        data-toggle="pill" href="#v-pills-report" role="tab" aria-controls="v-pills-report"
+                        aria-selected="false"><img src="static/images/svg-icon/bar-chart.svg" class="img-fluid"
+                            alt="Report" data-toggle="tooltip" data-placement="top" title="Reports" data-t-title="lang_report_title" loading="lazy" decoding="async"></a>
+                    <a class="nav-link nav-link-active" id="v-pills-manage-tab" data-toggle="pill"
+                        href="#v-pills-manage" role="tab" aria-controls="v-pills-manage" aria-selected="false"><img
+                            src="static/images/svg-icon/settings.svg" class="img-fluid" alt="Manage"
+                            data-toggle="tooltip" data-placement="top" title="Manage" data-t-title="lang_manage_title" loading="lazy" decoding="async"></a>
+                </div>
+            </div>
+
+            <div class="vertical-menu-detail">
+                <div class="logobar">
+                    <h1 class="title_h2"><lang class="lang_posnic">Posnic</lang></h1>
+                    <!--                    <a href="https://www.posnic.com" class="logo logo-large"><img src="static/images/logo.svg" class="img-fluid" alt="logo" loading="lazy" decoding="async"></a>-->
+                </div>
+
+                <div class="tab-content" id="v-pills-tabContent">
+
+                    <div class="tab-pane fade tab-pane-active" id="v-pills-dashboard" role="tabpanel"
+                        aria-labelledby="v-pills-dashboard-tab">
+                        <ul class="vertical-menu">
+                            <li>
+                                <h5 class="menu-title">
+                                    <lang class="lang_home_title">Home</lang>
+                                </h5>
+                            </li>
+                            <li id="dashboardModule" data-module="dashboard" data-access="read"><a href="#/dashboard"
+                                    id="dashboard_page"><img src="static/images/svg-icon/downloading.svg"
+                                        class="img-fluid" alt="dashboard" loading="lazy" decoding="async">
+                                    <lang class="lang_dashboard_title">Dashboard</lang>
+                                </a></li>
+                            <!--
+                                THE FLOOR COMES FIRST, under Dashboard.
+                                Owner: "move KOT below dashboard m menu and
+                                above invoices menu." On a restaurant till the
+                                tables screen is the one somebody opens every
+                                few minutes; it was sitting below Sales
+                                History, four entries down.
+
+                                Online orders travels with it on purpose:
+                                orders held back from the kitchen waiting for
+                                somebody to accept them are the same job at an
+                                earlier moment - the decision that produces
+                                the ticket.
+                            -->
+                            <li id="kot_menu" style="display:none;">
+                                <a href="#/kot" id="view_kot_page">
+                                    <img src="static/images/svg-icon/tables.svg" class="img-fluid" alt="KOT" loading="lazy" decoding="async">
+                                    <lang class="lang_kot_title">KOT - Kitchen Order</lang>
+                                </a>
+                            </li>
+                            <li id="online_orders_menu" style="display:none;">
+                                <a href="#/onlineorders" id="view_onlineorders_page">
+                                    <img src="static/images/svg-icon/shopping-online.svg" class="img-fluid" alt="Online orders" loading="lazy" decoding="async">
+                                    <lang class="lang_online_orders_title">Online orders</lang>
+                                </a>
+                            </li>
+                            <li>
+                                <a data-module="sales" data-access="write" href="#/sales/new" id="view_touchsales_page">
+                                    <img src="static/images/svg-icon/bag.svg" class="img-fluid" alt="New Sale" loading="lazy" decoding="async">
+                                    <lang class="lang_addnewsale_title">New Sale</lang>
+                                </a>
+                            </li>
+                            <li id="li_quotes">
+                                <a data-module="sales" data-access="read||write" href="#/quotes"
+                                    class="quotes" id="view_quotes_page">
+                                    <img src="static/images/svg-icon/clipboard.svg" class="img-fluid" alt="Quotes" loading="lazy" decoding="async">
+                                    <lang class="lang_quotes_title">Quotes</lang>
+                                </a>
+                            </li>
+                            <li id="li_invoices">
+                                <a data-module="sales" data-access="read||write" href="#/invoices"
+                                    class="invoices" id="view_invoices_page">
+                                    <img src="static/images/svg-icon/billing.svg" class="img-fluid" alt="Invoices" loading="lazy" decoding="async">
+                                    <lang class="lang_invoices_title">Invoices</lang>
+                                </a>
+                            </li>
+                            <li>
+                                <a data-module="sales" data-access="read||write||delete" href="#/sales"
+                                    id="view_sales_page">
+                                    <img src="static/images/svg-icon/shopping-online.svg" class="img-fluid"
+                                        alt="History" loading="lazy" decoding="async">
+                                    <lang class="lang_salehistory_title">Sales History</lang>
+                                </a>
+                            </li>
+                            <!--
+                                ITEM LIST USED TO SIT HERE, and it was the same
+                                page as Inventory > Items - same route, two
+                                entries. Owner: "Item List i dont know why its
+                                here. its supposed to under inventory." It is
+                                already there, so this one is simply gone
+                                rather than moved into a duplicate.
+                            -->
+
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_dashboard" style="display:none;">
+                                <img src="static/images/general/unique-widgets.svg" class="img-fluid logmenu_image mb-3"
+                                    alt="" loading="lazy" decoding="async">
+                            </div>
+
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_newsale" style="display:none;">
+                                <img src="static/images/general/online-salesnew.svg"
+                                    class="img-fluid logmenu_image mb-3" alt="" loading="lazy" decoding="async">
+                            </div>
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_salehistry" style="display:none;">
+                                <img src="static/images/general/online-saleshistory.svg"
+                                    class="img-fluid logmenu_image mb-3" alt="" loading="lazy" decoding="async">
+                            </div>
+
+
+                        </ul>
+                    </div>
+
+                    <div class="tab-pane fade tab-pane-active" id="v-pills-inventory" role="tabpanel"
+                        aria-labelledby="v-pills-inventory-tab">
+                        <ul class="vertical-menu">
+                            <li>
+                                <h5 class="menu-title">
+                                    <lang class="lang_inventory_title">Inventory</lang>
+                                </h5>
+                            </li>
+                            <!--
+                                The Items hub (owner-approved, 2026-08-28,
+                                modeled on how Square/Shopify/Lightspeed group
+                                a catalog): ONE group of sibling pages, Items
+                                is the landing, and the three add doors moved
+                                into the New dropdown on the Items page - a
+                                menu is for places, not verbs.
+                            -->
+                            <li id="itemModule">
+                                <a data-module="item" data-access="read||write||delete" href="#/items"
+                                    id="view_items_page">
+                                    <img src="static/images/svg-icon/webshop.svg" class="img-fluid" alt="Item Details" loading="lazy" decoding="async">
+                                    <lang class="lang_itemdetail_title">Items</lang>
+                                </a>
+                            </li>
+
+                            <li>
+                                <a data-module="item" data-access="write" href="#/pricesettings" id="pricesettings_page">
+                                    <img src="static/images/svg-icon/result.svg" class="img-fluid" alt="Price Settings" loading="lazy" decoding="async">
+                                    <lang class="lang_price_settings">Price Settings</lang>
+                                </a>
+                            </li>
+
+                            <li id="stockModule"><a data-module="branch" data-access="write" href="#/stocklogs"
+                                    class="stocklogs" id="stockReport_page"><img src="static/images/svg-icon/result.svg"
+                                        class="img-fluid" alt="Inventory Log" loading="lazy" decoding="async">
+                                    <lang class="lang_invenlog_title">Inventory Logs</lang>
+                                </a></li>
+
+                            <li id="categoryModule">
+                                <a data-module="category" data-access="read||write||delete" href="#/categories"
+                                    class="categories" id="view_categories_page">
+                                    <img src="static/images/svg-icon/category.svg" class="img-fluid"
+                                        alt="Item Category" loading="lazy" decoding="async">
+                                    <lang class="lang_itemcategory_title">Categories</lang>
+                                </a>
+                            </li>
+
+                            <li id="variantModule">
+                                <a data-module="item" data-access="read||write||delete" href="#/variants"
+                                    class="variants" id="view_variants_page">
+                                    <img src="static/images/svg-icon/variant.svg" class="img-fluid" alt="Item Variant" loading="lazy" decoding="async">
+                                    <lang class="lang_itemvariant_title">Variants</lang>
+                                </a>
+                            </li>
+
+                            <li id="unitsModule">
+                                <a data-module="branch" data-access="write" href="#/units" id="view_units_page">
+                                    <img src="static/images/svg-icon/result.svg" class="img-fluid" alt="Units" loading="lazy" decoding="async">
+                                    <lang class="lang_units_title">Units</lang>
+                                </a>
+                            </li>
+
+
+                            <li id="itemLowModule">
+                                <a data-module="item" data-access="read||write||delete" href="#/lowstockitems"
+                                    id="view_itemslow_page">
+                                    <img src="static/images/svg-icon/sales-report.svg" class="img-fluid"
+                                        alt="Low stock Details" loading="lazy" decoding="async">
+                                    <lang class="lang_lowstockdetail_title">Low Stock</lang>
+                                </a>
+                            </li>
+
+
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_inventory" style="display:none;">
+                                <img src="static/images/general/inventory-log.jpg" class="img-fluid logmenu_image mb-3"
+                                    alt="" loading="lazy" decoding="async">
+                            </div>
+
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_itemcatgory" style="display:none;">
+                                <img src="static/images/general/item-category-logo.svg"
+                                    class="img-fluid logmenu_image mb-3" alt="" loading="lazy" decoding="async">
+
+                            </div>
+
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_itemvariant" style="display:none;">
+                                <img src="static/images/general/online-varianti.svg"
+                                    class="img-fluid logmenu_image mb-3" alt="" loading="lazy" decoding="async">
+                            </div>
+
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_itemdetail" style="display:none;">
+                                <img src="static/images/general/online-item.svg" class="img-fluid logmenu_image mb-3"
+                                    alt="" loading="lazy" decoding="async">
+                            </div>
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_lowstock" style="display:none;">
+                                <img src="static/images/general/online-lowstock.svg"
+                                    class="img-fluid logmenu_image mb-3" alt="" loading="lazy" decoding="async">
+                            </div>
+
+                        </ul>
+                    </div>
+
+                    <div class="tab-pane fade tab-pane-active" id="v-pills-purchase" role="tabpanel"
+                        aria-labelledby="v-pills-purchase-tab" data-module="receiving"
+                        data-access="read||write||delete">
+                        <ul class="vertical-menu">
+                            <li>
+                                <h5 class="menu-title">
+                                    <lang class="lang_purchse_title">Purchase</lang>
+                                </h5>
+                            </li>
+                            <!--
+                                ONE door for purchasing (owner: "i dont want
+                                two different options... have only one").
+                                New Purchase and Purchase History left the
+                                menu; their routes still work and the
+                                Purchases page carries a button to each, so
+                                every old flow is one click from the one
+                                entry.
+                            -->
+                            <li>
+                                <a data-module="receiving" data-access="read||write" href="#/purchaseorders"
+                                    class="purchaseorders" id="view_purchaseorders_page">
+                                    <img src="static/images/svg-icon/newpurchase.svg" class="img-fluid"
+                                        alt="Purchases" loading="lazy" decoding="async">
+                                    <lang class="lang_po_title">Purchases</lang>
+                                </a>
+                            </li>
+                            <li id="supplierModule">
+                                <a data-module="supplier" data-access="read||write||delete" href="#/suppliers"
+                                    class="suppliers" id="view_suppliers_page">
+                                    <img src="static/images/svg-icon/customers.svg" class="img-fluid" alt="Suppliers" loading="lazy" decoding="async">
+                                    <lang class="lang_supply_title">Supplier List</lang>
+                                </a>
+                            </li>
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_supply" style="display:none;">
+                                <img src="static/images/general/online-suppliers.svg"
+                                    class="img-fluid logmenu_image mb-3" alt="" loading="lazy" decoding="async">
+                            </div>
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_purchase" style="display:none;">
+                                <img src="static/images/general/online-purchase.svg"
+                                    class="img-fluid logmenu_image mb-3" alt="" loading="lazy" decoding="async">
+                            </div>
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_purchasehistory" style="display:none;">
+                                <img src="static/images/general/online-shop-purchase.svg"
+                                    class="img-fluid logmenu_image mb-3" alt="" loading="lazy" decoding="async">
+                            </div>
+
+                        </ul>
+                    </div>
+
+                    <div class="tab-pane fade tab-pane-active" id="v-pills-customer" role="tabpanel"
+                        aria-labelledby="v-pills-customer-tab" data-module="customer" data-access="read||write||delete">
+                        <ul class="vertical-menu">
+                            <li>
+                                <h5 class="menu-title">
+                                    <lang class="lang_customer_title">Customers</lang>
+                                </h5>
+                            </li>
+                            <li data-module="customer" data-access="read||write||delete" id="customerModule"><a
+                                    href="#/customers" class="customers" id="view_customers_page"><img
+                                        src="static/images/svg-icon/testimonial.svg" class="img-fluid" alt="Details" loading="lazy" decoding="async">
+                                    <lang class="lang_customerdetails_title">Customer List</lang>
+                                </a></li>
+                            <li data-module="plan" data-access="read"><a href="#/customercategory"
+                                    id="page_customercategory"><img src="static/images/svg-icon/category.svg"
+                                        class="img-fluid" alt="Details" loading="lazy" decoding="async">
+                                    <lang class="lang_customer_category_title">Customer Category</lang>
+                                </a></li>
+                            <li data-module="plan" data-access="read"><a href="customerview.html" id="customerdisplay"
+                                    target="_blank"><img src="static/images/svg-icon/buy-online.svg" class="img-fluid"
+                                        alt="View" loading="lazy" decoding="async">
+                                    <lang class="lang_customerview_title">Customer Display </lang><img
+                                        src="static/images/svg-icon/newwindowicon.svg" class="img-fluid" alt=""
+                                        style="width: 11px;" loading="lazy" decoding="async">
+                                </a></li>
+                            <li data-module="plan" data-access="read"><a href="customersearch.html" target="_blank"
+                                    id="view_customersearch"><img src="static/images/svg-icon/target.svg"
+                                        class="img-fluid" alt="Search" loading="lazy" decoding="async">
+                                    <lang class="lang_customersearch_title">Catalog Display</lang>&nbsp;<img
+                                        src="static/images/svg-icon/newwindowicon.svg" class="img-fluid" alt=""
+                                        style="width: 11px;" loading="lazy" decoding="async">
+                                </a></li>
+
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_customsearch" style="display:none;">
+                                <img src="static/images/general/online-customsearch.svg"
+                                    class="img-fluid logmenu_image mb-3" alt="" loading="lazy" decoding="async">
+                            </div>
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_customview" style="display:none;">
+                                <img src="static/images/general/online-customview.svg"
+                                    class="img-fluid logmenu_image mb-3" alt="" loading="lazy" decoding="async">
+                            </div>
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_customsdetails" style="display:none;">
+                                <img src="static/images/general/online-customrsdetail.svg"
+                                    class="img-fluid logmenu_image mb-3" alt="" loading="lazy" decoding="async">
+                            </div>
+
+
+                        </ul>
+                    </div>
+
+                    <div class="tab-pane fade tab-pane-active" id="v-pills-report" role="tabpanel"
+                        aria-labelledby="v-pills-report-tab" data-module="report" data-access="read">
+                        <ul class="vertical-menu scroll_width">
+                            <li>
+                                <h5 class="menu-title">
+                                    <lang class="lang_report_title">Reports</lang>
+                                </h5>
+                            </li>
+                            <!--                            <li class="hide_indian_gst disable_indian_gst" style="display:none;"> -->
+                            <li style="display:none;">
+                                <a href="javaScript:void(0)">
+                                    <img src="static/images/svg-icon/backend.svg" class="img-fluid" alt="backend" loading="lazy" decoding="async"><span>
+                                        <lang class="lang_gstreport">GST Reports</lang>
+                                    </span><i class="feather icon-chevron-right"></i>
+                                </a>
+                                <ul class="vertical-submenu in">
+                                    <li><a href="#/gstrOne" id="gstrone_report_page"><lang class="lang_gstr1">GSTR1</lang></a></li>
+                                    <li><a href="#/gstrTwo" id="gstrtwo_report_page"><lang class="lang_gstr2a">GSTR2A</lang></a></li>
+                                    <li><a href="#/gstrTwob" id="gstrtwob_report_page"><lang class="lang_gstr2b">GSTR2B</lang></a></li>
+                                    <li><a href="#/gstrThree" id="gstrthree_report_page"><lang class="lang_gstr3b">GSTR3B</lang></a></li>
+                                    <li><a href="#/gstrNine" id="gstrnine_report_page"><lang class="lang_gstr9">GSTR9</lang></a></li>
+
+                                </ul>
+                            </li>
+                            <li><a href="#/quickreport" id="rgrp_sales_page"><img src="static/images/svg-icon/shopping-cart.svg" class="img-fluid" alt="Sales" loading="lazy" decoding="async">
+                                    <lang class="lang_rgrp_sales">Sales</lang>
+                                </a></li>
+                            <li><a href="#/receivingreport" id="rgrp_purchase_page"><img src="static/images/svg-icon/newpurchase.svg" class="img-fluid" alt="Purchase" loading="lazy" decoding="async">
+                                    <lang class="lang_rgrp_purchase">Purchase</lang>
+                                </a></li>
+                            <li><a href="#/itemreport" id="rgrp_inventory_page"><img src="static/images/svg-icon/items.svg" class="img-fluid" alt="Inventory" loading="lazy" decoding="async">
+                                    <lang class="lang_rgrp_inventory">Inventory</lang>
+                                </a></li>
+                            <li><a href="#/customerreport" id="rgrp_people_page"><img src="static/images/svg-icon/customers.svg" class="img-fluid" alt="People" loading="lazy" decoding="async">
+                                    <lang class="lang_rgrp_people">People</lang>
+                                </a></li>
+                            <li><a href="#/paymentreport" id="rgrp_money_page"><img src="static/images/svg-icon/paymentreport.svg" class="img-fluid" alt="Money" loading="lazy" decoding="async">
+                                    <lang class="lang_rgrp_money">Money</lang>
+                                </a></li>
+                        </ul>
+                    </div>
+
+                    <div class="tab-pane fade tab-pane-active" id="v-pills-manage" role="tabpanel"
+                        aria-labelledby="v-pills-manage-tab">
+                        <ul class="vertical-menu">
+                            <li>
+                                <h5 class="menu-title">
+                                    <lang class="lang_manage_title">Manage</lang>
+                                </h5>
+                            </li>
+                            <!-- Config's middle layer is gone (user call): its
+                                 sections ARE the Manage menu. Entries drive the
+                                 existing #/settings/<section> routes; module
+                                 entries follow their switches (applyModuleSidebar). -->
+                            <li id="settingModule">
+                                <a data-module="branch" data-access="write" href="#/settings/general"
+                                    class="manage-settings-entry" id="manage_sec_general">
+                                    <img src="static/images/svg-icon/web-settings.svg" class="img-fluid" alt="core settings" loading="lazy" decoding="async">
+                                    <lang class="lang_generalset">Core Settings</lang>
+                                </a>
+                            </li>
+                            <li id="branchModule">
+                                <a data-module="branch" data-access="read||write||delete" href="#/branches"
+                                    class="branches" id="view_branches_page">
+                                    <img src="static/images/svg-icon/agency.svg" class="img-fluid"
+                                        alt="branches/outlet" loading="lazy" decoding="async">
+                                    <lang class="lang_branchoutlet_title">Branches / Outlet</lang>
+                                </a>
+                            </li>
+                            <li id="userModule">
+                                <a data-module="user" data-access="read||write||delete" href="#/users" class="users"
+                                    id="view_users_page">
+                                    <img src="static/images/svg-icon/user.svg" class="img-fluid" alt="user" loading="lazy" decoding="async">
+                                    <lang class="lang_user_title">Employees</lang>
+                                </a>
+                            </li>
+                            <!-- Beside Employees, because it answers the same
+                                 kind of question: who, and on what, is taking
+                                 orders in this shop. -->
+                            <li id="handsetsModule">
+                                <a data-module="user" data-access="write" href="#/settings/devices"
+                                    class="manage-settings-entry" id="manage_sec_devices">
+                                    <img src="static/images/svg-icon/tables.svg" class="img-fluid" alt="handsets" loading="lazy" decoding="async">
+                                    <lang class="lang_devices">Devices</lang>
+                                </a>
+                            </li>
+                            <li>
+                                <a data-module="branch" data-access="write" href="#/settings/modules"
+                                    class="manage-settings-entry" id="manage_sec_modules">
+                                    <img src="static/images/svg-icon/apps.svg" class="img-fluid" alt="module on/off" loading="lazy" decoding="async">
+                                    <lang class="lang_modules">Features</lang>
+                                </a>
+                            </li>
+                            <li>
+                                <a data-module="branch" data-access="write" href="#/settings/integrations"
+                                    class="manage-settings-entry" id="manage_sec_integrations">
+                                    <img src="static/images/svg-icon/backend.svg" class="img-fluid" alt="integrations" loading="lazy" decoding="async">
+                                    <lang class="lang_integrations">Integrations</lang>
+                                </a>
+                            </li>
+                            <li id="manage_modules_header"><div class="settings-nav-group report-group"><lang class="lang_navgroup_modules">Features</lang></div></li>
+                            <li id="manage_li_taxmodule">
+                                <a data-module="branch" data-access="write" href="#/settings/taxmodule"
+                                    class="manage-settings-entry" id="manage_sec_taxmodule">
+                                    <img src="static/images/svg-icon/tax.svg" class="img-fluid" alt="tax" loading="lazy" decoding="async">
+                                    <lang class="lang_module_tax">Tax</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_tableorder">
+                                <a data-module="branch" data-access="write" href="#/settings/tableorder"
+                                    class="manage-settings-entry" id="manage_sec_tableorder">
+                                    <img src="static/images/svg-icon/tables.svg" class="img-fluid" alt="restaurant" loading="lazy" decoding="async">
+                                    <lang class="lang_modules_restaurant">Restaurant</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_cashregister">
+                                <a href="#/settings/cashregister"
+                                    class="manage-settings-entry" id="manage_sec_cashregister">
+                                    <img src="static/images/svg-icon/cash-register.svg" class="img-fluid" alt="cash register" loading="lazy" decoding="async">
+                                    <lang class="lang_cash_register">Cash Register</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_workforce">
+                                <a data-module="branch" data-access="write" href="#/settings/workforce"
+                                    class="manage-settings-entry" id="manage_sec_workforce">
+                                    <img src="static/images/svg-icon/calender.svg" class="img-fluid" alt="workforce" loading="lazy" decoding="async">
+                                    <lang class="lang_module_workforce">Workforce</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_cashbook">
+                                <a data-module="expense" data-access="read||write||delete" href="#/settings/cashbook"
+                                    class="manage-settings-entry" id="manage_sec_cashbook">
+                                    <img src="static/images/svg-icon/billing.svg" class="img-fluid" alt="cash book" loading="lazy" decoding="async">
+                                    <lang class="lang_expense_title">Cash Book</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_credit">
+                                <a data-module="branch" data-access="write" href="#/settings/credit"
+                                    class="manage-settings-entry" id="manage_sec_credit">
+                                    <img src="static/images/svg-icon/credit.svg" class="img-fluid" alt="customer credit" loading="lazy" decoding="async">
+                                    <lang class="lang_module_credit">Customer Credit</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_marketingmodule">
+                                <a data-module="branch" data-access="write" href="#/settings/marketingmodule"
+                                    class="manage-settings-entry" id="manage_sec_marketingmodule">
+                                    <img src="static/images/svg-icon/crm.svg" class="img-fluid" alt="marketing" loading="lazy" decoding="async">
+                                    <lang class="lang_module_marketing">Marketing</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_messagingmodule">
+                                <a data-module="branch" data-access="write" href="#/settings/messagingmodule"
+                                    class="manage-settings-entry" id="manage_sec_messagingmodule">
+                                    <img src="static/images/svg-icon/email.svg" class="img-fluid" alt="messaging" loading="lazy" decoding="async">
+                                    <lang class="lang_module_messaging">Messaging</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_onlineordering">
+                                <a data-module="plan" data-access="read" href="#/settings/onlineordering"
+                                    class="manage-settings-entry" id="manage_sec_onlineordering">
+                                    <img src="static/images/svg-icon/shopping-online.svg" class="img-fluid" alt="online ordering" loading="lazy" decoding="async">
+                                    <lang class="lang_module_online_ordering">Online Ordering</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_kioskmachine">
+                                <a data-module="plan" data-access="read" href="#/settings/kioskmachine"
+                                    class="manage-settings-entry" id="manage_sec_kioskmachine">
+                                    <img src="static/images/svg-icon/monitor.svg" class="img-fluid" alt="kiosk machine" loading="lazy" decoding="async">
+                                    <lang class="lang_module_kiosk_machine">Kiosk Machine</lang>
+                                </a>
+                            </li>
+                            <li><a data-module="settings" data-access="write" href="#/settings/mobilepos" class="manage-settings-entry" id="manage_sec_mobilepos"><i class="feather icon-smartphone"></i><span><lang class="lang_module_mobile_pos">Mobile POS</lang></span></a></li>
+                            <li><a data-module="settings" data-access="write" href="#/settings/branchpayments" class="manage-settings-entry" id="manage_sec_branchpayments"><i class="feather icon-credit-card"></i><span><lang class="lang_branch_payments">Branch payments</lang></span></a></li>
+                            <li id="manage_li_captainapp">
+                                <a data-module="plan" data-access="read" href="#/settings/captainapp"
+                                    class="manage-settings-entry" id="manage_sec_captainapp">
+                                    <img src="static/images/svg-icon/tables.svg" class="img-fluid" alt="captain app" loading="lazy" decoding="async">
+                                    <lang class="lang_module_captain">Captain App</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_deliverypartners">
+                                <a data-module="plan" data-access="read" href="#/settings/deliverypartners"
+                                    class="manage-settings-entry" id="manage_sec_deliverypartners">
+                                    <img src="static/images/svg-icon/buy-online.svg" class="img-fluid" alt="delivery partners" loading="lazy" decoding="async">
+                                    <lang class="lang_module_delivery_partners">Delivery Partners</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_webshop">
+                                <a data-module="plan" data-access="read" href="#/settings/webshop"
+                                    class="manage-settings-entry" id="manage_sec_webshop">
+                                    <img src="static/images/svg-icon/webshop.svg" class="img-fluid" alt="webshop" loading="lazy" decoding="async">
+                                    <lang class="lang_module_webshop">Webshop</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_theme">
+                                <a data-module="branch" data-access="write" href="#/settings/theme"
+                                    class="manage-settings-entry" id="manage_sec_theme">
+                                    <img src="static/images/svg-icon/theme.svg" class="img-fluid" alt="themes" loading="lazy" decoding="async">
+                                    <lang class="lang_module_themes">Themes</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_ai">
+                                <a data-module="branch" data-access="write" href="#/settings/ai"
+                                    class="manage-settings-entry" id="manage_sec_ai">
+                                    <img src="static/images/svg-icon/advanced.svg" class="img-fluid" alt="ai assistance" loading="lazy" decoding="async">
+                                    <lang class="lang_module_ai">AI assistance</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_recyclebin">
+                                <a data-module="branch" data-access="write" href="#/settings/recyclebin"
+                                    class="manage-settings-entry" id="manage_sec_recyclebin">
+                                    <img src="static/images/svg-icon/page.svg" class="img-fluid" alt="recycle bin" loading="lazy" decoding="async">
+                                    <lang class="lang_recycle">Recycle Bin</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_demodata">
+                                <a data-module="branch" data-access="write" href="#/settings/demodata"
+                                    class="manage-settings-entry" id="manage_sec_demodata">
+                                    <img src="static/images/svg-icon/bag.svg" class="img-fluid" alt="demo data" loading="lazy" decoding="async">
+                                    <lang class="lang_module_demodata">Demo Data</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_quotes">
+                                <a data-module="branch" data-access="write" href="#/settings/quotes"
+                                    class="manage-settings-entry" id="manage_sec_quotes">
+                                    <img src="static/images/svg-icon/clipboard.svg" class="img-fluid" alt="quotes" loading="lazy" decoding="async">
+                                    <lang class="lang_quotes_title">Quotes</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_invoices">
+                                <a data-module="branch" data-access="write" href="#/settings/invoices"
+                                    class="manage-settings-entry" id="manage_sec_invoices">
+                                    <img src="static/images/svg-icon/billing.svg" class="img-fluid" alt="invoices" loading="lazy" decoding="async">
+                                    <lang class="lang_invoices_title">Invoices</lang>
+                                </a>
+                            </li>
+                            <li id="manage_li_tillpin">
+                                <a data-module="branch" data-access="write" href="#/settings/tillpin"
+                                    class="manage-settings-entry" id="manage_sec_tillpin">
+                                    <img src="static/images/svg-icon/authentication.svg" class="img-fluid" alt="till pin" loading="lazy" decoding="async">
+                                    <lang class="lang_tilllock_title">Till PIN Lock</lang>
+                                </a>
+                            </li>
+                            <!-- Cursor Focus moved under Config (it is configuration);
+                                 the #/device_setup page itself is unchanged. -->
+
+                            <li data-desktop-only><a data-module="branch" data-access="write" href="#/settings/devices" class="manage-settings-entry" id="manage_sec_devices"><i class="feather icon-printer"></i><lang class="lang_desktop_devices">Devices & Printing</lang></a></li>
+                            <li data-desktop-only><a data-module="branch" data-access="write" href="#/settings/app" class="manage-settings-entry" id="manage_sec_app"><i class="feather icon-monitor"></i><lang class="lang_desktop_app">App Settings</lang></a></li>
+                            <li data-desktop-only><a data-module="branch" data-access="write" href="#/settings/updates" class="manage-settings-entry" id="manage_sec_updates"><i class="feather icon-download-cloud"></i><lang class="lang_desktop_updates">Software Updates</lang></a></li>
+                            <li data-desktop-only><a data-module="branch" data-access="write" href="#/settings/backups" class="manage-settings-entry" id="manage_sec_backups"><i class="feather icon-database"></i><lang class="lang_desktop_backups">Backup & Recovery</lang></a></li>
+                            <li data-desktop-only><a data-module="branch" data-access="write" href="#/settings/cloudsync" class="manage-settings-entry" id="manage_sec_cloudsync"><i class="feather icon-cloud"></i><lang class="lang_desktop_cloudsync">Cloud Sync</lang></a></li>
+                            <li data-desktop-only><a data-module="branch" data-access="write" href="#/settings/systemstatus" class="manage-settings-entry" id="manage_sec_systemstatus"><i class="feather icon-activity"></i><lang class="lang_desktop_systemstatus">System Status</lang></a></li>
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_config" style="display:none;">
+                                <img src="static/images/general/config.svg" class="img-fluid logmenu_image mb-3" alt="" loading="lazy" decoding="async">
+                            </div>
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu" id="image_sidebar_user"
+                                style="display:none;">
+                                <img src="static/images/general/online-users.svg" class="img-fluid logmenu_image mb-3"
+                                    alt="" loading="lazy" decoding="async">
+                            </div>
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_cashregister" style="display:none;">
+                                <img src="static/images/general/online-cashregister.svg"
+                                    class="img-fluid logmenu_image mb-3" alt="" loading="lazy" decoding="async">
+                            </div>
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_branch" style="display:none;">
+                                <img src="static/images/general/online-branch.svg" class="img-fluid logmenu_image mb-3"
+                                    alt="" loading="lazy" decoding="async">
+                            </div>
+                            <div class="col-lg-12 text-center margin_image_t dashboard_img_menu"
+                                id="image_sidebar_expense" style="display:none;">
+                                <img src="static/images/general/expense-method.svg" class="img-fluid logmenu_image mb-3"
+                                    alt="" loading="lazy" decoding="async">
+                            </div>
+
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!-- End Navigationbar -->
+    </div>
+    <!-- End Sidebar -->
+</div>

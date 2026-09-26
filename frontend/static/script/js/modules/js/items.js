@@ -1,0 +1,6270 @@
+PosnicPro.items = {
+    itemStatus: '',
+    imageParams: [],
+    form_data: new FormData(),
+    itemAction: 'add',
+
+    /*
+     * Whether this shop can draft descriptions at all.
+     *
+     * Asked once per form open and cached for the session. The shop pays its
+     * own AI provider, so a shop with no key must not see the button: a
+     * control that fails when pressed is worse than one that was never there,
+     * especially on a screen somebody is using with a customer waiting.
+     */
+    _aiAvailable: null,
+
+    aiRefresh: function () {
+        var $btn = $('#items_ai_describe');
+        if (!$btn.length) { return; }
+
+        /* Only a YES is remembered. A no is re-asked every time the form
+           opens, because the thing that turns it into a yes is the
+           shopkeeper walking to settings and pasting a key - and after
+           that they come straight back here expecting a button. */
+        if (PosnicPro.items._aiAvailable === true) {
+            $btn.show();
+            return;
+        }
+        PosnicPro.get('items/aiAvailability', {}, function (r) {
+            var ok = !!(r && r.data && r.data.available);
+            PosnicPro.items._aiAvailable = ok ? true : null;
+            $btn.toggle(ok);
+        }, function () {
+            /* Could not ask, so do not offer - but do not remember it
+               either. A network blip must not hide the button for the rest
+               of the session. */
+            PosnicPro.items._aiAvailable = null;
+            $btn.hide();
+        });
+    },
+
+    /*
+     * Draft a description from what is already on the form.
+     *
+     * Deliberately reads the FORM, not a saved item: the most useful moment
+     * for this is while a new item is being typed, before anything has been
+     * saved at all. The text lands in the textarea and is saved only when the
+     * person saves the item, like anything else they typed there.
+     */
+    aiDescribe: function () {
+        var $btn = $('#items_ai_describe');
+        var $field = $('#items_description');
+        var name = $.trim($('#items_name').val() || '');
+
+        if (!name) {
+            PosnicPro.alert('warning', PosnicPro.i18n.t('lang_enter_the_item_name_first', 'Enter the item name first'));
+            return;
+        }
+        /* Typing over somebody's own words without asking is the kind of
+           thing that makes people stop trusting a button. */
+        if ($.trim($field.val() || '') !== ''
+            && !window.confirm('Replace the description that is already there?')) {
+            return;
+        }
+
+        var original = $btn.html();
+        $btn.html('<i class="fa fa-spinner fa-spin mr-1"></i>Writing...').css('pointer-events', 'none');
+
+        PosnicPro.post({
+            url: 'items/aiDescription',
+            data: JSON.stringify({
+                name: name,
+                category_name: $.trim($('#items_category option:selected').text() || ''),
+                brand: $.trim($('#items_brand').val() || ''),
+                unit: $.trim($('#items_unit option:selected').text() || ''),
+                /* The diet mark is a SELECT, not a radio group. This read
+                   was written against a radio and so matched nothing and
+                   sent nothing, silently, for the life of the button - the
+                   drafter was never told whether a dish was vegetarian. */
+                diet: $.trim($('#item_diet').val() || ''),
+                language: (PosnicPro.local && PosnicPro.local.get('language')) || ''
+            })
+        }, function (response) {
+            $btn.html(original).css('pointer-events', '');
+            if (response && response.type === 'success' && response.data && response.data.description) {
+                $field.val(response.data.description).trigger('change');
+                /* The label floats only when the field is not empty, and it
+                   was empty a moment ago. */
+                $field.focus();
+                return;
+            }
+            PosnicPro.alert('warning', (response && response.message) || 'Could not draft a description');
+        }, function (xhr) {
+            $btn.html(original).css('pointer-events', '');
+            var message = 'Could not draft a description';
+            try {
+                var body = JSON.parse((xhr && xhr.responseText) || '{}');
+                if (body && body.message) { message = body.message; }
+            } catch (e) { /* the default sentence is the fallback */ }
+            PosnicPro.alert('warning', message);
+            /* A refusal - over the monthly cap, key removed, AI switched
+               off - means hide it now, but ask again next time the form
+               opens. Remembering the no would keep the button hidden after
+               the shopkeeper has fixed whatever caused it. */
+            if (xhr && xhr.status === 400) {
+                PosnicPro.items._aiAvailable = null;
+                $('#items_ai_describe').hide();
+            }
+        });
+    },
+    showAdd: function () {
+        PosnicPro.items.aiRefresh();
+        /* A fresh form has no dish on it, so the plate card is emptied and
+           its badge strip redrawn - otherwise the last dish edited leaves its
+           nutrition sitting in the boxes of the next one. */
+        PosnicPro.itemPlate.wire();
+        PosnicPro.itemPlate.aiRefresh();
+        PosnicPro.itemPlate.clear();
+        var loader = $(".loader-item");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        loader.find(".loadingSpinner:first").remove();
+        PosnicPro.HideSideBarModal();
+        // A fresh form belongs to no family.
+        $('#item_family_strip').hide().find('.family-chips').html('');
+        PosnicPro.items._family = null;
+        PosnicPro.items.renderModifierGroups([]);
+        $('#item_discount').hide();
+        $('.nav-link-active,.tab-pane-active,.dropdown-item').removeClass('active');
+        PosnicPro.collapseMenuForWorkspace();
+        $(".vertical-menu li a").removeClass("active");
+        PosnicPro.showAddModal('item');
+        $('.page_loader,#osk-container').hide();
+        $('.page-title-box,#items_new,#item_variant_header').show();
+        $('#v-pills-inventory-tab,#view_items_page,.item_new_shortcut').addClass('active');
+        $('#v-pills-inventory').addClass('show active');
+        $('#v-pills-purchase-tab').removeClass('active');
+        $('#v-pills-purchase').removeClass('show active');
+        $("#items_mfg_date").val('');
+        $("#items_expiry_date").val('');
+        $('#item_upload_image_status').val('no');
+        // IC1c: a fresh entry starts with the essentials; the collapsed
+        // sections open on demand (and always open on edit).
+        // Owner: these sections stay open - nothing on the form hides behind a click.
+        PosnicPro.items.applyHardwareGates();
+        PosnicPro.items.applyTaxGate();
+        PosnicPro.items.addItemButton();
+        $('#items_reset').show();
+        $('.items_edit_reset').hide();
+        if (PosnicPro.items.itemAction === 'edit') {
+            PosnicPro.items.itemClearForm();
+        }
+        PosnicPro.items.itemAction = 'add';
+        PosnicPro.itemDayparts.set([]);
+        
+        // Apply discount from selected category
+        setTimeout(function() {
+            var selectedOption = $('.items_category').find('option:selected')[0];
+            if (selectedOption) {
+                console.log('triggerAddNew: Applying discount from category');
+                PosnicPro.items.applyCategoryDiscount(selectedOption);
+            }
+        }, 500);
+    },
+    showClone: function (id) {
+        var loader = $(".loader-item");
+        loader.find(".loadingSpinner:first").remove();
+        PosnicPro.items.cloneItem(id);
+    },
+    showEdit: function (id) {
+        PosnicPro.items.aiRefresh();
+        /* Cleared here too: the read below fills it from the saved dish, and
+           if that read is slow or fails the boxes must not still be showing
+           whatever was open a moment ago. */
+        PosnicPro.itemPlate.wire();
+        PosnicPro.itemPlate.aiRefresh();
+        PosnicPro.itemPlate.clear();
+        var loader = $(".loader-item");
+        loader.find(".loadingSpinner:first").remove();
+        $('#product_without_variant').prop('checked', true);
+        $('#product_with_variant').prop('checked', false);
+
+        $('#show_variant_fields').hide();
+        $('#show_price_fields,#sku_card_col').show();
+        $("#load_price_fields").html('');
+        $("#show-hide-item-discount").show();
+        $('#item_variant_header').hide();
+
+        PosnicPro.showEditModal('items');
+        PosnicPro.items.applyHardwareGates();
+        // Editing is a see-everything visit: open the collapsed sections so
+        // stored description/images/dates/flags are never hidden state.
+        $('#item_details_collapse, #item_extras_collapse').collapse('show');
+        PosnicPro.items.editItem(id);
+        $('#item_discount').show();
+        $('#v-pills-inventory-tab').addClass('active');
+        $('#v-pills-inventory').addClass('show active');
+        $('#items_reset').hide();
+        $('.items_edit_reset').show();
+        // The record id rides data-id; overwriting the DOM id broke every
+        // later #items_edit_reset selector.
+        $('.items_edit_reset').attr('data-id', id);
+        $('.error_item').css('display', 'none');
+        PosnicPro.items.itemAction = 'edit';
+    },
+    showDelete: function (id) {
+        PosnicPro.deleteTableRowData(id, 'items');
+    },
+    /* Tile colour: keep the hidden input and the swatch highlight in step. */
+    /* LS1: the comma-separated tags field as a clean array. */
+    _tagList: function () {
+        return ($('#items_tags').val() || '').split(',')
+            .map(function (t) { return t.trim(); })
+            .filter(function (t) { return t.length > 0; });
+    },
+    /*
+     * Take the form to a tab, and put the cursor where it is wanted.
+     *
+     * A tabbed form can fail somewhere you cannot see: jQuery Validate focuses
+     * the first invalid field, and if that field is on a hidden pane the focus
+     * goes nowhere, the message renders off-screen, and Save looks like it did
+     * nothing at all. Switching to the pane first is what makes the error
+     * visible (owner ask).
+     */
+    goToTab: function (paneId, focusSelector) {
+        var $link = $('#item_form_tabs .nav-link[data-tab-pane="' + paneId + '"]');
+        if (!$link.length) { return; }
+        if (!$link.hasClass('active')) { $link.tab('show'); }
+        if (!focusSelector) { return; }
+        /* After the pane is shown, or the field is still display:none and the
+           browser refuses to focus it. */
+        setTimeout(function () {
+            var $f = $(focusSelector).first();
+            if (!$f.length) { return; }
+            var $target = $f.hasClass('select2-hidden-accessible') ? $f.next('.select2-container') : $f;
+            if ($target.is(':visible')) { $f.trigger('focus'); }
+        }, 160);
+    },
+
+    /* Which pane a field lives on, or nothing if it is not on one. */
+    tabOf: function (el) {
+        var pane = $(el).closest('#item_form_tabs_content > .tab-pane');
+        return pane.length ? pane.attr('id') : '';
+    },
+
+    /*
+     * The tile this item will actually get, shown while it is being typed.
+     *
+     * The swatches sat unselected, so "no image" read as "no appearance". It was
+     * never true: an item saved without a chosen colour still gets one, because
+     * the save falls back to PosnicPro.autoTile(name) and persists it.
+     *
+     * NOT random, and that is the point. The colour is a hash of the item NAME,
+     * so the same item is the same colour on every till and after every restart.
+     * A sale grid is navigated by recognition - "the red one is Coke" - and a
+     * colour that changes between sessions is worse than no colour, because it
+     * teaches a habit and then breaks it.
+     */
+    refreshTilePreview: function () {
+        var $box = $('#item_tile_preview');
+        if (!$box.length) { return; }
+
+        var chosenColor = $('#item_tile_color').val() || '';
+        var chosenShape = $('#item_tile_shape').val() || '';
+        var name = $.trim($('#items_name').val() || '');
+        var auto = (typeof PosnicPro.autoTile === 'function')
+            ? PosnicPro.autoTile(name)
+            : { color: '', shape: 'rounded' };
+
+        var color = chosenColor || auto.color;
+        var shape = chosenShape || auto.shape;
+        var automatic = !chosenColor && !chosenShape;
+
+        /* Nothing to preview before the item is named - the hash of an empty
+           string is a colour, but showing it invites picking it as if it meant
+           something. */
+        if (!name) { $box.hide(); return; }
+
+        var radius = shape === 'circle' ? '50%' : (shape === 'rounded' ? '10px' : '3px');
+        var clip = shape === 'diamond' ? 'polygon(50% 0,100% 50%,50% 100%,0 50%)' : 'none';
+
+        $box.find('.tile-preview-swatch').css({
+            background: color,
+            'border-radius': radius,
+            'clip-path': clip
+        });
+        $box.find('.tile-preview-note').text(
+            automatic ? PosnicPro.i18n.t('lang_chosen_from_the_name_pick_a_colour_below_t', 'Chosen from the name - pick a colour below to change it') : PosnicPro.i18n.t('lang_your_choice', 'Your choice')
+        );
+        $box.show();
+    },
+
+    /*
+     * A picture for a dish nobody photographed.
+     *
+     * SUGGESTED, NOT ASKED FOR. A shop with three hundred items will upload no
+     * photographs and will pick no emoji either, so the name is read and an
+     * icon appears with nobody doing anything. This form is only where the
+     * handful the shop disagrees with get corrected.
+     *
+     * The suggestion comes from the SERVER. The same keyword table shipped
+     * twice is a table that can drift, and the drift shows up as a shopkeeper
+     * being shown one picture while their customers are shown another - which
+     * nobody reports, because nobody sees both screens at once.
+     */
+    _iconSuggested: '',
+    _iconTimer: null,
+
+    /* Debounced: this fires while somebody is typing a name. */
+    suggestIcon: function () {
+        clearTimeout(PosnicPro.items._iconTimer);
+        PosnicPro.items._iconTimer = setTimeout(function () {
+            var name = $.trim($('#items_name').val() || '');
+            if (!name) {
+                PosnicPro.items._iconSuggested = '';
+                PosnicPro.items.refreshIcon();
+                return;
+            }
+            PosnicPro.get('items/icon-suggestion', { name: name }, function (r) {
+                PosnicPro.items._iconSuggested = (r && r.data && r.data.icon) || '';
+                PosnicPro.items.refreshIcon();
+            }, function () {
+                /* No suggestion is a fine outcome: the picker still works, and
+                   an empty icon is an honest menu card. */
+            });
+        }, 350);
+    },
+
+    setIcon: function (icon) {
+        $('#item_icon').val(icon || '');
+        PosnicPro.items.refreshIcon();
+    },
+
+    refreshIcon: function () {
+        var $row = $('#item_icon_row');
+        if (!$row.length) { return; }
+
+        var chosen = $('#item_icon').val() || '';
+        var shown = chosen || PosnicPro.items._iconSuggested || '';
+        var logo = $('#item_logo').val() || '';
+        var hasPhoto = !!logo && logo !== 'item.svg';
+
+        /* A photograph beats this, and a control that cannot affect anything
+           should not ask for a decision - the same rule the colour and the
+           shape beside it already follow. */
+        $row.toggle(!hasPhoto);
+
+        $('#item_icon_preview').text(shown);
+        $('#item_icon_note').text(
+            !shown ? 'No icon. The card will show the name alone.'
+                : chosen ? 'Chosen for this item.'
+                    : 'Suggested from the name. Tap another to change it.'
+        );
+        $('#item_icon_clear').toggle(!!chosen);
+        $('#item_icon_choices .icon-choice')
+            .removeClass('is-picked')
+            .css('border-color', 'transparent')
+            .filter(function () { return ($(this).text() || '') === shown; })
+            .addClass('is-picked')
+            .css('border-color', '#2d9cdb');
+    },
+
+    /* The grid, drawn once. Deliberately short: a thousand-emoji picker is a
+       worse experience than a few dozen good ones, and the keyboard covers
+       everything else. */
+    drawIconChoices: function () {
+        var $host = $('#item_icon_choices');
+        if (!$host.length || $host.children().length) { return; }
+        var PALETTE = [
+            '🍛', '🍚', '🍜', '🍲', '🥘', '🍝', '🍕', '🍔', '🌯', '🥪', '🌮', '🥙',
+            '🍗', '🍖', '🥩', '🍤', '🐟', '🦀', '🥚', '🧀', '🍄', '🥔', '🌽', '🥬',
+            '🥞', '🫓', '🍞', '🥐', '🍟', '🍢', '🥟', '🍩', '🥗', '🫘', '🥣', '🍽️',
+            '☕', '🍵', '🥤', '🧃', '🥛', '🧋', '💧', '🍺', '🍷', '🍸', '🧉', '🍹',
+            '🍨', '🍰', '🍪', '🍫', '🍬', '🍮', '🍿', '🍯', '🧁', '🥧', '🍓', '🥭',
+            '🧼', '🧴', '🧻', '🪥', '🔋', '💡', '🖊️', '📒', '🛍️', '🧂', '🌾', '💊'
+        ];
+        $host.html(PALETTE.map(function (icon) {
+            return '<span class="icon-choice" style="width:32px;height:32px;display:inline-flex;'
+                + 'align-items:center;justify-content:center;font-size:19px;line-height:1;'
+                + 'cursor:pointer;border:1.5px solid transparent;border-radius:6px;">'
+                + icon + '</span>';
+        }).join(''));
+    },
+
+    setTileShape: function (shape) {
+        $('#item_tile_shape').val(shape || '');
+        $('#item_tile_shapes .tile-shape').removeClass('is-picked').filter(function () {
+            return ($(this).data('shape') || '') === (shape || '');
+        }).addClass('is-picked');
+        PosnicPro.items.refreshTilePreview();
+    },
+    setTileColor: function (color) {
+        $('#item_tile_color').val(color || '');
+        $('#item_tile_swatches .tile-swatch').removeClass('is-picked').filter(function () {
+            return ($(this).data('color') || '') === (color || '');
+        }).addClass('is-picked');
+        PosnicPro.items.refreshTilePreview();
+    },
+    /* Services (Q3): a service holds no stock - the stock-ish inputs step
+       aside and the pricing unit select appears. The server forces
+       track_inventory off regardless, so this is presentation only. */
+    applyServiceMode: function () {
+        var isService = $('#item_is_service').is(':checked');
+        /* The whole style attribute is replaced, so it must not carry sizing any
+           more: the select sits in a flex row now and CSS owns its width. It
+           used to set width:auto here, which fought the row and left the unit
+           hanging off the checkbox label instead of lining up with the fields.
+           The !important is still needed to beat the markup's own inline hide. */
+        $('#item_service_unit').attr('style', isService ? '' : 'display:none !important;');
+        // a service holds no stock: opening qty and reorder vanish wherever
+        // their column lives (the old .col-md-6 anchor rotted silently)
+        $('#items_available_quantity, #items_reorder_point').closest('[class*="col-"]').toggle(!isService);
+        $('#items_barcodes_alt, #items_purchase_unit, #items_conversion_factor').closest('.form-row').toggle(!isService);
+        /*
+         * A service cannot be a variant family, so the offer goes away.
+         *
+         * Not because priced tiers of a service are meaningless - "Haircut /
+         * Men", "Massage / 60 min" are perfectly real - but because the rows
+         * this form builds for a family are stock rows: SKU, barcode, opening
+         * quantity, units, shelf position. _sharedItemFields stamps
+         * item_kind:'service' onto every one of them, so the combination saves
+         * services carrying stock counts, which nothing downstream can mean.
+         *
+         * Offering a choice that produces contradictory data is worse than not
+         * offering it. Service tiers are worth building properly later, as
+         * priced options on ONE service rather than a family of stock records.
+         */
+        $('#variant_mode_link').toggle(!isService);
+        if (isService && $('#product_with_variant').is(':checked')) {
+            /* Said out loud rather than silently reverted - anything already
+               typed into the variant rows is about to be cleared. */
+            $('#product_without_variant').prop('checked', true).trigger('change');
+            PosnicPro.alert('info', PosnicPro.i18n.t('lang_variants_are_for_stocked_products_this_is', 'Variants are for stocked products - this is now a single service'));
+        }
+    },
+    /* A shop with tax switched off never sees the Tax card (owner ask). */
+    applyTaxGate: function () {
+        var taxOff = PosnicPro.local.get('default_tax_enable_disable') === 'false'
+            && PosnicPro.local.get('gst_action') !== 'enable';
+        $("input[name='hsntax_radio_value']").closest('.card').toggle(!taxOff);
+    },
+    /* The weight-scale flag only means anything when the weight-machine
+       hardware module is on - the sales side gates on the same setting. */
+    applyHardwareGates: function () {
+        var settings = null;
+        try { settings = JSON.parse(PosnicPro.local.get('general_settings') || 'null'); } catch (e) { /* defaults */ }
+        var weightOn = !!(settings && settings.hardware_weight_machine_enable);
+        $('#item_weight_flag_wrap').toggle(weightOn);
+        if (!weightOn) { $('#item_weight_machine_based').prop('checked', false); }
+    },
+    /* #/items/<id>: the dossier opens in the right pane - never a popup. */
+    showDetails: function (id) {
+        var self = PosnicPro.items;
+        if (self._openDocId === String(id) && $('#items_detail_card').is(':visible')) { return; }
+        self._chrome();
+        self.loadList(1);
+        self.openDoc(id);
+    },
+    showBarcode: function (id) {
+        PosnicPro.items.printLableView(id);
+    },
+    /*
+     * The shared filter bar, on the item list.
+     *
+     * The five controls this replaces (date range, field selector, search box,
+     * Apply, Clear) worked, but could not say a filter was ON: the panel closes
+     * and takes them with it, so a list narrowed to one category looks exactly
+     * like a shop with one category. The count on the button is visible whether
+     * the panel is open or not, which is the case that matters.
+     *
+     * It writes into data('filters') and calls the SAME itemsTable as before,
+     * rather than changing how the list loads. The endpoint keeps taking the
+     * blob it always took - see listFilter.legacyFilters, which builds the same
+     * regex PosnicPro.search built, so adopting the bar does not silently
+     * change which rows a shop's existing habits return.
+     *
+     * No Apply button on purpose. A filter you have to confirm is one you can
+     * forget to, and the debounce in the bar already stops a request per
+     * keystroke.
+     */
+    mountFilters: function () {
+        if (!$('#items_filter_panel').length) { return; }
+        PosnicPro.listFilter.mount({
+            key: 'items',
+            container: '#items_filter_panel',
+            button: '#items_filter_btn',
+            searchPlaceholder: PosnicPro.i18n.t('lang_search_name_sku_or_barcode', 'Search name, SKU or barcode'),
+            dateField: PosnicPro.i18n.t('lang_updated', 'Updated'),
+            searchFields: [
+                { value: 'all', label: PosnicPro.i18n.t('lang_all_fields', 'All fields') },
+                { value: 'name', label: PosnicPro.i18n.t('lang_name_title', 'Name') },
+                { value: 'category_name', label: PosnicPro.i18n.t('lang_newcategory_title', 'Category') },
+                { value: 'itemid', label: PosnicPro.i18n.t('lang_sku_title', 'SKU') },
+                { value: 'barcode_id', label: PosnicPro.i18n.t('lang_barcode_title', 'Barcode') }
+            ],
+            onChange: function () { PosnicPro.items.loadList(1); }
+        });
+        PosnicPro.listSort.mount('items', {
+            options: [
+                { v: 'recent', l: PosnicPro.i18n.t('lang_recently_updated', 'Recently updated'), i: 'clock' },
+                { v: 'margin_desc', l: PosnicPro.i18n.t('lang_high_margin_first', 'High margin first'), i: 'trending-up' },
+                { v: 'margin_asc', l: PosnicPro.i18n.t('lang_low_margin_first', 'Low margin first'), i: 'trending-down' },
+                { v: 'stock_asc', l: PosnicPro.i18n.t('lang_low_stock_first', 'Low stock first'), i: 'alert-triangle' },
+                { v: 'price_desc', l: PosnicPro.i18n.t('lang_price_high_to_low', 'Price: high to low'), i: 'arrow-down' },
+                { v: 'price_asc', l: PosnicPro.i18n.t('lang_price_low_to_high', 'Price: low to high'), i: 'arrow-up' },
+                { v: 'cost_desc', l: PosnicPro.i18n.t('lang_cost_high_to_low', 'Cost: high to low'), i: 'arrow-down' },
+                { v: 'name', l: PosnicPro.i18n.t('lang_name_a_to_z', 'Name A to Z'), i: 'type' }
+            ],
+            onChange: function () { PosnicPro.items.loadList(1); }
+        });
+    },
+
+    _page: 1,
+    PAGE_SIZE: 25,
+    _lastRows: [],
+    _openDocId: null,
+    /* The name the OLD table machinery answered to. Save flows (bulk price,
+       stock adjust, bulk stock, save-from-receiving) and the shared
+       clearListFilters/refresh doors still call <module>Table - without the
+       alias every one of them throws after a successful save. */
+    itemsTable: function () {
+        PosnicPro.items.loadList(1);
+    },
+    loadList: function (page) {
+        PosnicPro.items.mountFilters();
+        var self = PosnicPro.items;
+        if (page) { self._page = page; }
+        var filters = PosnicPro.listFilter.legacyFilters('items', { dateKey: 'updated_date' });
+        var esc = function (t) { return $('<span>').text(t == null ? '' : t).html(); };
+        PosnicPro.get({
+            url: 'items',
+            data: (function () {
+                var d = { page: self._page, limit: self.PAGE_SIZE, filters: JSON.stringify(filters) };
+                var sv = PosnicPro.listSort.value('items');
+                if (sv) { d.sort = sv; }
+                return d;
+            }())
+        }, function (response) {
+            var data = (response && response.data) || {};
+            var list = data.list || [];
+            self._lastRows = list;
+            if (!list.length) {
+                var filtered = PosnicPro.listFilter.activeCount('items') > 0;
+                $('#items_list_rows').html('<div class="text-center text-muted p-t-20 p-b-20">'
+                    + (filtered ? PosnicPro.i18n.t('lang_no_items_match_this_filter', 'No items match this filter.') : PosnicPro.i18n.t('lang_no_items_yet_press_new_to_add_the_first', 'No items yet - press New to add the first.')) + '</div>');
+                $('#items_list_paging').html('');
+                return;
+            }
+            var cur = PosnicPro.local.get('currencySign');
+            var html = '<div class="table-responsive"><table class="table table-borderless">'
+                + '<thead><tr><th style="width:44px;"></th><th><lang class="lang_name_title">Name</lang></th><th class="i-col-sku"><lang class="lang_sku_title">SKU</lang></th>'
+                + '<th class="i-col-category"><lang class="lang_newcategory_title">Category</lang></th><th class="i-col-supplier"><lang class="lang_newsupplier_title">Supplier</lang></th>'
+                + '<th class="text-right"><lang class="lang_stock">Stock</lang></th>'
+                + '<th class="text-right i-col-cost"><lang class="lang_companyamount_title">Cost</lang></th>'
+                + '<th class="text-right i-col-price"><lang class="lang_price_title">Price</lang></th>'
+                + '<th class="text-right i-col-margin"><lang class="lang_margin">Margin</lang></th>'
+                + '<th class="text-right i-col-tax"><lang class="lang_module_tax">Tax</lang></th>'
+                + '</tr></thead><tbody>';
+            list.forEach(function (r) {
+                var unit = r.unit || 'qty';
+                var thumb;
+                var tile = PosnicPro.resolveTile ? PosnicPro.resolveTile(r) : { color: r.tile_color, shape: r.tile_shape };
+                if ((!r.image || r.image === 'item.svg') && tile.color) {
+                    var shape = tile.shape === 'circle' ? 'border-radius:50%;' : 'border-radius:6px;';
+                    thumb = '<span style="display:inline-flex;width:32px;height:32px;' + shape
+                        + 'background:' + esc(tile.color) + ';color:#fff;font-weight:700;font-size:13px;align-items:center;justify-content:center;">'
+                        + esc(String(r.name || '?').trim().charAt(0).toUpperCase()) + '</span>';
+                } else {
+                    var img = (r.image && r.image !== 'item.svg') ? r.image : 'static/images/default/item.svg';
+                    thumb = '<img loading="lazy" decoding="async" src="' + esc(img) + '" width="32" height="32" style="object-fit:cover;border-radius:6px;"'
+                        + " onerror=\"this.onerror=null;this.src='static/images/default/item.svg';\">";
+                }
+                var tracked = r.track_inventory === true || r.track_inventory === 'true';
+                var low = tracked && Number(r.available_quantity) <= Number(r.low_stock || 0);
+                var stockCell = tracked
+                    ? (low ? '<span class="rs-pill unpaid">' : '<span>') + esc(r.available_quantity) + ' ' + esc(unit) + (low ? '</span>' : '</span>')
+                    : '<span class="q-muted">-</span>';
+                /* The margin the shop actually keeps on a unit - the number a
+                   retailer scans a catalogue for. Blank when either price is
+                   missing: a made-up 100% is worse than a dash. */
+                var cost = Number(r.company_price) || 0;
+                var sell = Number(r.selling_price) || 0;
+                var marginCell = (cost > 0 && sell > 0)
+                    ? (((sell - cost) / sell) * 100).toFixed(1) + '%'
+                    : '-';
+                var taxCell = (Number(r.tax) > 0) ? Number(r.tax) + '%' : '-';
+                html += '<tr class="md-row items-row highlight-select' + (self._openDocId === String(r._id) ? ' is-active' : '') + '"'
+                    + ' data-id="' + esc(r._id) + '" style="cursor:pointer;">'
+                    + '<td>' + thumb + '</td>'
+                    + '<td>' + esc(r.name) + '</td>'
+                    + '<td class="i-col-sku">' + esc(r.itemid || '-') + '</td>'
+                    + '<td class="i-col-category">' + esc(r.category_name || '-') + '</td>'
+                    + '<td class="i-col-supplier">' + esc(r.supplier_name || '-') + '</td>'
+                    + '<td class="text-right">' + stockCell + '</td>'
+                    + '<td class="text-right i-col-cost q-muted">' + (cost > 0 ? cur + '&nbsp;' + cost.toFixed(2) : '-') + '</td>'
+                    + '<td class="text-right i-col-price">' + cur + '&nbsp;' + sell.toFixed(2) + '</td>'
+                    + '<td class="text-right i-col-margin">' + marginCell + '</td>'
+                    + '<td class="text-right i-col-tax q-muted">' + taxCell + '</td>'
+
+                    + '</tr>';
+            });
+            html += '</tbody></table></div>';
+            $('#items_list_rows').html(html);
+            self.renderPager(Number(data.total) || list.length);
+        }, function () {
+            $('#items_list_rows').html('<div class="text-center text-muted p-t-20 p-b-20"><lang class="lang_could_not_load_items_try_again">Could not load items - try again.</lang></div>');
+        });
+    },
+    renderPager: function (total) {
+        var self = PosnicPro.items;
+        var p = self._page, size = self.PAGE_SIZE;
+        var pages = Math.ceil(total / size) || 1;
+        var label = total + ' ' + (total === 1 ? PosnicPro.i18n.t('lang_item', 'item') : PosnicPro.i18n.t('lang_items', 'items'));
+        if (pages > 1) { label = 'Page ' + p + ' of ' + pages + ' \u00b7 ' + label; }
+        var btn = function (to, text, off, cls) {
+            return '<button type="button" class="btn btn-sm ' + (cls || 'btn-secondary-rgba') + ' q-pg-btn"' + (off ? ' disabled' : '')
+                + ' onclick="PosnicPro.items.goPage(' + to + ');">' + text + '</button>';
+        };
+        var html = '';
+        if (pages > 1) {
+            html += btn(p - 1, '&laquo;', p <= 1);
+            var end = Math.min(pages, Math.max(1, p - 2) + 4);
+            var start = Math.max(1, end - 4);
+            for (var n = start; n <= end; n++) {
+                html += '<span class="q-pg-num">' + btn(n, n, false, n === p ? 'btn-primary-rgba' : 'btn-secondary-rgba') + '</span>';
+            }
+        }
+        html += '<span class="q-pg-count">' + label + '</span>';
+        if (pages > 1) { html += btn(p + 1, '&raquo;', p >= pages); }
+        $('#items_list_paging').html(html);
+    },
+    goPage: function (n) {
+        if (!n || n < 1) { return; }
+        PosnicPro.items._page = n;
+        PosnicPro.items.loadList();
+    },
+    _csvSpec: function () {
+        return {
+            head: ['Name', 'SKU', 'Category', 'Stock', 'Unit', 'Selling price', 'Cost'],
+            map: function (r) {
+                return [r.name, r.itemid || '', r.category_name || '', r.available_quantity, r.unit || 'qty', r.selling_price, r.company_price || ''];
+            }
+        };
+    },
+    exportCsv: function () {
+        var spec = PosnicPro.items._csvSpec();
+        PosnicPro.listExport.save(
+            [spec.head].concat((PosnicPro.items._lastRows || []).map(spec.map)), 'items.csv');
+    },
+    /* Everything matching the CURRENT filter, paged through the same
+       endpoint the list reads - never a shapeless full dump. */
+    exportAllCsv: function () {
+        var spec = PosnicPro.items._csvSpec();
+        PosnicPro.listExport.all({
+            url: 'items',
+            params: function (page, limit) {
+                return (function () { var d = { page: page, limit: limit, filters: JSON.stringify(PosnicPro.listFilter.legacyFilters('items', { dateKey: 'updated_date' })) }; var sv = PosnicPro.listSort.value('items'); if (sv) { d.sort = sv; } return d; }());
+            },
+            head: spec.head,
+            map: spec.map,
+            filename: 'items.csv'
+        });
+    },
+    /* ---- the dossier pane ---- */
+    openDoc: function (id) {
+        var self = PosnicPro.items;
+        if (!PosnicPro.masterDetail.inSplit('#items_split', 'items-split')) {
+            PosnicPro.masterDetail.enter('#items_split', 'items-split');
+            $('#items_detail_card').show();
+        }
+        self._openDocId = String(id);
+        $('#items_list_rows tr.items-row').removeClass('is-active');
+        $('#items_list_rows tr.items-row[data-id="' + id + '"]').addClass('is-active');
+        if (window.location.hash.slice(2) !== 'items/' + id) {
+            hasher.setHash('items/' + id);
+        }
+        $('#items_doc').html('<div class="text-center text-muted" style="padding:60px;"><lang class="lang_loading_4">Loading ...</lang></div>');
+        PosnicPro.get('items/' + id, function (response) {
+            if (response.type !== 'success') {
+                $('#items_doc').html('<div class="text-danger p-4"><lang class="lang_could_not_open_this_item">Could not open this item.</lang></div>');
+                return;
+            }
+            PosnicPro.items.renderItemDoc(response.data);
+        }, function () {
+            $('#items_doc').html('<div class="text-danger p-4"><lang class="lang_could_not_open_this_item">Could not open this item.</lang></div>');
+        });
+    },
+    closeDoc: function () {
+        PosnicPro.items._openDocId = null;
+        $('#items_detail_card').hide();
+        $('#items_list_rows tr.items-row').removeClass('is-active');
+        PosnicPro.masterDetail.leave('#items_split', 'items-split');
+        if (window.location.hash.slice(2).indexOf('items/') === 0) {
+            hasher.setHash('items');
+        }
+    },
+    renderItemDoc: function (d) {
+        var esc = function (t) { return $('<span>').text(t == null ? '' : t).html(); };
+        var real = function (v) { return v && v !== 'null' && v !== 'undefined' ? v : ''; };
+        var cur = PosnicPro.local.get('currencySign');
+        var id = String(d._id || PosnicPro.items._openDocId);
+        var sell = Number(d.selling_price) || 0;
+        var cost = Number(d.company_price) || 0;
+        var margin = sell > 0 && cost > 0 ? ((sell - cost) / sell) * 100 : null;
+        var tracked = d.track_inventory === true || d.track_inventory === 'true';
+        var low = tracked && Number(d.available_quantity) <= Number(d.low_stock || 0);
+        var toolbar = '<div class="p-doc-toolbar">'
+            + '<button type="button" class="btn btn-sm btn-light" title="Show or hide the list" data-t-title="lang_show_or_hide_the_list" aria-label="Show or hide the list" data-t-aria-label="lang_show_or_hide_the_list" onclick="PosnicPro.masterDetail.toggleRail(\'#items_split\');"><i class="feather icon-sidebar"></i></button>'
+            + '<span class="p-doc-title">' + esc(d.name) + '</span>'
+            + (low ? '<span class="rs-pill unpaid"><lang class="lang_low_stock">Low stock</lang></span>' : '')
+            + '<span class="ml-auto"></span>'
+            + '<button type="button" class="btn btn-sm btn-light" data-module="item" data-access="write" onclick="hasher.setHash(\'items/' + esc(id) + '/edit\');"><i class="feather icon-edit-2 mr-1"></i>Edit</button>'
+            + '<div class="btn-group">'
+            + '<button type="button" class="btn btn-sm btn-light dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false"><lang class="lang_tab_more">More</lang></button>'
+            + '<div class="dropdown-menu dropdown-menu-right">'
+            + '<a class="dropdown-item" data-module="item" data-access="write" href="javascript:void(0)" onclick="hasher.setHash(\'items/' + esc(id) + '/clone\');"><i class="feather icon-copy mr-2"></i>Clone</a>'
+            + (real(d.barcode_id) ? '<a class="dropdown-item" href="javascript:void(0)" onclick="hasher.setHash(\'items/' + esc(id) + '/barcode\');"><i class="feather icon-align-justify mr-2"></i>Barcode labels</a>' : '')
+            + '<div class="dropdown-divider"></div>'
+            + '<a class="dropdown-item text-danger" data-module="item" data-access="delete" href="javascript:void(0)" onclick="PosnicPro.items.deleteAsk();"><i class="feather icon-trash mr-2"></i>Delete</a>'
+            + '</div></div>'
+            + '<button type="button" class="btn btn-sm btn-light" title="Close and show the full list" data-t-title="lang_close_and_show_the_full_list" aria-label="Close" data-t-aria-label="lang_close_title" onclick="PosnicPro.items.closeDoc();"><i class="feather icon-x"></i></button>'
+            + '</div>';
+        var strip = '<div class="p-void-strip" id="i_delete_strip" style="display:none;">'
+            + '<span>Delete <b>' + esc(d.name) + '</b>? Past sales and purchases keep their lines; only the catalogue entry goes.</span>'
+            + '<button type="button" class="btn btn-sm btn-danger" onclick="PosnicPro.items.deleteConfirm(\'' + esc(id) + '\');">Delete item</button>'
+            + '<button type="button" class="btn btn-sm btn-light" onclick="$(\'#i_delete_strip\').slideUp(120);">Cancel</button>'
+            + '</div>';
+        var img = (d.image && d.image !== 'item.svg') ? d.image : '';
+        var stats = '<div class="s-doc-stats">'
+            + '<div class="s-stat"><div class="s-stat-value"' + (low ? ' style="color: var(--theme-danger-color, #c0392b);"' : '') + '>'
+            + (tracked ? esc(d.available_quantity) + ' ' + esc(d.unit || 'qty') : '\u2014') + '</div>'
+            + '<div class="s-stat-label">' + (tracked ? 'In stock' + (low ? ' \u00b7 low' : '') : 'Not tracked') + '</div></div>'
+            + '<div class="s-stat"><div class="s-stat-value">' + cur + '&nbsp;' + sell.toFixed(2) + '</div>'
+            + '<div class="s-stat-label"><lang class="lang_selling_price_2">Selling price</lang></div></div>'
+            + (cost > 0
+                ? '<div class="s-stat"><div class="s-stat-value">' + cur + '&nbsp;' + cost.toFixed(2) + '</div>'
+                    + '<div class="s-stat-label"><lang class="lang_companyamount_title">Cost</lang></div></div>'
+                : '')
+            + (margin !== null
+                ? '<div class="s-stat"><div class="s-stat-value">' + margin.toFixed(1) + '%</div>'
+                    + '<div class="s-stat-label"><lang class="lang_margin">Margin</lang></div></div>'
+                : '')
+            + '</div>';
+        var identity = '<div class="q-block"><div class="q-label"><lang class="lang_identity">Identity</lang></div>'
+            + (real(d.itemid) ? '<div>SKU: ' + esc(d.itemid) + '</div>' : '')
+            + (real(d.barcode_id) ? '<div class="q-muted">Barcode: ' + esc(d.barcode_id) + '</div>' : '')
+            + (real(d.category_name) ? '<div class="q-muted">' + esc(d.category_name) + '</div>' : '')
+            + '<div class="q-muted">Unit: ' + esc(d.unit || 'qty') + '</div>'
+            + '</div>';
+        var pricingBits = '';
+        if (real(d.tax_name) || Number(d.tax) > 0) {
+            pricingBits += '<div class="q-muted">Tax: ' + esc(d.tax_name || (d.tax + '%')) + (d.tax_type ? ' (' + esc(d.tax_type) + ')' : '') + '</div>';
+        }
+        if (real(d.supplier_name)) { pricingBits += '<div class="q-muted">Supplier: ' + esc(d.supplier_name) + '</div>'; }
+        var pricing = '<div class="q-block"><div class="q-label"><lang class="lang_pricing_supply">Pricing &amp; supply</lang></div>'
+            + '<div>MRP ' + cur + '&nbsp;' + (Number(d.mrp_price || d.selling_price) || 0).toFixed(2) + '</div>'
+            + pricingBits
+            + '</div>';
+        var record = '<div class="q-block"><div class="q-label"><lang class="lang_on_record">On record</lang></div>'
+            + (d.created_date ? '<div class="q-muted">Added ' + esc(PosnicPro.convertDate(d.created_date)) + '</div>' : '')
+            + (d.updated_date ? '<div class="q-muted">Updated ' + esc(PosnicPro.convertDate(d.updated_date)) + '</div>' : '')
+            + (tracked && Number(d.low_stock) > 0 ? '<div class="q-muted">Low-stock alert at ' + esc(d.low_stock) + '</div>' : '')
+            + '</div>';
+        var photo = img
+            ? '<div class="i-doc-photo"><img loading="lazy" decoding="async" src="' + esc(img) + '" alt="' + esc(d.name) + '" onerror="this.style.display=\'none\';"></div>'
+            : '';
+        var body = '<div class="s-doc-body"><div class="q-sheet s-sheet">'
+            + '<div class="i-doc-top">' + '<div class="i-doc-main">' + stats
+            + '<div class="s-doc-grid">' + identity + pricing + record + '</div>'
+            + '</div>' + photo + '</div>'
+            + '<div class="q-label" style="margin-top:18px;"><lang class="lang_recent_stock_movements">Recent stock movements</lang></div>'
+            + '<div id="i_doc_moves" class="text-muted" style="font-size:13px;"><lang class="lang_loading_4">Loading ...</lang></div>'
+            + '</div></div>';
+        $('#items_doc').html(toolbar + strip + body);
+        PosnicPro.items.loadStockMoves(d);
+        /* The dossier renders AFTER the login-time ACL sweep - it must
+           re-scan itself or a restricted user sees doors the server will
+           refuse (owner: every list carries the ACL we defined). */
+        PosnicPro.ACLForModule('item');
+    },
+    /* The item's latest ledger lines, straight from the stocklogs the
+       transition machinery writes. */
+    loadStockMoves: function (d) {
+        var esc = function (t) { return $('<span>').text(t == null ? '' : t).html(); };
+        var nameExact = String(d.name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        PosnicPro.get({
+            url: 'stocklogs',
+            data: { page: 1, limit: 5, filters: JSON.stringify({ item_name: { $regex: '^' + nameExact + '$', $options: 'i' } }) }
+        }, function (response) {
+            var list = ((response && response.data) || {}).list || [];
+            if (!list.length) {
+                $('#i_doc_moves').html('<div class="text-muted"><lang class="lang_no_stock_movements_yet">No stock movements yet.</lang></div>');
+                return;
+            }
+            var html = '<table class="q-items s-doc-purchases-table"><thead><tr>'
+                + '<th><lang class="lang_movement">Movement</lang></th><th><lang class="lang_reference_title">Reference</lang></th><th class="text-right"><lang class="lang_change">Change</lang></th><th class="text-right"><lang class="lang_balance">Balance</lang></th>'
+                + '</tr></thead><tbody>';
+            list.forEach(function (r) {
+                var n = Number(r.count) || 0;
+                html += '<tr>'
+                    + '<td>' + esc(r.process) + '</td>'
+                    + '<td class="q-muted">' + esc(r.reference || '-') + '</td>'
+                    + '<td class="text-right" style="color:' + (n < 0 ? 'var(--theme-danger-color, #c0392b)' : 'var(--theme-success-color, #1a7f37)') + ';">'
+                    + (n > 0 ? '+' : '') + n + '</td>'
+                    + '<td class="text-right q-muted">' + esc(r.opening_balance) + ' \u2192 ' + esc(r.closing_balance) + '</td>'
+                    + '</tr>';
+            });
+            html += '</tbody></table>';
+            /* Recent only, BY DESIGN - the full ledger with its date range
+               lives on Inventory Logs; this door lands there pre-filtered
+               to the item (owner: "let him search in inventory logs"). */
+            html += '<div style="margin-top:8px; font-size:13px;">'
+                + '<a href="javascript:void(0)" onclick="PosnicPro.stocklogs.openForItem(' + JSON.stringify(String(d.name || '')).replace(/"/g, '&quot;') + ');">'
+                + 'All movements for this item &rarr;</a></div>';
+            $('#i_doc_moves').html(html);
+        }, function () {
+            $('#i_doc_moves').html('<div class="text-muted"><lang class="lang_stock_history_unavailable">Stock history unavailable.</lang></div>');
+        });
+    },
+    deleteAsk: function () {
+        $('#i_delete_strip').slideDown(120);
+    },
+    deleteConfirm: function (id) {
+        PosnicPro.request({
+            method: 'DELETE',
+            url: 'items',
+            data: JSON.stringify({ data: [id] })
+        }, function (r) {
+            PosnicPro.alert(r.type || 'success', r.message || 'Item deleted');
+            PosnicPro.items.closeDoc();
+            PosnicPro.items.loadList(1);
+        }, function (xhr) {
+            var resp = {}; try { resp = jQuery.parseJSON(xhr.responseText) || {}; } catch (e) { }
+            PosnicPro.alert('error', resp.message || 'Could not delete this item');
+        });
+    },
+    _chrome: function () {
+        PosnicPro.HideSideBarModal();
+        $('.page_loader,#osk-container').hide();
+        $('.nav-link-active,.tab-pane-active,.dropdown-item').removeClass('active');
+        $('.vertical-menu li a').removeClass('active');
+        $('#v-pills-inventory-tab,#view_items_page').addClass('active');
+        $('#v-pills-inventory').addClass('show active');
+        $('.page-title-box,#items').show();
+        $('.dashboard_img_menu').hide();
+        $('#image_sidebar_itemdetail').show();
+    },
+    showDataTablePage: function () {
+        PosnicPro.items._chrome();
+        PosnicPro.items.mountFilters();
+        PosnicPro.items.closeDoc();
+        PosnicPro.items.loadList(1);
+    },
+    triggerAddNew: function () {
+        PosnicPro.items.showAdd();
+        $('#item_variant_header').hide();
+        $('#show_variant_fields').hide();
+        $('#show_price_fields,#sku_card_col').show();
+        $('#product_without_variant').prop('checked', true);
+        $('#product_with_variant').prop('checked', false);
+        $('#show_variant_fields').hide();
+        $('#show_price_fields,#sku_card_col').show();
+        $("#load_price_fields").html('');
+        $("#show-hide-item-discount").show();
+        if ($('#sales_new_item_name').val() !== '') {
+            var itemname = $('#sales_new_item_name').val();
+            PosnicPro.items.itemStatus = 'salespage';
+        } else {
+            itemname = $('#receiving_add_item_name').val();
+            PosnicPro.items.itemStatus = 'receivingpage';
+        }
+        $('#items_name').val(itemname);
+
+    },
+    /*
+     * Modifier groups on the item form (V2): Restaurant-mode only. The
+     * checkbox list renders from the shop's groups; selections travel as
+     * modifier_group_ids. The key is only SENT when the section rendered -
+     * the server's presence-gating then means a retail save can never
+     * silently strip a restaurant item's groups.
+     */
+    renderModifierGroups: function (selectedIds) {
+        var wrap = $('#item_modifier_wrap');
+        if (!wrap.length) { return; }
+        if (PosnicPro.local.get('table_options') !== 'enable') { wrap.hide(); return; }
+        var chosen = (selectedIds || []).map(String);
+        PosnicPro.get({ url: 'setting/modifierGroups', data: {} }, function (r) {
+            var rows = (r && r.data) || [];
+            if (!rows.length) { wrap.hide(); return; }
+            var esc = function (s) {
+                return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+                    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+                });
+            };
+            var html = '';
+            rows.forEach(function (g) {
+                var checked = chosen.indexOf(String(g.id)) >= 0 ? ' checked' : '';
+                html += '<div class="custom-control custom-checkbox">'
+                    + '<input type="checkbox" class="custom-control-input item-modgroup" id="modgrp_' + esc(g.id) + '" value="' + esc(g.id) + '"' + checked + '>'
+                    + '<label class="custom-control-label" for="modgrp_' + esc(g.id) + '">' + esc(g.name) + '</label>'
+                    + '</div>';
+            });
+            $('#item_modifier_groups').html(html);
+            wrap.show();
+        }, function () { wrap.hide(); });
+    },
+    /* Alternate barcodes (V3): the comma-separated field as a clean array. */
+    _altBarcodes: function () {
+        var raw = $('#items_barcodes_alt').val();
+        if (raw === undefined) { return undefined; }
+        return String(raw).split(',').map(function (v) { return v.trim(); }).filter(Boolean);
+    },
+    /* Array when the section rendered (send the key: empty = clear all);
+       undefined when it did not (omit the key: server leaves it alone). */
+    _modifierGroupIds: function () {
+        if ($('#item_modifier_wrap').css('display') === 'none') { return undefined; }
+        return $('.item-modgroup:checked').map(function () { return $(this).val(); }).get();
+    },
+    /*
+     * The fields every row of a save shares - category, supplier, tax,
+     * flags, description - read ONCE from the form. The old variant loop
+     * re-read all of these per row on its way to firing N independent
+     * POSTs; the family path reads them here and sends one request.
+     */
+    _sharedItemFields: function () {
+        var content = $('#items_description');
+        var hsnValue = $("input[name='hsntax_radio_value']:checked").val();
+        var tax_value, hsn_code, tax_id, tax_name, tax_method;
+        if (hsnValue === 'hsncode') {
+            tax_value = $('#hsn_tax').val();
+            hsn_code = $('#items_hsncode').val();
+            tax_id = '';
+            tax_name = '';
+            tax_method = 'hsn';
+        } else {
+            /* No selection is the normal state when the tax module is off. */
+            tax_value = PosnicPro.items.selectAttr('#items_tax', 'data-tax-value', 0);
+            tax_id = PosnicPro.items.selectAttr('#items_tax', 'data-tax-id');
+            tax_name = PosnicPro.items.selectAttr('#items_tax', 'data-tax-name');
+            hsn_code = 0;
+            tax_method = 'default';
+        }
+        return {
+            supplier_id: $('#items_supplier_id').val(),
+            supplier_name: $('#items_supplier').val(),
+            category_id: PosnicPro.items.selectAttr('#items_category', 'data-category-id'),
+            /* category_name was the one unguarded read left on this line - the id
+               beside it already had a length check. Category is optional, so an
+               item saved without one threw here. */
+            category_name: PosnicPro.items.selectAttr('#items_category', 'data-category-name'),
+            cover_image: $('#item_logo').val(),
+            inventory: $('#item_track_inventory').is(':checked'),
+            ecommerce: $('#item_ecommerce').is(':checked'),
+            show_on_menu: $('#item_show_on_menu').is(':checked'),
+            diet: String($('#item_diet').val() || ''),
+            daypart_ids: $('#item_dayparts').val() || [],
+            /* What the shop says goes with this dish. Empty is normal and
+               means "work it out from what sells on the same bill". */
+            goes_with: $('#item_goes_with').val() || [],
+            channel_off: $('#item_channel_off').val() || [],
+            prep_note: String($('#item_prep_note').val() || '').trim(),
+            prep_minutes: Number($('#item_prep_minutes').val()) || 0,
+            /* Nutrition, what is in the dish, and how the shop bills it.
+               No health claim is ever sent: they are derived from these. */
+            nutrition: PosnicPro.itemPlate.payload().nutrition,
+            food_tags: PosnicPro.itemPlate.payload().food_tags,
+            menu_marks: PosnicPro.itemPlate.payload().menu_marks,
+            spice_choice: PosnicPro.itemPlate.payload().spice_choice,
+            negative_stock: $('#item_negative_stock').is(':checked'),
+            item_weight_machine_based: $('#item_weight_machine_based').is(':checked'),
+            open_price: $('#item_open_price').is(':checked'),
+            icon: $('#item_icon').val() || PosnicPro.items._iconSuggested || '',
+            tile_color: $('#item_tile_color').val() || PosnicPro.autoTile($('#items_name').val()).color,
+            tile_shape: $('#item_tile_shape').val() || PosnicPro.autoTile($('#items_name').val()).shape,
+            plu_code: $('#items_plu_code').val() || '',
+            /*
+             * NOT here, deliberately - a GTIN identifies ONE trade item, so it
+             * cannot be shared by a family: five variants carrying one number
+             * would each claim to be the same product.
+             */
+            item_kind: $('#item_is_service').is(':checked') ? 'service' : 'product',
+            service_unit: $('#item_service_unit').val() || 'fixed',
+            brand: $('#items_brand').val(),
+            tags: PosnicPro.items._tagList(),
+            reorder_point: $('#items_reorder_point').val() === '' ? undefined : Number($('#items_reorder_point').val()),
+            hsn_code: hsn_code,
+            hsn_description: $('#items_hsndescription').val(),
+            tax_method: tax_method,
+            tax_name: tax_name,
+            tax_id: tax_id,
+            tax: tax_value,
+            tax_type: $('input[name="tax_radio_value"]:checked').val(),
+            description: content.val(),
+            image: PosnicPro.items.imageParams,
+            modifier_group_ids: PosnicPro.items._modifierGroupIds(),
+            barcodes: PosnicPro.items._altBarcodes(),
+            purchase_unit: $('#items_purchase_unit').val(),
+            conversion_factor: $('#items_conversion_factor').val(),
+            // IC1c: the Details section (dates included) is visible in
+            // variant mode now, so families inherit what it shows - the old
+            // divergence where item() sent dates and this builder did not.
+            items_mfg_date: $('#items_mfg_date').val(),
+            items_expiry_date: $('#items_expiry_date').val()
+        };
+    },
+    /*
+     * Variant family creation (V1): ONE atomic request instead of one POST
+     * per value. The server validates every row before creating any and
+     * rolls back if a row fails mid-way - a network blip can no longer
+     * leave half a family behind.
+     */
+    saveVariantFamily: function (loader) {
+        var itemName = $('#items_name').val();
+        /* The same ordered list loadVariant built the inputs from. Walking it
+           separately is what would let row N's price be saved against variant
+           M once combinations are in play. */
+        var values = $.map(PosnicPro.items.variantCombinations(), function (c) {
+            return c.value;
+        });
+        var shared = PosnicPro.items._sharedItemFields();
+        var axis = PosnicPro.items.variantAxisLabel();
+        var rows = [];
+        /* Did somebody actually PICK a tile, or is it the automatic one?
+           _sharedItemFields already resolved the fallback against the parent
+           name, so by the time it is spread onto a row there is no way left to
+           tell the two apart - the question has to be asked here. */
+        var tilePicked = !!($('#item_tile_color').val() || $('#item_tile_shape').val());
+
+        /*
+         * A family carries NO gtin, and that is deliberate rather than pending.
+         *
+         * A GTIN identifies one trade item. Red-L and Red-M are different trade
+         * items with different numbers on their packs, so there is no single
+         * value that could be shared - putting the parent's on all of them would
+         * have five products each claiming to be the same one, which is the
+         * duplicate-identity failure the validation exists to prevent.
+         *
+         * A per-variant GTIN input on each generated row is the right answer and
+         * belongs with the per-variant image work (P2 in
+         * PRODUCT_INFORMATION_MODEL). Until then no number is better than a
+         * wrong one.
+         */
+        $(values).each(function (key, variantName) {
+            var unitVariantDetail = $('#items_unit_' + key + '');
+            var rowName = itemName + ' / ' + variantName;
+            /*
+             * Each variant gets its OWN automatic tile, from its own full name.
+             *
+             * The shared fields carry a tile derived from the parent name, so
+             * spreading them gave every member of a family the same colour and
+             * the same shape - "Shirt / Red" and "Shirt / Blue" indistinguishable
+             * on the sale grid. That defeats the only thing the dressing is for:
+             * a till is navigated by recognition, and a family is exactly where
+             * several near-identical names sit side by side needing to be told
+             * apart at a glance.
+             *
+             * An explicit choice still wins and still applies to the whole
+             * family - picking a colour for "Shirt" means the shop wants that
+             * colour for the shirts, and quietly overriding it per row would be
+             * the opposite of what was asked.
+             */
+            var autoRow = tilePicked ? null : PosnicPro.autoTile(rowName);
+
+            /*
+             * This row's own photo, if one was chosen.
+             *
+             * Sent as a one-image list marked cover, so the variant's tile and
+             * its item page both show the picture of THAT variant. The shared
+             * fields carry the family's whole set, so a row with no choice is
+             * left exactly as it was before any of this existed.
+             *
+             * Looked up by name against what is currently uploaded rather than
+             * trusted from the hidden input: the photo may have been removed
+             * after it was picked, and saving a name with no image behind it
+             * would give the variant a broken picture instead of no picture.
+             */
+            var chosenPhoto = $('#items_photo_' + key).val();
+            var rowPhoto = null;
+            if (chosenPhoto) {
+                var found = $.grep(PosnicPro.items.imageParams || [], function (x) {
+                    return x && x.name === chosenPhoto;
+                });
+                if (found.length) {
+                    rowPhoto = {
+                        image: [$.extend({}, found[0], { cover: 'yes' })],
+                        /* cover_image names the picture the item leads with, and
+                           it comes from the shared fields too - left alone, the
+                           row would carry its own photo while still pointing at
+                           the family's as its cover. */
+                        cover_image: found[0].name,
+                    };
+                }
+            }
+            rows.push(Object.assign({}, shared, rowPhoto || {}, autoRow ? {
+                tile_color: autoRow.color,
+                tile_shape: autoRow.shape,
+            } : {}, {
+                name: rowName,
+                variant_value: variantName,
+                sku_id: $('#items_itemid_' + key + '').val(),
+                barcode_id: $('#items_barcodeid_' + key + '').val(),
+                mrp_price: $('#items_mrp_price_' + key + '').val(),
+                company_price: $('#items_company_price_' + key + '').val(),
+                selling_price: $('#items_selling_price_' + key + '').val(),
+                available_quantity: $('#items_available_quantity_' + key + '').val(),
+                position: $('#items_sort_' + key + '').val(),
+                unit: unitVariantDetail.find(':selected').attr('data-unit-value'),
+                unit_id: unitVariantDetail.find(':selected').attr('data-unit-id'),
+                discount_amount: $('#items_discount_amount_' + key + '').val(),
+                discount_percentage: $('#items_discount_percentage_' + key + '').val()
+            }));
+        });
+        PosnicPro.post({
+            url: 'items/createFamily',
+            data: JSON.stringify({
+                items: rows,
+                variant_axis: axis,
+                variant_parent_name: itemName
+            })
+        }, function (response) {
+            loader.find(".loadingSpinner:first").remove();
+            if (response.type === 'success') {
+                PosnicPro.alert('success', response.message || 'Family created');
+                PosnicPro.items.addItemButton();
+                PosnicPro.items.loadSelectUnit();
+                $('#item_image_upload_form')[0].reset();
+                PosnicPro.stocklogs.viewLowStockDashboard();
+                PosnicPro.sales.itemsMenu.onlineProductList();
+                /* IC2: ONE after-save rule - every create stays on the form
+                   for the next entry (edit is what returns to the list).
+                   Variant mode resets to the plain-item state. */
+                $('#load_price_fields').html('').hide();
+                $('#show_variant_fields').hide();
+                $('#show_price_fields,#sku_card_col').show();
+                $('#product_without_variant').prop('checked', true);
+                PosnicPro.items.itemClearForm();
+                $('#items_name').focus();
+            } else {
+                PosnicPro.alert(response.type || 'error', response.message || 'Could not create the family');
+            }
+        }, function (xhr) {
+            loader.find(".loadingSpinner:first").remove();
+            var resp = {};
+            try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+            PosnicPro.alert('error', resp.message || 'Could not create the family - nothing was kept.');
+        });
+    },
+    /*This Items Function Used To Add & Edit*/
+    item: function () {
+        var loader = $(".loader-item");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        if ($('#items_name').val() !== '') {
+            PosnicPro.action = 'add';
+            var method = 'POST';
+            var url = 'items';
+            if ($('#itemid').val() !== '') {
+                PosnicPro.action = 'edit';
+                method = 'PUT';
+                url += '/' + $('#itemid').val();
+            }
+
+            /* CREATE with variants: the atomic family path. Edits and
+               plain items keep the legacy flow below untouched. */
+            if (PosnicPro.action === 'add' && $('#product_with_variant').is(':checked')
+                && ($('#item_variant_list').val() || []).length > 0) {
+                PosnicPro.items.saveVariantFamily(loader);
+                return;
+            }
+
+            var variant_list = $('#item_variant_list').val();
+            var variant_array = ["variant"];
+            var variant_value = (variant_list.length > 0) ? $('#item_variant_list').val() : variant_array;
+            Array.from(variant_value || []).forEach(function (variantName, key) {
+                var itemName = $("#items_name").val();
+                var unitDetail = $("#items_unit").select2("data");
+                let unitVariantDetail = $('#items_unit_' + key + '');
+                let unitVariantValue = unitVariantDetail.find(':selected').attr('data-unit-value');
+                let unitVariantId = unitVariantDetail.find(':selected').attr('data-unit-id');
+
+                if ($("#product_without_variant").is(":checked")) {
+                    var name = itemName;
+                    var param_fields = {
+                        sku_id: $('#items_itemid').val(),
+                        barcode_id: $('#items_barcodeid').val(),
+                        mrp_price: $('#items_mrp_price').val(),
+                        company_price: $('#items_company_price').val(),
+                        selling_price: $('#items_selling_price').val(),
+                        available_quantity: $('#items_available_quantity').val(),
+                        position: $('#items_sort').val(),
+                        items_mfg_date: $('#items_mfg_date').val(),
+                        items_expiry_date: $('#items_expiry_date').val(),
+                        unit: (unitDetail.length > 0) ? unitDetail[0].element.attributes['data-unit-value'].value : null,
+                        unit_id: (unitDetail.length > 0) ? unitDetail[0].element.attributes['data-unit-id'].value : null,
+                        discount_amount: $('#items_discount_amount').val(),
+                        discount_percentage: $('#items_discount_percentage').val()
+                    };
+                } else {
+                    var name = itemName + ' / ' + variantName;
+                    var param_fields = {
+                        sku_id: $('#items_itemid_' + key + '').val(),
+                        barcode_id: $('#items_barcodeid_' + key + '').val(),
+                        mrp_price: $('#items_mrp_price_' + key + '').val(),
+                        company_price: $('#items_company_price_' + key + '').val(),
+                        selling_price: $('#items_selling_price_' + key + '').val(),
+                        available_quantity: $('#items_available_quantity_' + key + '').val(),
+                        position: $('#items_sort_' + key + '').val(),
+                        unit: unitVariantValue,
+                        unit_id: unitVariantId,
+                        discount_amount: $('#items_discount_amount_' + key + '').val(),
+                        discount_percentage: $('#items_discount_percentage_' + key + '').val()
+                    };
+                }
+
+                var content = $('#items_description');
+                var hsnValue = $("input[name='hsntax_radio_value']:checked").val();
+                if (hsnValue === 'hsncode') {
+                    var tax_value = $('#hsn_tax').val();
+                    var hsn_code = $('#items_hsncode').val();
+                    var tax_id = '';
+                    var tax_name = '';
+                    var tax_method = 'hsn';
+                } else {
+                    var tax_value = PosnicPro.items.selectAttr('#items_tax', 'data-tax-value', 0);
+                    var tax_id = PosnicPro.items.selectAttr('#items_tax', 'data-tax-id');
+                    var tax_name = PosnicPro.items.selectAttr('#items_tax', 'data-tax-name');
+                    var hsn_code = 0;
+                    var tax_method = 'default';
+                }
+                var formData = {
+                    id: $('#itemid').val(),
+                    name: name,
+                    supplier_id: $('#items_supplier_id').val(),
+                    supplier_name: $('#items_supplier').val(),
+                    category_id: PosnicPro.items.selectAttr('#items_category', 'data-category-id'),
+                    category_name: PosnicPro.items.selectAttr('#items_category', 'data-category-name'),
+                    cover_image: $('#item_logo').val(),
+                    inventory: $('#item_track_inventory').is(':checked'),
+                    ecommerce: $('#item_ecommerce').is(':checked'),
+                    show_on_menu: $('#item_show_on_menu').is(':checked'),
+                    diet: String($('#item_diet').val() || ''),
+                    daypart_ids: $('#item_dayparts').val() || [],
+                    goes_with: $('#item_goes_with').val() || [],
+                    channel_off: $('#item_channel_off').val() || [],
+                    prep_note: String($('#item_prep_note').val() || '').trim(),
+                    prep_minutes: Number($('#item_prep_minutes').val()) || 0,
+                    nutrition: PosnicPro.itemPlate.payload().nutrition,
+                    food_tags: PosnicPro.itemPlate.payload().food_tags,
+                    menu_marks: PosnicPro.itemPlate.payload().menu_marks,
+                    spice_choice: PosnicPro.itemPlate.payload().spice_choice,
+                    negative_stock: $('#item_negative_stock').is(':checked'),
+                    item_weight_machine_based: $('#item_weight_machine_based').is(':checked'),
+                    open_price: $('#item_open_price').is(':checked'),
+                    icon: $('#item_icon').val() || PosnicPro.items._iconSuggested || '',
+                    tile_color: $('#item_tile_color').val() || PosnicPro.autoTile($('#items_name').val()).color,
+            tile_shape: $('#item_tile_shape').val() || PosnicPro.autoTile($('#items_name').val()).shape,
+            plu_code: $('#items_plu_code').val() || '',
+            /* The server validates and derives gtin14 - see
+               api/src/helpers/items.helper.js. Sending whatever was typed is
+               correct: a client-side check is a courtesy, not the rule. */
+            gtin: $('#items_gtin').val() || '',
+                    item_kind: $('#item_is_service').is(':checked') ? 'service' : 'product',
+                    service_unit: $('#item_service_unit').val() || 'fixed',
+                    brand: $('#items_brand').val(),
+                    tags: PosnicPro.items._tagList(),
+                    reorder_point: $('#items_reorder_point').val() === '' ? undefined : Number($('#items_reorder_point').val()),
+                    hsn_code: hsn_code,
+                    hsn_description: $('#items_hsndescription').val(),
+                    tax_method: tax_method,
+                    tax_name: tax_name,
+                    tax_id: tax_id,
+                    tax: tax_value,
+                    tax_type: $('input[name="tax_radio_value"]:checked').val(),
+                    description: content.val(),
+                    image: PosnicPro.items.imageParams,
+                    modifier_group_ids: PosnicPro.items._modifierGroupIds(),
+                    barcodes: PosnicPro.items._altBarcodes(),
+                    purchase_unit: $('#items_purchase_unit').val(),
+                    conversion_factor: $('#items_conversion_factor').val()
+                };
+                var params = {
+                    method: method,
+                    url: url,
+                    data: JSON.stringify(Object.assign(formData, param_fields))
+                };
+                var typedSku = (formData.sku_id || '').trim();
+                PosnicPro.request(params, function (response) {
+
+                    if (response.type === 'success') {
+                        var data = response.data;
+                        // The server keeps a genuinely unique SKU and rewrites a
+                        // colliding one to the next free number - say so instead
+                        // of saving silently under a different SKU.
+                        if (typedSku && data.itemid && String(data.itemid) !== typedSku) {
+                            PosnicPro.alert('info', 'Saved with SKU ' + data.itemid + ' — ' + typedSku + ' was already taken');
+                        }
+                        PosnicPro.items.addItemButton();
+                        PosnicPro.items.loadSelectUnit();
+                        $('#item_image_upload_form')[0].reset();
+                        PosnicPro.stocklogs.viewLowStockDashboard();
+                        PosnicPro.sales.itemsMenu.onlineProductList();
+                        if (PosnicPro.action === 'add') {
+                            $('#show_last_created_item').show();
+                            /* The rapid-entry loop: back to the first tab, cursor
+                               on the name, ready for the next item. Focusing the
+                               name WITHOUT switching tabs put the cursor on a
+                               hidden pane whenever the item was saved from
+                               Details or More - which is most of the time once
+                               someone starts using the other tabs (owner ask). */
+                            PosnicPro.items.goToTab('item_tab_main', '#items_name');
+                        }
+                        var path = '#/items/' + data.id;
+                        $('#last_created_item').attr('href', path);
+                        var itemDetails = {
+                            "item_id": data.id,
+                            "item_name": data.name,
+                            "selling_price": data.selling_price,
+                            "mrp_price": data.mrp_price,
+                            "itemid": data.itemid,
+                            "available_quantity": data.available_quantity,
+                            "company_price": data.company_price,
+                            "barcode_id": data.barcode_id,
+                            "discount_amount": data.discount_amount,
+                            "discount_percentage": data.discount_percentage,
+                            "tax": data.tax,
+                            "tax_type": data.tax_type,
+                            "category_id": data.category_id,
+                            "category_name": data.category_name,
+                            "supplier_id": data.supplier_id,
+                            "supplier_name": data.supplier_name
+                        };
+                        var newPrice = window.location.hash.slice(1);
+
+                        if (newPrice === '/items/new/addnewitem') {
+                            if (PosnicPro.items.itemStatus === 'receivingpage') {
+
+                                hasher.replaceHash('receivings/new');
+                                PosnicPro.receivings.addReceivingLineItems(itemDetails);
+                            } else {
+
+                                hasher.replaceHash('sales/new');
+                                PosnicPro.sales.addSalesLineItems(itemDetails);
+                            }
+                            loader.find(".loadingSpinner:first").remove();
+                            return false;
+                        }
+
+                        if (newPrice === '/receivings/items/new') {
+                            $('.nav-link-active,.tab-pane-active,.dropdown-item').removeClass('active');
+                            $(".vertical-menu li a").removeClass("active");
+                            $('#v-pills-purchase-tab').addClass('active');
+                            $('#v-pills-purchase').addClass('show active');
+                            if (PosnicPro.receivings.editPriceAction === 'add') {
+                                hasher.setHash('receivings/new');
+                                PosnicPro.receivings.addReceivingLineItems(itemDetails);
+                                $('#view_purchaseorders_page').addClass('active');
+                            } else {
+                                hasher.setHash('receivings/' + PosnicPro.receivings.receivingAddId + '/edit');
+                                setTimeout(function () {
+                                    PosnicPro.receivings.addReceivingLineItems(itemDetails);
+                                }, 1000);
+                                $('#view_purchaseorders_page').addClass('active');
+                            }
+
+                            loader.find(".loadingSpinner:first").remove();
+                            return false;
+                        }
+
+                        $('.get-items-value').val('');
+                        $('.get-items-price').val('0');
+                        $('#item-display-preview').html('');
+                        $('#item_logo').val('item.svg');
+                        PosnicPro.items.imageParams = [];
+                        $('.item_add').trigger('reset');
+                        $('#items_description').val('');
+                        loader.find(".loadingSpinner:first").remove();
+                        $('#hsn_code_show,#hsn_tax').hide();
+                        $('#default_tax').show();
+                        if (PosnicPro.local.get('default_tax_enable_disable') === 'false') {
+                            $('#items_tax').val(1).trigger('change.select2');
+                        } else {
+                            var taxDetail = PosnicPro.local.get('default_tax_id');
+                            $('#items_tax').val(taxDetail).trigger("change");
+                        }
+                        var defaultsupplier = JSON.parse(PosnicPro.local.get('defaultsupplier'));
+                        if (PosnicPro.local.get('default_supplier_enable_disable') === 'false') {
+                            $('#items_supplier_id').val('');
+                            $('#items_supplier').val('');
+                        } else {
+                            $('#items_supplier_id').val(defaultsupplier.supplier_id);
+                            $('#items_supplier').val(defaultsupplier.supplier_name);
+                        }
+                        /* select2 FIRST, then the value. Firing change.select2 at a
+                           select that is not a select2 yet is what throws
+                           "Cannot read properties of null (reading 'offsetWidth')". */
+                        $(".items_category").select2({
+                            placeholder: "Choose a Category"
+                        });
+                        $(".items_category").val('').trigger('change.select2');
+                        $("#items_variant").select2({
+                            placeholder: "Choose a Variant"
+                        });
+                        $('#item_variant_list,#load_price_fields').html('');
+                        /* The variant SELECT keeps its selection across a save, so
+                           emptying its value list leaves the form showing a chosen
+                           variant with nothing to choose from - the same state the
+                           preselect used to produce, arriving by a different door
+                           (reported: "first variant values not loaded but second
+                           variant values loading" - the second one works because
+                           picking it fires select2:select, which refills). */
+                        PosnicPro.items.loadVariantValues('#items_variant', '#item_variant_list');
+                        PosnicPro.items.resetSecondAxis();
+                        if ($('#show_variant_fields').css('display') === 'none') {
+                            $('#product_without_variant').prop('checked', true);
+                            $('#product_with_variant').prop('checked', false);
+                        } else {
+                            $('#product_without_variant').prop('checked', false);
+                            $('#product_with_variant').prop('checked', true);
+                        }
+
+                        PosnicPro.alert(response.type, response.message);
+                        /*This function while add new item from another page after complete add items go to previous page*/
+                        /*END*/
+
+                        if (PosnicPro.action === 'edit') {
+                            var editPrice = window.location.hash.slice(1);
+                            if (editPrice === '/receivings/' + data.id + '/price') {
+                                $('.nav-link-active,.tab-pane-active,.dropdown-item').removeClass('active');
+                                $(".vertical-menu li a").removeClass("active");
+                                $('#v-pills-purchase-tab').addClass('active');
+                                $('#v-pills-purchase').addClass('show active');
+                                if (PosnicPro.receivings.editPriceAction === 'add') {
+                                    hasher.setHash('receivings/new');
+                                    PosnicPro.receivings.addReceivingLineItems(itemDetails);
+                                    $('#view_purchaseorders_page').addClass('active');
+                                } else {
+                                    hasher.setHash('receivings/' + PosnicPro.receivings.receivingAddId + '/edit');
+                                    setTimeout(function () {
+                                        PosnicPro.receivings.removeLineItemReceiving(data.id);
+                                        PosnicPro.receivings.addReceivingLineItems(itemDetails);
+                                    }, 1000);
+                                    $('#view_purchaseorders_page').addClass('active');
+                                }
+
+                                loader.find(".loadingSpinner:first").remove();
+                                return false;
+                            }
+                            PosnicPro.items.itemsTable('items');
+                            hasher.setHash('items');
+                        }
+
+                    } else {
+                        PosnicPro.alert(response.type, response.message);
+                    }
+                }, function (xhr) {
+                    var response = jQuery.parseJSON(xhr.responseText);
+                    PosnicPro.alert(response.type, response.message);
+                });
+            });
+            return false;
+        }
+    },
+    /*TO display the item details*/
+    viewItem: function (id) {
+        var loader = $(".loader-view-item");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        PosnicPro.get('items/' + id, function (response) {
+            if (response.type === 'success') {
+                PosnicPro.record_id = id;
+                PosnicPro.items.viewItemData(response);
+                loader.find(".loadingSpinner:first").remove();
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    viewItemData: function (response) {
+        $('#v-pills-inventory').addClass('show active');
+        $(".infobar-settings-sidebar-overlay").css({"background": "rgba(0,0,0,0.4)", "position": "fixed"});
+        $("#infobar-settings-sidebar-item-details").addClass("sidebarview");
+        $("#item-detail-tab").addClass("active");
+        $("#item_detail").addClass("active show");
+        $("#item-sale-tab,#item-image-tab,#item-description-tab,#item-pricehistory-tab").removeClass("active");
+        $("#item_sale,#item_image,#description_detail,#item_price_history").removeClass("active show");
+        $('#show_product_image,#item-image-tab,#item-description-tab').hide();
+        var data = response.data;
+
+        $.each(data, function (key, val) {
+            if (val === '') {
+                $('#item_view_' + key).text('');
+            } else {
+                $('#item_view_' + key).text(val);
+            }
+        });
+        let unit = (typeof (data.unit) != "undefined" && data.unit !== null) ? data.unit : "qty";
+        $('#item_view_units').text(unit);
+        if (response.data.tax_method === 'default') {
+            $('.item-taxdefault').show();
+            $('.item-hsntax').hide();
+        } else {
+            $('.item-taxdefault').hide();
+            $('.item-hsntax').show();
+        }
+        var updateCreateDate = PosnicPro.convertDate(response.data.created_date);
+        $('#item_view_date').text(updateCreateDate);
+        if (data.discount_amount > 0) {
+            var currency = PosnicPro.local.get('currencySign');
+            $('.item-discount-sign').html(currency);
+            $('.item-discount-value').html(data.discount_amount);
+        } else {
+            $('.item-discount-sign').html('%');
+            $('.item-discount-value').html(data.discount_percentage);
+            if (data.discount_amount === 0 && data.discount_percentage === 0) {
+                $('.item-discount-value').html('0');
+            }
+        }
+        var sign = $('.item-discount-sign').html();
+        if (sign === '%') {
+            $('.discount_amountval').css("display", "none");
+            $('.discount_percentageval').css("display", "block");
+        } else {
+            $('.discount_amountval').css("display", "block");
+            $('.discount_percentageval').css("display", "none");
+        }
+        if (data.track_inventory === true) {
+            $('#item-access').removeClass('badge-danger').addClass('badge-success');
+            $('#item-view-access').removeClass('fa-times').addClass('fa-check');
+            $('#inventory-access-item').html(PosnicPro.i18n.t('lang_on_2', 'ON'));
+        } else {
+            $('#item-access').removeClass('badge-success').addClass('badge-danger');
+            $('#item-view-access').removeClass('fa-check').addClass('fa-times');
+            $('#inventory-access-item').html(PosnicPro.i18n.t('lang_off_2', 'OFF'));
+        }
+        if (data.ecommerce === true) {
+            $('#ecommerce-access').removeClass('badge-danger').addClass('badge-success');
+            $('#item-view-ecommerce-access').removeClass('fa-times').addClass('fa-check');
+            $('#ecommerce-access-item').html(PosnicPro.i18n.t('lang_on_2', 'ON'));
+        } else {
+            $('#ecommerce-access').removeClass('badge-success').addClass('badge-danger');
+            $('#item-view-ecommerce-access').removeClass('fa-check').addClass('fa-times');
+            $('#ecommerce-access-item').html(PosnicPro.i18n.t('lang_off_2', 'OFF'));
+        }
+
+        if (data.negative_stock === true) {
+            $('#stock-access').removeClass('badge-danger').addClass('badge-success');
+            $('#item-view-stock-access').removeClass('fa-times').addClass('fa-check');
+            $('#stock-access-item').html(PosnicPro.i18n.t('lang_on_2', 'ON'));
+        } else {
+            $('#stock-access').removeClass('badge-success').addClass('badge-danger');
+            $('#item-view-stock-access').removeClass('fa-check').addClass('fa-times');
+            $('#stock-access-item').html(PosnicPro.i18n.t('lang_off_2', 'OFF'));
+        }
+
+        $('#item_view_mrpprice').number(data.mrp_price, 2);
+        $('#item_view_companyprice').number(data.company_price, 2);
+        $('#item_view_sellingprice').number(data.selling_price, 2);
+        var image_path = (data.image && data.image !== "item.svg") ? data.image : 'static/images/default/item.svg';
+        $('.itemimageview').attr('src', image_path);
+        $('.itemimageview').attr('onerror', "this.onerror=null;this.src='static/images/default/item.svg';");
+        $('.itemimageview').attr('id', data.image);
+        $('.itemimageview').attr('onClick', 'PosnicPro.viewImage(this.id,\'item\')');
+        $('#item_view_created_date').text(updateCreateDate);
+        var updateUpdateDate = PosnicPro.convertDate(response.data.updated_date);
+        $('#item_view_updated_date').text(updateUpdateDate);
+        $('#item_view_image').html('');
+        // Handle MongoDB date object format for manufacturing date
+        var mfgDateValue = response.data.items_mfg_date;
+        if (mfgDateValue && typeof mfgDateValue === 'object' && mfgDateValue.$date && mfgDateValue.$date.$numberLong) {
+            mfgDateValue = parseInt(mfgDateValue.$date.$numberLong);
+        }
+        var updateMfgDate = mfgDateValue ? PosnicPro.convertDate(mfgDateValue) : 'N/A';
+        $('#items_view_mfg_date').text(updateMfgDate);
+        // Handle MongoDB date object format for expiry date
+        var expDateValue = response.data.items_expiry_date;
+        if (expDateValue && typeof expDateValue === 'object' && expDateValue.$date && expDateValue.$date.$numberLong) {
+            expDateValue = parseInt(expDateValue.$date.$numberLong);
+        }
+        var updateExpDate = expDateValue ? PosnicPro.convertDate(expDateValue) : 'N/A';
+        $('#items_view_expiry_date').text(updateExpDate);
+        $.each(data.multi_image, function (key, val) {
+            $('#item-image-tab').show();
+            $('#show_product_image').show();
+            var image_path = val.name;
+            let img = jQuery('<img loading="lazy" decoding="async" class="imagezoom item_tab_images" id="' + image_path + '" src="" style="height:150px; width:150px;border: 2px solid #ccc;border-radius: 10px;padding:5px;margin-right: 20px;" onclick="PosnicPro.viewImage(this.id);">');
+            img.attr('src', image_path);
+            $('#item_view_image').append(img);
+        });
+        $('#item_view_description_value,#item_description_value').html('');
+        if (data.description !== '') {
+            $('#item-description-tab').show();
+            $('#item_view_description_value,#item_description_value').text(data.description);
+        }
+    },
+    /*
+     * The family strip (V1): the edit page finally knows an item's
+     * siblings. Chips link across the family; "+ Add" creates one new
+     * linked member through the ordinary single-item POST - the server's
+     * presence-gated passthrough stamps the link, no special endpoint.
+     */
+    renderFamilyStrip: function (data) {
+        var strip = $('#item_family_strip');
+        if (!strip.length) { return; }
+        if (!data || !data.variant_group_id) { strip.hide().find('.family-chips').html(''); return; }
+        var esc = function (s) {
+            return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+            });
+        };
+        var currentId = String(data.id || data._id || PosnicPro.record_id || '');
+        PosnicPro.get({ url: 'items/family', data: { group_id: data.variant_group_id } }, function (r) {
+            var rows = (r && r.data) || [];
+            if (rows.length < 1) { strip.hide(); return; }
+            PosnicPro.items._family = {
+                group_id: String(data.variant_group_id),
+                axis: rows[0].variant_axis || 'Variant',
+                parent: rows[0].variant_parent_name || String(rows[0].name || '').split(' / ')[0],
+            };
+            var chips = '<span class="text-muted mr-2">' + esc(PosnicPro.items._family.axis) + ':</span>';
+            rows.forEach(function (m) {
+                var isCurrent = String(m.id) === currentId;
+                chips += '<a href="#/items/' + esc(m.id) + '" class="badge ' +
+                    (isCurrent ? 'badge-primary' : 'badge-light border') + ' mr-1" style="font-size:.8rem; padding:6px 10px;">' +
+                    esc(m.variant_value || m.name) + '</a>';
+            });
+            chips += '<button type="button" class="btn btn-outline-primary btn-sm ml-2" ' +
+                'onclick="PosnicPro.items.openAddValue();"><i class="feather icon-plus mr-1"></i>Add ' +
+                esc(PosnicPro.items._family.axis) + '</button>';
+            strip.find('.family-chips').html(chips);
+            strip.css('display', 'flex');
+        }, function () { strip.hide(); });
+    },
+    openAddValue: function () {
+        var fam = PosnicPro.items._family;
+        if (!fam) { return; }
+        $('#family_add_modal').remove();
+        $('body').append(
+            '<div class="modal fade close_on_esc" id="family_add_modal" tabindex="-1" role="dialog" aria-hidden="true">' +
+            '<div class="modal-dialog modal-sm" role="document"><div class="modal-content">' +
+            '<div class="modal-header"><h5 class="modal-title"></h5>' +
+            '<button type="button" class="close" data-dismiss="modal" aria-label="Close" data-t-aria-label="lang_close_title"><span aria-hidden="true">&times;</span></button></div>' +
+            '<div class="modal-body">' +
+            '<div class="form-group"><label class="family-axis-label" style="font-weight:600; font-size:.85rem;"></label>' +
+            '<input type="text" class="form-control" id="family_add_value" maxlength="60" placeholder="e.g. XL"></div>' +
+            '<div class="form-group"><label style="font-weight:600; font-size:.85rem;"><lang class="lang_selling_price_2">Selling price</lang></label>' +
+            '<input type="number" min="0" step="0.01" class="form-control" id="family_add_price"></div>' +
+            '<div class="form-group"><label style="font-weight:600; font-size:.85rem;">Barcode <small class="text-muted">(optional)</small></label>' +
+            '<input type="text" class="form-control" id="family_add_barcode"></div>' +
+            '<div class="form-group mb-0"><label style="font-weight:600; font-size:.85rem;"><lang class="lang_opening_stock">Opening stock</lang></label>' +
+            '<input type="number" min="0" class="form-control" id="family_add_qty" value="0"></div>' +
+            '<small class="form-text text-muted"><lang class="lang_category_tax_supplier_and_the_other_settin">Category, tax, supplier and the other settings copy from this item.</lang></small>' +
+            '</div>' +
+            '<div class="modal-footer">' +
+            '<button type="button" class="btn btn-outline-secondary" data-dismiss="modal"><lang class="lang_cancel_title">Cancel</lang></button>' +
+            '<button type="button" class="btn btn-outline-primary" id="family_add_btn" onclick="PosnicPro.items.submitAddValue();"><lang class="lang_nav_add">Add</lang></button>' +
+            '</div></div></div></div>'
+        );
+        $('#family_add_modal .modal-title').text('Add ' + fam.axis);
+        $('#family_add_modal .family-axis-label').text(fam.axis + ' value');
+        $('#family_add_price').val($('#items_selling_price').val() || '');
+        $('#family_add_modal').modal('show');
+        setTimeout(function () { $('#family_add_value').trigger('focus'); }, 400);
+    },
+    submitAddValue: function () {
+        var fam = PosnicPro.items._family;
+        var value = ($('#family_add_value').val() || '').trim();
+        if (!fam || !value) { PosnicPro.alert('warning', PosnicPro.i18n.t('lang_enter_the_new_value', 'Enter the new value.')); return; }
+        $('#family_add_btn').prop('disabled', true);
+        var shared = PosnicPro.items._sharedItemFields();
+        var payload = Object.assign({}, shared, {
+            name: fam.parent + ' / ' + value,
+            variant_group_id: fam.group_id,
+            variant_axis: fam.axis,
+            variant_value: value,
+            variant_parent_name: fam.parent,
+            sku_id: '',
+            barcode_id: ($('#family_add_barcode').val() || '').trim(),
+            mrp_price: $('#items_mrp_price').val(),
+            company_price: $('#items_company_price').val(),
+            selling_price: $('#family_add_price').val(),
+            available_quantity: $('#family_add_qty').val() || '0',
+            position: $('#items_sort').val(),
+            unit: ($("#items_unit").select2('data')[0] || { element: { attributes: {} } }).element
+                ? ($("#items_unit").find(':selected').attr('data-unit-value') || null) : null,
+            unit_id: $("#items_unit").find(':selected').attr('data-unit-id') || null,
+            discount_amount: $('#items_discount_amount').val(),
+            discount_percentage: $('#items_discount_percentage').val()
+        });
+        PosnicPro.post({ url: 'items', data: JSON.stringify(payload) }, function (r) {
+            $('#family_add_btn').prop('disabled', false);
+            if (r.type === 'success') {
+                $('#family_add_modal').modal('hide');
+                PosnicPro.alert('success', fam.parent + ' / ' + value + ' added');
+                PosnicPro.items.renderFamilyStrip({
+                    variant_group_id: fam.group_id,
+                    id: PosnicPro.record_id
+                });
+            } else {
+                PosnicPro.alert(r.type || 'error', r.message || 'Could not add it.');
+            }
+        }, function (xhr) {
+            $('#family_add_btn').prop('disabled', false);
+            var resp = {};
+            try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+            PosnicPro.alert('error', resp.message || 'Could not add it.');
+        });
+    },
+    /*Edit item dsetails*/
+    editItem: function (id) {
+        var loader = $(".loader-item");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        $('.update-button').attr('disabled', 'disabled').removeClass('btn-outline-success');
+        $('.page_loader,#osk-container').hide();
+        $('.page-title-box,#items_new').show();
+        $('#items_description').html('').text('');
+        $('#items_description').val('');
+        $('#item-display-preview').html('');
+        PosnicPro.items.imageParams = [];
+        var params = {
+            url: 'items/getItemDetails',
+            data: {
+                id: id
+            }
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                loader.find(".loadingSpinner:first").remove();
+                $('#show_variant_fields').hide();
+                $('#show_price_fields,#sku_card_col').show();
+                var data = response.data;
+                // Family strip (V1): if this item belongs to a variant
+                // family, show its siblings and the add-value button. The
+                // strip is what finally makes families editable after
+                // creation - the old flow forgot the relationship entirely.
+                PosnicPro.items.renderFamilyStrip(data);
+                PosnicPro.items.renderModifierGroups(data.modifier_group_ids || []);
+                PosnicPro.record_id = id;
+                $('#itemid').val(PosnicPro.record_id);
+                $('#items_name').val(data.name);
+                $('#items_itemid').val(data.itemid);
+                $('#items_barcodeid').val(data.barcode_id);
+                $('#items_barcodes_alt').val(Array.isArray(data.barcodes) ? data.barcodes.join(', ') : '');
+                $('#items_purchase_unit').val(data.purchase_unit || '');
+                $('#items_conversion_factor').val(data.conversion_factor || '');
+                $('#items_hsncode').val(data.hsncode);
+                $('#items_hsndescription').val(data.hsndescription);
+                $('#items_supplier').val(data.supplier_name);
+                $('#items_supplier_id').val(data.supplier_id);
+                /* Re-load with the item's own supplier selected. The list may not
+                   carry an inactive or deleted one, and loadSelectSupplier adds it
+                   back rather than letting an edit silently clear the field. */
+                PosnicPro.items.loadSelectSupplier(data.supplier_id, data.supplier_name);
+                $("#items_category").val(data.category_id).trigger("change");
+                $('#items_discount_amount').val(data.discount_amount);
+                $('#items_discount_percentage').val(data.discount_percentage);
+                $('#items_mrp_price').val(data.mrp_price);
+                $('#items_company_price').val(data.company_price);
+                $('#items_selling_price').val(data.selling_price);
+                $('#items_available_quantity').val(data.available_quantity);
+                $("#items_unit option[value='" + data.unit + "']").prop("selected", true);
+                if (data.items_mfg_date) {
+                    var mfgDate = new Date(data.items_mfg_date);
+                    var formattedMfgDate = mfgDate.getFullYear() + '-' + ('0' + (mfgDate.getMonth() + 1)).slice(-2) + '-' + ('0' + mfgDate.getDate()).slice(-2);
+                    $('#items_mfg_date').val(formattedMfgDate);
+                } else {
+                    $('#items_mfg_date').val('');
+                }
+                if (data.items_expiry_date) {
+                    var expiryDate = new Date(data.items_expiry_date);
+                    var formattedExpiryDate = expiryDate.getFullYear() + '-' + ('0' + (expiryDate.getMonth() + 1)).slice(-2) + '-' + ('0' + expiryDate.getDate()).slice(-2);
+                    $('#items_expiry_date').val(formattedExpiryDate);
+                } else {
+                    $('#items_expiry_date').val('');
+                }
+                $('#item_title_data').text(PosnicPro.i18n.t('lang_edit_title', 'Edit'));
+                $('#item_button_title').text(PosnicPro.i18n.t('lang_updatebtn_title', 'Update'));
+                if ((data.itemid === data.barcode_id) && (data.itemid !== '')) {
+                    $("#same_as_sku").prop("checked", true);
+                } else {
+                    $("#same_as_sku").prop("checked", false);
+                }
+                $('#items_sort').val(data.sort_order);
+                if (data.description !== '') {
+                    $('#items_description').val(
+                        $('<div>').html(data.description).text() || data.description
+                    );
+                }
+                (data.track_inventory === true) ? $('#item_track_inventory').prop('checked', true) : $('#item_track_inventory').prop("checked", false);
+                (data.ecommerce === true) ? $('#item_ecommerce').prop('checked', true) : $('#item_ecommerce').prop("checked", false);
+                /* Absent means shown: an item saved before this field existed
+                   belongs on the menu, which is what a menu is for. */
+                $('#item_show_on_menu').prop('checked', data.show_on_menu !== false);
+                $('#item_diet').val(data.diet || '');
+                PosnicPro.itemDayparts.set(data.daypart_ids || []);
+                PosnicPro.itemGoesWith.set(data.goes_with || []);
+                PosnicPro.itemChannels.set(data.channel_off || []);
+                $('#item_prep_note').val(data.prep_note || '');
+                $('#item_prep_minutes').val(data.prep_minutes || '');
+                PosnicPro.itemPlate.set(data);
+                (data.negative_stock === true) ? $('#item_negative_stock').prop('checked', true) : $('#item_negative_stock').prop("checked", false);
+                (data.item_weight_machine_based === true) ? $('#item_weight_machine_based').prop('checked', true) : $('#item_weight_machine_based').prop("checked", false);
+                (data.open_price === true) ? $('#item_open_price').prop('checked', true) : $('#item_open_price').prop("checked", false);
+                $('#item_is_service').prop('checked', data.item_kind === 'service');
+                $('#item_service_unit').val(data.service_unit || 'fixed');
+                PosnicPro.items.applyServiceMode();
+                $('#items_brand').val(data.brand || '');
+                $('#items_tags').val(Array.isArray(data.tags) ? data.tags.join(', ') : '');
+                $('#items_reorder_point').val(data.reorder_point === null || data.reorder_point === undefined ? '' : data.reorder_point);
+                $('#items_gtin').val(data.gtin || '');
+                PosnicPro.items.checkGtin();
+                PosnicPro.items.setTileColor(data.tile_color || '');
+                PosnicPro.items.setTileShape(data.tile_shape || '');
+                /* What the shop chose, and - so the form can tell "chosen"
+                   from "suggested" - what the name would have suggested. */
+                PosnicPro.items.setIcon(data.icon || '');
+                PosnicPro.items.suggestIcon();
+                $('#items_plu_code').val(data.plu_code || '');
+                $("#items_tax").val(data.tax_id).trigger("change");
+                $("#items_unit").val(data.unit_id).trigger("change");
+                var radionbutton = $('#items_discount_amount').val();
+                if (radionbutton > 0) {
+                    $("#item_radio_discount_amount").prop('checked', 'checked');
+                    $('#items_discount_percentage').attr('disabled', 'disabled').addClass('bg-white').hide();
+                    $('#items_discount_amount').removeAttr('disabled', 'disabled').show();
+                } else {
+                    $("#item_radio_discount_percentage").prop('checked', 'checked');
+                    $('#items_discount_amount').attr('disabled', 'disabled').addClass('bg-white').hide();
+                    $('#items_discount_percentage').removeAttr('disabled', 'disabled').show();
+                }
+
+                if (data.hsncode > 0) {
+                    $('#item_tax_hsncode').prop('checked', true);
+                    $('#hsn_code_show').show();
+                    $('#hsn_tax').show().val(data.tax);
+                    $('#default_tax').hide();
+                } else {
+                    $('#item_tax_default').prop('checked', true);
+                    $('#hsn_code_show').hide();
+                    $('#hsn_tax').hide();
+                    $('#default_tax').show();
+                }
+                $('#item_upload_image_status').val('no');
+                (data.tax_type === 'inclusive') ? $('#item_tax_inclusive').prop('checked', true) : $('#item_tax_exclusive').prop("checked", true);
+                $.each(data.multi_image, function (key, val) {
+                    var image_path = val.name;
+                    var convertFunction = PosnicPro.convertFileToDataURLviaFileReader;
+                    convertFunction(image_path, function (base64Img) {
+                        var strImage = base64Img.replace(/^data:image\/[a-z]+;base64,/, "");
+                        PosnicPro.items.imageParams[key] = {
+                            name: val.name,
+                            data: strImage,
+                            size: base64Img.length,
+                            cover: val.cover
+                        };
+                    });
+
+                    $('#item-display-preview').append(
+                            '<div id="selector_' + key + '" class="receiving-image-wrapper image-area" style="position: relative;"> \
+                        <img loading="lazy" decoding="async" class="image_style" class="img-thumbnail" src="' + image_path + '" \
+                        title="' + escape(val.name) + '" /><br /> \
+                    <span id="coverimage_selector_' + key + '" class="coverImageAdd" style="display: block;border: 1px solid #ddd;border-radius: 5px;margin-top: 2px; background: #506fe4; color: #fff" onclick="PosnicPro.items.coverImageEdit(this.id,\'' + key + '\',\'' + val.name + '\',\'' + val.size + '\')">Choose Cover</span><a class="remove-image" style="cursor:pointer;display: inline;position: absolute; top: -10px; right: -10px; border-radius: 10em; padding: 2px 6px 3px; text-decoration: none; font: 700 21px/20px sans-serif; background: #f48787; border: 3px solid #fff; color: #FFF; box-shadow: 0 2px 6px rgba(0,0,0,0.5), inset 0 2px 4px rgba(0,0,0,0.3); text-shadow: 0 1px 2px rgba(0,0,0,0.5); -webkit-transition: background 0.5s; transition: background 0.5s;" onclick="PosnicPro.items.image_edit_remove_selected(\'' + key + '\',\'' + val.name + '\')">&#215;</a> \
+                        </div>');
+
+                    if (val.cover === "yes") {
+                        $('#item_logo').val(val.name);
+                        $('#coverimage_selector_' + key).html('');
+                        var styles = {
+                            display: 'block',
+                            border: '1px solid #ddd',
+                            'border-radius': '5px',
+                            'margin-top': '2px',
+                            background: 'green',
+                            color: '#fff'
+                        };
+                        $('#coverimage_selector_' + key).css(styles).append('Cover');
+                    }
+
+                });
+
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+
+    resetEditButton: function (id) {
+        PosnicPro.items.editItem(id);
+    },
+    addItemButton: function () {
+        var loader = $(".loader-item");
+        loader.find(".loadingSpinner:first").remove();
+        $(".vertical-layout").removeClass("toggle-menu");
+        $('.nav-link-active,.tab-pane-active,.dropdown-item').removeClass('active');
+        $(".vertical-layout").removeClass("toggle-menu");
+        $(".vertical-menu li a").removeClass("active");
+        $('.dropdown-item').removeClass('active');
+        $('#v-pills-inventory-tab,#view_items_page').addClass('active');
+        $('#v-pills-inventory').addClass('show active');
+        $('#item_title_data').text(PosnicPro.i18n.t('lang_nav_add', 'Add'));
+        $('#itemid').val('');
+        // A fresh entry: the discount fields are untouched again, so a
+        // category pick may fill them (applyCategoryDiscount checks this).
+        PosnicPro.items._discountTouched = false;
+        $('#item_button_title').text(PosnicPro.i18n.t('lang_save_title', 'Save'));
+
+        $('.update-button').attr('disabled', 'disabled').removeClass('btn-outline-success');
+        $('#show_last_created_item').hide();
+        if (PosnicPro.local.get('sameassku') === "true") {
+            PosnicPro.items.sameAsSku(true);
+        } else {
+            PosnicPro.items.sameAsSku(false);
+        }
+
+        if ($("#product_without_variant").is(":checked")) {
+            $('#show_variant_fields').hide();
+            $('#show_price_fields,#sku_card_col').show();
+            $("#load_price_fields").html('');
+            $("#show-hide-item-discount").show();
+        } else {
+            $('#show_price_fields,#sku_card_col').hide();
+            $('#show_variant_fields').show();
+            $('#show_variant_fields').css("display", "block");
+            $("#show-hide-item-discount").hide();
+        }
+
+        var defaultsupplier = JSON.parse(PosnicPro.local.get('defaultsupplier'));
+        if (defaultsupplier.supplier_id !== $('#items_supplier_id').val() && PosnicPro.local.get('default_supplier_enable_disable') === 'false') {
+            $('#items_supplier_id').val();
+            $('#items_supplier').val();
+        } else if (PosnicPro.local.get('default_supplier_enable_disable') === 'false') {
+            $('#items_supplier_id').val('');
+            $('#items_supplier').val('');
+        } else {
+            $('#items_supplier_id').val(defaultsupplier.supplier_id);
+            $('#items_supplier').val(defaultsupplier.supplier_name);
+        }
+
+        if (PosnicPro.local.get('default_tax_enable_disable') === 'false') {
+            $('#items_tax').val();
+        } else {
+            var taxDetail = PosnicPro.local.get('default_tax_id');
+            $('#items_tax').val(taxDetail).trigger("change");
+        }
+
+        $(".items_category").val();
+        $(".items_category").select2({
+            placeholder: "Choose a Category"
+        });
+        $("#items_variant").val();
+        $("#items_variant").select2({
+            placeholder: "Choose a Variant"
+        });
+
+        if (PosnicPro.local.get('setting-discount-amount') > 0) {
+            $("#item_radio_discount_amount").prop('checked', 'checked');
+            $('#items_discount_percentage').attr('disabled', 'disabled').addClass('bg-white').hide().val('0');
+            $('#items_discount_amount').removeAttr('disabled', 'disabled').show().val(PosnicPro.local.get('setting-discount-amount'));
+        } else {
+            $("#item_radio_discount_percentage").prop('checked', 'checked');
+            $('#items_discount_amount').attr('disabled', 'disabled').addClass('bg-white').hide().val('0.00');
+            $('#items_discount_percentage').removeAttr('disabled', 'disabled').show().val(PosnicPro.local.get('setting-discount-percentage'));
+        }
+
+    },
+    exportItems: function () {
+        PosnicPro.exportTableData(PosnicPro.items_checkbox, 'items');
+    },
+    deleteSelectedItems: function () {
+        PosnicPro.deleteTableData(PosnicPro.items_checkbox, 'items');
+    },
+
+    /*
+     * Bulk price update.
+     *
+     * A shop that changes prices often should not have to open every item, or
+     * export a file and re-import it (which is how images were being lost). It
+     * raises or lowers one price field across all items, or one category, by a
+     * percentage or a flat amount. The server does the arithmetic and records
+     * every change in price history - this is only the form.
+     */
+    openBulkPrice: function () {
+        $('input[name="bulk_price_scope"][value="all"]').prop('checked', true);
+        $('.bulk-price-category-row').hide();
+        $('#bulk_price_field').val('selling_price');
+        $('#bulk_price_direction').val('increase');
+        $('#bulk_price_op').val('percent');
+        $('.bulk-price-unit').text('%');
+        $('#bulk_price_value').val('');
+        $('#bulk_price_skip').prop('checked', true);
+        $('#bulk_price_check_result').hide().empty();
+        $('#bulk_price_submit').prop('disabled', false);
+        PosnicPro.items.loadBulkPriceCategories();
+        $('#bulk_price_modal').modal('show');
+    },
+
+    // Read + validate the bulk-price form once, for both Check and Update.
+    readBulkPriceForm: function () {
+        var scope = $('input[name="bulk_price_scope"]:checked').val();
+        var value = $('#bulk_price_value').val();
+        if (value === '' || isNaN(value) || Number(value) < 0) {
+            PosnicPro.alert('warning', PosnicPro.i18n.t('lang_enter_a_valid_amount', 'Enter a valid amount.'));
+            return null;
+        }
+        var category_id = (scope === 'category') ? $('#bulk_price_category').val() : null;
+        if (scope === 'category' && !category_id) {
+            PosnicPro.alert('warning', PosnicPro.i18n.t('lang_choose_a_category', 'Choose a category.'));
+            return null;
+        }
+        return {
+            scope: scope,
+            category_id: category_id,
+            field: $('#bulk_price_field').val(),
+            op: $('#bulk_price_op').val(),
+            value: value,
+            direction: $('#bulk_price_direction').val()
+        };
+    },
+
+    // Dry-run the change and show what it would do - how many change, and how
+    // many would end up over MRP or under cost - before anything is written.
+    checkBulkPrice: function () {
+        var form = PosnicPro.items.readBulkPriceForm();
+        if (!form) return false;
+        var currency = PosnicPro.local.get('currencySign') || '';
+        var box = $('#bulk_price_check_result');
+        box.html('<span class="dim"><lang class="lang_checking">Checking...</lang></span>').show();
+
+        PosnicPro.post({ url: 'items/bulkPricePreview', data: JSON.stringify(form) }, function (response) {
+            if (response.type !== 'success') {
+                box.hide();
+                PosnicPro.alert(response.type, response.message);
+                return;
+            }
+            var d = response.data || {};
+            var esc = function (v) { return $('<div>').text(v == null ? '' : v).html(); };
+            var line = function (rows, label, limitLabel) {
+                if (!rows || !rows.length) return '';
+                var sample = rows.slice(0, 5).map(function (r) {
+                    return '<li>' + esc(r.name) + ': ' + currency + ' ' + Number(r.new_value).toFixed(2) +
+                        ' <span class="dim">(' + limitLabel + ' ' + currency + ' ' + Number(r.limit).toFixed(2) + ')</span></li>';
+                }).join('');
+                var more = rows.length > 5 ? '<li class="dim">and ' + (rows.length - 5) + ' more</li>' : '';
+                return '<div style="margin-top:6px;"><b>' + label + '</b><ul style="margin:4px 0 0; padding-left:18px;">' + sample + more + '</ul></div>';
+            };
+
+            var hasIssue = (d.exceedsMrpCount || 0) + (d.belowCostCount || 0) > 0;
+            var head = '<b>' + (d.willChange || 0) + '</b> of ' + (d.total || 0) + ' item(s) would change.';
+            var body = '';
+            if (hasIssue) {
+                body += line(d.exceedsMrp, (d.exceedsMrpCount || 0) + ' would go ABOVE MRP', 'MRP');
+                body += line(d.belowCost, (d.belowCostCount || 0) + ' would sell BELOW cost', 'cost');
+                body += '<div class="dim" style="margin-top:6px; font-size:12px;">With "skip" ticked, these are left unchanged.</div>';
+            } else {
+                body = '<div class="text-success" style="margin-top:4px;"><i class="feather icon-check"></i> No item would break MRP or cost.</div>';
+            }
+            box.attr('class', hasIssue ? 'alert alert-warning' : 'alert alert-success')
+                .css({ 'font-size': '12.5px', 'padding': '8px 12px' })
+                .html(head + body).show();
+        }, function () {
+            box.hide();
+        });
+        return false;
+    },
+
+    toggleBulkCategory: function () {
+        var scope = $('input[name="bulk_price_scope"]:checked').val();
+        (scope === 'category') ? $('.bulk-price-category-row').show() : $('.bulk-price-category-row').hide();
+    },
+
+    bulkPriceOpChanged: function () {
+        var op = $('#bulk_price_op').val();
+        var currency = PosnicPro.local.get('currencySign') || '';
+        $('.bulk-price-unit').text(op === 'percent' ? '%' : (currency || 'Amt'));
+    },
+
+    loadBulkPriceCategories: function () {
+        var sel = $('#bulk_price_category');
+        var params = { url: 'categories/getCategoryAjaxList', data: 'query=' };
+        PosnicPro.get(params, function (response) {
+            sel.empty();
+            $.map(response.suggestions || [], function (dataItem) {
+                sel.append('<option value="' + dataItem.id + '">' + dataItem.name + '</option>');
+            });
+            // Keep the dropdown inside the modal so it is not clipped or lost
+            // behind it (a known select2-in-modal quirk).
+            sel.select2({ placeholder: PosnicPro.i18n.t('lang_choose_a_category_2', 'Choose a category'), dropdownParent: $('#bulk_price_modal') });
+        });
+    },
+
+    submitBulkPrice: function () {
+        var form = PosnicPro.items.readBulkPriceForm();
+        if (!form) return false;
+        form.skipViolations = $('#bulk_price_skip').is(':checked');
+
+        $('#bulk_price_submit').prop('disabled', true);
+        var params = {
+            url: 'items/bulkUpdatePrices',
+            data: JSON.stringify(form)
+        };
+        PosnicPro.post(params, function (response) {
+            $('#bulk_price_submit').prop('disabled', false);
+            if (response.type === 'success') {
+                $('#bulk_price_modal').modal('hide');
+                PosnicPro.alert('success', response.message);
+                PosnicPro.items.itemsTable();
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function () {
+            $('#bulk_price_submit').prop('disabled', false);
+        });
+        return false;
+    },
+
+    // ---- Bulk stock update: add/remove stock across items or a category, with
+    // a note carried into the stock log. Mirrors bulk price; no MRP/cost rules. ----
+    /* Stock adjustment with reasons (Loyverse study L2). Inventory count
+       SETS stock to what was counted; Loss and Damage SUBTRACT what
+       disappeared. Rows are picked via the receiving autocomplete endpoint
+       (it carries current stock); the server logs every change with the
+       reason as its process. */
+    _adjRows: {},
+    openStockAdjustment: function () {
+        PosnicPro.items._adjRows = {};
+        $('#stock_adjust_note').val('');
+        $('#stock_adjust_search').val('');
+        $('#stock_adjust_reason').val('Inventory count');
+        $('#stock_adjust_custom').val('');
+        $('#stock_adjust_custom_wrap').hide();
+        PosnicPro.items.renderAdjRows();
+        $('#stock_adjust_modal').modal('show');
+        setTimeout(function () { $('#stock_adjust_search').focus(); }, 400);
+    },
+    /* The direction in force: seeded reasons imply theirs, custom says its own. */
+    _adjMode: function () {
+        var reason = $('#stock_adjust_reason').val();
+        if (reason === '__custom__') { return $('#stock_adjust_mode').val() || 'subtract'; }
+        if (reason === 'Inventory count') { return 'set'; }
+        if (reason === 'Stock found') { return 'add'; }
+        return 'subtract';
+    },
+    adjReasonChanged: function () {
+        $('#stock_adjust_custom_wrap').toggle($('#stock_adjust_reason').val() === '__custom__');
+        PosnicPro.items.renderAdjRows();
+    },
+    renderAdjRows: function () {
+        var mode = PosnicPro.items._adjMode();
+        $('#stock_adjust_qty_head').text(mode === 'set' ? 'Counted' : mode === 'add' ? PosnicPro.i18n.t('lang_qty_found', 'Qty found') : PosnicPro.i18n.t('lang_qty_lost', 'Qty lost'));
+        var keys = Object.keys(PosnicPro.items._adjRows);
+        if (!keys.length) {
+            $('#stock_adjust_rows').html('<tr><td colspan="5" class="text-center text-muted"><lang class="lang_search_and_pick_items_to_adjust">Search and pick items to adjust.</lang></td></tr>');
+            return;
+        }
+        var html = keys.map(function (id) {
+            var r = PosnicPro.items._adjRows[id];
+            var qty = Number(r.qty) || 0;
+            var after = mode === 'set' ? qty : mode === 'add' ? (Number(r.stock) || 0) + qty : Math.max(0, (Number(r.stock) || 0) - qty);
+            return '<tr>' +
+                '<td>' + $('<span>').text(r.name).html() + '</td>' +
+                '<td class="text-right">' + (Number(r.stock) || 0) + '</td>' +
+                '<td class="text-right"><input type="number" min="0" class="form-control form-control-sm text-right adj-qty" data-id="' + id + '" value="' + qty + '" style="width:100px;display:inline-block;"></td>' +
+                '<td class="text-right">' + after + '</td>' +
+                '<td><a href="javascript:void(0)" class="text-danger adj-remove" data-id="' + id + '">&times;</a></td>' +
+                '</tr>';
+        }).join('');
+        $('#stock_adjust_rows').html(html);
+    },
+    submitStockAdjustment: function () {
+        var rows = Object.keys(PosnicPro.items._adjRows).map(function (id) {
+            return { item_id: id, qty: Number(PosnicPro.items._adjRows[id].qty) || 0 };
+        });
+        if (!rows.length) {
+            PosnicPro.alert('warning', PosnicPro.i18n.t('lang_pick_at_least_one_item', 'Pick at least one item'));
+            return;
+        }
+        $('#stock_adjust_submit').prop('disabled', true);
+        var reasonSel = $('#stock_adjust_reason').val();
+        var reason = reasonSel === '__custom__' ? ($('#stock_adjust_custom').val() || '').trim() : reasonSel;
+        if (!reason) {
+            PosnicPro.alert('warning', PosnicPro.i18n.t('lang_name_the_custom_reason', 'Name the custom reason'));
+            $('#stock_adjust_submit').prop('disabled', false);
+            return;
+        }
+        PosnicPro.post({
+            url: 'items/stockAdjustment',
+            data: JSON.stringify({
+                reason: reason,
+                mode: PosnicPro.items._adjMode(),
+                note: $('#stock_adjust_note').val(),
+                rows: rows
+            })
+        }, function (response) {
+            $('#stock_adjust_submit').prop('disabled', false);
+            PosnicPro.alert(response.type, response.message);
+            if (response.type === 'success') {
+                $('#stock_adjust_modal').modal('hide');
+                PosnicPro.items.itemsTable('items');
+                PosnicPro.stocklogs.viewLowStockDashboard();
+            }
+        }, function (xhr) {
+            $('#stock_adjust_submit').prop('disabled', false);
+            var resp = {};
+            try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+            PosnicPro.alert('error', resp.message || 'Could not adjust stock');
+        });
+    },
+    /*
+     * HOW LONG A SECTION TAKES.
+     *
+     * Counted on the live shop the day this was written: 272 dishes, none with
+     * a prep time. The field has been on the item form all along - it is empty
+     * because filling it means opening 272 dishes, and nobody does that.
+     *
+     * Two customer-facing things go quiet without it: the dish sheet cannot
+     * say "takes about 20 minutes", and the busy-kitchen notice has no round
+     * length to multiply, so it tells somebody the kitchen is behind and never
+     * by how much.
+     *
+     * Same scope and the same check-then-apply as the tools beside it.
+     */
+    openPrepMinutes: function () {
+        $('input[name="prep_minutes_scope"][value="all"]').prop('checked', true);
+        $('.prep-minutes-category-row').hide();
+        $('#prep_minutes_value').val('');
+        $('#prep_minutes_only_empty').prop('checked', true);
+        $('#prep_minutes_check_result').hide().empty();
+        $('#prep_minutes_submit').prop('disabled', false);
+        PosnicPro.items.loadPrepMinutesCategories();
+        $('#prep_minutes_modal').modal('show');
+    },
+
+    togglePrepMinutesCategory: function () {
+        var scope = $('input[name="prep_minutes_scope"]:checked').val();
+        (scope === 'category') ? $('.prep-minutes-category-row').show() : $('.prep-minutes-category-row').hide();
+    },
+
+    loadPrepMinutesCategories: function () {
+        var sel = $('#prep_minutes_category');
+        PosnicPro.get({ url: 'categories/getCategoryAjaxList', data: 'query=' }, function (response) {
+            sel.empty();
+            $.map(response.suggestions || [], function (dataItem) {
+                sel.append('<option value="' + dataItem.id + '">' + dataItem.name + '</option>');
+            });
+            sel.select2({ placeholder: PosnicPro.i18n.t('lang_choose_a_category_2', 'Choose a category'), dropdownParent: $('#prep_minutes_modal') });
+        });
+    },
+
+    readPrepMinutesForm: function () {
+        var scope = $('input[name="prep_minutes_scope"]:checked').val();
+        var value = $('#prep_minutes_value').val();
+        /*
+         * An empty box is refused HERE rather than sent as nothing. The server
+         * refuses it too, but a blank that travelled would read as "set every
+         * dish to zero minutes", which on the menu means "ready instantly".
+         */
+        if (value === '' || isNaN(value) || Number(value) < 0 || Number(value) > 1440) {
+            PosnicPro.alert('warning', PosnicPro.i18n.t('lang_prep_enter_minutes', 'Enter how many minutes, from 0 to 1440.'));
+            return null;
+        }
+        var category_id = (scope === 'category') ? $('#prep_minutes_category').val() : null;
+        if (scope === 'category' && !category_id) {
+            PosnicPro.alert('warning', PosnicPro.i18n.t('lang_choose_a_category', 'Choose a category.'));
+            return null;
+        }
+        return {
+            scope: scope,
+            category_id: category_id,
+            minutes: Number(value),
+            only_empty: $('#prep_minutes_only_empty').is(':checked')
+        };
+    },
+
+    checkPrepMinutes: function () {
+        var form = PosnicPro.items.readPrepMinutesForm();
+        if (!form) return false;
+        var box = $('#prep_minutes_check_result');
+        box.html('<span class="dim"><lang class="lang_checking">Checking...</lang></span>').show();
+        PosnicPro.post({ url: 'items/bulkPrepMinutesPreview', data: JSON.stringify(form) }, function (response) {
+            if (response.type !== 'success') {
+                box.hide();
+                PosnicPro.alert(response.type, response.message);
+                return;
+            }
+            var d = response.data || {};
+            var esc = function (v) { return $('<div>').text(v == null ? '' : v).html(); };
+            var rows = (d.sample || []).slice(0, 5).map(function (r) {
+                return '<li>' + esc(r.name) + ': ' + esc(r.old_value) + ' &rarr; <b>' + esc(r.new_value) + '</b></li>';
+            }).join('');
+            var more = (d.willChange > 5) ? '<li class="dim">and ' + (d.willChange - 5) + ' more</li>' : '';
+            var head = d.willChange
+                ? '<b>' + d.willChange + '</b> of ' + (d.total || 0) + ' dish(es) would change.'
+                : PosnicPro.i18n.t('lang_prep_nothing', 'Nothing to change: those dishes already say that.');
+            /* What a cautious run leaves alone, said out loud, so a shop can
+               see its own hand-set times are safe. */
+            var kept = d.keeping
+                ? ' ' + PosnicPro.i18n.t('lang_prep_keeping', 'Times you set by hand are kept.')
+                : '';
+            var body = rows ? '<ul style="margin:4px 0 0; padding-left:18px;">' + rows + more + '</ul>' : '';
+            box.attr('class', 'alert alert-info')
+                .css({ 'font-size': '12.5px', 'padding': '8px 12px' })
+                .html(head + esc(kept) + body).show();
+        }, function () {
+            box.hide();
+        });
+        return false;
+    },
+
+    submitPrepMinutes: function () {
+        var form = PosnicPro.items.readPrepMinutesForm();
+        if (!form) return false;
+        $('#prep_minutes_submit').prop('disabled', true);
+        PosnicPro.post({ url: 'items/bulkPrepMinutes', data: JSON.stringify(form) }, function (response) {
+            $('#prep_minutes_submit').prop('disabled', false);
+            if (response.type === 'success') {
+                $('#prep_minutes_modal').modal('hide');
+                PosnicPro.alert('success', response.message);
+                PosnicPro.items.itemsTable();
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function () {
+            $('#prep_minutes_submit').prop('disabled', false);
+        });
+        return false;
+    },
+
+    /*
+     * WHO MAY CHOOSE HOW HOT, over a whole section.
+     *
+     * The tick lives on the dish because only the kitchen knows which dishes
+     * it can cook to order. But a restaurant with 272 dishes that has to open
+     * every one of them to tick a box does not turn the feature on - it leaves
+     * it off, and the customer goes on typing "less spicy" into a note.
+     *
+     * Same scope and the same check-then-apply as the bulk price and stock
+     * tools next to it, because a shop should not have to learn a third shape
+     * for the same idea.
+     */
+    openSpiceChoice: function () {
+        $('input[name="spice_choice_scope"][value="all"]').prop('checked', true);
+        $('.spice-choice-category-row').hide();
+        $('#spice_choice_offer').val('yes');
+        $('#spice_choice_check_result').hide().empty();
+        $('#spice_choice_submit').prop('disabled', false);
+        PosnicPro.items.loadSpiceChoiceCategories();
+        $('#spice_choice_modal').modal('show');
+    },
+
+    toggleSpiceChoiceCategory: function () {
+        var scope = $('input[name="spice_choice_scope"]:checked').val();
+        (scope === 'category') ? $('.spice-choice-category-row').show() : $('.spice-choice-category-row').hide();
+    },
+
+    loadSpiceChoiceCategories: function () {
+        var sel = $('#spice_choice_category');
+        PosnicPro.get({ url: 'categories/getCategoryAjaxList', data: 'query=' }, function (response) {
+            sel.empty();
+            $.map(response.suggestions || [], function (dataItem) {
+                sel.append('<option value="' + dataItem.id + '">' + dataItem.name + '</option>');
+            });
+            sel.select2({ placeholder: PosnicPro.i18n.t('lang_choose_a_category_2', 'Choose a category'), dropdownParent: $('#spice_choice_modal') });
+        });
+    },
+
+    readSpiceChoiceForm: function () {
+        var scope = $('input[name="spice_choice_scope"]:checked').val();
+        var category_id = (scope === 'category') ? $('#spice_choice_category').val() : null;
+        if (scope === 'category' && !category_id) {
+            PosnicPro.alert('warning', PosnicPro.i18n.t('lang_choose_a_category', 'Choose a category.'));
+            return null;
+        }
+        return {
+            scope: scope,
+            category_id: category_id,
+            offer: $('#spice_choice_offer').val() === 'yes'
+        };
+    },
+
+    checkSpiceChoice: function () {
+        var form = PosnicPro.items.readSpiceChoiceForm();
+        if (!form) return false;
+        var box = $('#spice_choice_check_result');
+        box.html('<span class="dim"><lang class="lang_checking">Checking...</lang></span>').show();
+        PosnicPro.post({ url: 'items/bulkSpiceChoicePreview', data: JSON.stringify(form) }, function (response) {
+            if (response.type !== 'success') {
+                box.hide();
+                PosnicPro.alert(response.type, response.message);
+                return;
+            }
+            var d = response.data || {};
+            var esc = function (v) { return $('<div>').text(v == null ? '' : v).html(); };
+            var names = (d.sample || []).slice(0, 5).map(function (r) {
+                return '<li>' + esc(r.name) + '</li>';
+            }).join('');
+            var more = (d.willChange > 5) ? '<li class="dim">and ' + (d.willChange - 5) + ' more</li>' : '';
+            /*
+             * WOULD CHANGE, not "matches". Run it twice and the second answer
+             * is zero, which is the honest way to say the first one worked.
+             */
+            var head = d.willChange
+                ? '<b>' + d.willChange + '</b> of ' + (d.total || 0) + ' dish(es) would change.'
+                : PosnicPro.i18n.t('lang_spice_choice_nothing', 'Nothing to change: those dishes are already set that way.');
+            var body = names ? '<ul style="margin:4px 0 0; padding-left:18px;">' + names + more + '</ul>' : '';
+            box.attr('class', 'alert alert-info')
+                .css({ 'font-size': '12.5px', 'padding': '8px 12px' })
+                .html(head + body).show();
+        }, function () {
+            box.hide();
+        });
+        return false;
+    },
+
+    submitSpiceChoice: function () {
+        var form = PosnicPro.items.readSpiceChoiceForm();
+        if (!form) return false;
+        $('#spice_choice_submit').prop('disabled', true);
+        PosnicPro.post({ url: 'items/bulkSpiceChoice', data: JSON.stringify(form) }, function (response) {
+            $('#spice_choice_submit').prop('disabled', false);
+            if (response.type === 'success') {
+                $('#spice_choice_modal').modal('hide');
+                PosnicPro.alert('success', response.message);
+                PosnicPro.items.itemsTable();
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function () {
+            $('#spice_choice_submit').prop('disabled', false);
+        });
+        return false;
+    },
+
+    openBulkStock: function () {
+        $('input[name="bulk_stock_scope"][value="all"]').prop('checked', true);
+        $('.bulk-stock-category-row').hide();
+        $('#bulk_stock_direction').val('increase');
+        $('#bulk_stock_op').val('amount');
+        $('.bulk-stock-unit').text(PosnicPro.i18n.t('lang_qty_title', 'Qty'));
+        $('#bulk_stock_value').val('');
+        $('#bulk_stock_note').val('');
+        $('#bulk_stock_check_result').hide().empty();
+        $('#bulk_stock_submit').prop('disabled', false);
+        PosnicPro.items.loadBulkStockCategories();
+        $('#bulk_stock_modal').modal('show');
+    },
+
+    readBulkStockForm: function () {
+        var scope = $('input[name="bulk_stock_scope"]:checked').val();
+        var value = $('#bulk_stock_value').val();
+        if (value === '' || isNaN(value) || Number(value) < 0) {
+            PosnicPro.alert('warning', PosnicPro.i18n.t('lang_enter_a_valid_quantity', 'Enter a valid quantity.'));
+            return null;
+        }
+        var category_id = (scope === 'category') ? $('#bulk_stock_category').val() : null;
+        if (scope === 'category' && !category_id) {
+            PosnicPro.alert('warning', PosnicPro.i18n.t('lang_choose_a_category', 'Choose a category.'));
+            return null;
+        }
+        return {
+            scope: scope,
+            category_id: category_id,
+            op: $('#bulk_stock_op').val(),
+            value: value,
+            direction: $('#bulk_stock_direction').val(),
+            note: $('#bulk_stock_note').val()
+        };
+    },
+
+    checkBulkStock: function () {
+        var form = PosnicPro.items.readBulkStockForm();
+        if (!form) return false;
+        var box = $('#bulk_stock_check_result');
+        box.html('<span class="dim"><lang class="lang_checking">Checking...</lang></span>').show();
+        PosnicPro.post({ url: 'items/bulkStockPreview', data: JSON.stringify(form) }, function (response) {
+            if (response.type !== 'success') {
+                box.hide();
+                PosnicPro.alert(response.type, response.message);
+                return;
+            }
+            var d = response.data || {};
+            var esc = function (v) { return $('<div>').text(v == null ? '' : v).html(); };
+            var sample = (d.sample || []).slice(0, 5).map(function (r) {
+                return '<li>' + esc(r.name) + ': ' + esc(r.old_value) + ' &rarr; <b>' + esc(r.new_value) + '</b></li>';
+            }).join('');
+            var more = (d.willChange > 5) ? '<li class="dim">and ' + (d.willChange - 5) + ' more</li>' : '';
+            var head = '<b>' + (d.willChange || 0) + '</b> of ' + (d.total || 0) + ' item(s) would change.';
+            var body = sample ? '<ul style="margin:4px 0 0; padding-left:18px;">' + sample + more + '</ul>' : '';
+            box.attr('class', 'alert alert-info')
+                .css({ 'font-size': '12.5px', 'padding': '8px 12px' })
+                .html(head + body).show();
+        }, function () {
+            box.hide();
+        });
+        return false;
+    },
+
+    toggleBulkStockCategory: function () {
+        var scope = $('input[name="bulk_stock_scope"]:checked').val();
+        (scope === 'category') ? $('.bulk-stock-category-row').show() : $('.bulk-stock-category-row').hide();
+    },
+
+    bulkStockOpChanged: function () {
+        var op = $('#bulk_stock_op').val();
+        $('.bulk-stock-unit').text(op === 'percent' ? '%' : 'Qty');
+    },
+
+    loadBulkStockCategories: function () {
+        var sel = $('#bulk_stock_category');
+        var params = { url: 'categories/getCategoryAjaxList', data: 'query=' };
+        PosnicPro.get(params, function (response) {
+            sel.empty();
+            $.map(response.suggestions || [], function (dataItem) {
+                sel.append('<option value="' + dataItem.id + '">' + dataItem.name + '</option>');
+            });
+            sel.select2({ placeholder: PosnicPro.i18n.t('lang_choose_a_category_2', 'Choose a category'), dropdownParent: $('#bulk_stock_modal') });
+        });
+    },
+
+    submitBulkStock: function () {
+        var form = PosnicPro.items.readBulkStockForm();
+        if (!form) return false;
+        $('#bulk_stock_submit').prop('disabled', true);
+        var params = { url: 'items/bulkUpdateStock', data: JSON.stringify(form) };
+        PosnicPro.post(params, function (response) {
+            $('#bulk_stock_submit').prop('disabled', false);
+            if (response.type === 'success') {
+                $('#bulk_stock_modal').modal('hide');
+                PosnicPro.alert('success', response.message);
+                PosnicPro.items.itemsTable();
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function () {
+            $('#bulk_stock_submit').prop('disabled', false);
+        });
+        return false;
+    },
+    itemImageFormSubmit: function () {
+
+        if ($('#items_name').val() !== '') {
+            var loader = $(".loader-item");
+            $("<div class='loadingSpinner'></div>").appendTo(loader);
+            let uniqueImageParams = PosnicPro.items.imageParams.filter((c, index) => {
+                return PosnicPro.items.imageParams.indexOf(c) === index;
+            });
+            var params = {
+                url: 'items/uploadItemMultiImage',
+                data: JSON.stringify({
+                    "items_image": uniqueImageParams
+
+                })
+            };
+
+            PosnicPro.post(params, function (response) {
+                PosnicPro.items.imageParams = [];
+                $.each(response.data, function (key, val) {
+                    if (val.cover === 'yes') {
+                        $('#item_logo').val(val.name);
+                    }
+                    PosnicPro.items.imageParams[key] = {
+                        name: val.name,
+                        size: val.size,
+                        cover: val.cover
+                    };
+                    $('#item-display-preview').html('');
+                });
+                PosnicPro.items.item();
+                loader.find(".loadingSpinner:first").remove();
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+
+        } else {
+            PosnicPro.alert('error', PosnicPro.i18n.t('lang_fill_in_the_required_fields', 'Fill in the required fields.'));
+        }
+        return false;
+    },
+    updateItemAvailability: function (id, isChecked) {
+        var params = {
+            url: 'items/updateKioskStatus',
+            data: JSON.stringify({id: id, status: isChecked}),
+            contentType: "application/json"
+        };
+
+        PosnicPro.post(params, function (response) {
+            if (response.type !== 'success') {
+                PosnicPro.alert('error', response.message);
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert('error', response.message);
+        });
+    },
+    /*Clone item details*/
+    cloneItem: function (id) {
+        var loader = $(".loader-item");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        $(".infobar-settings-sidebar-overlay").css({"background": "rgba(0,0,0,0.4)", "position": "fixed"});
+        $("#infobar-settings-sidebar-item").addClass("sidebarshow");
+        $('#items_description').html('').text('');
+        $('#items_description').val('');
+        PosnicPro.get('items/' + id, function (response) {
+            if (response.type === 'success') {
+                hasher.setHash('items/new');
+                $('#item_title_data').text(PosnicPro.i18n.t('lang_clone', 'Clone'));
+                $('#item_button_title').text(PosnicPro.i18n.t('lang_action_duplicate_save', 'Duplicate & Save'));
+                var data = response.data;
+                $('#itemid').val('');
+                $('#items_name').val(data.name + '_copy');
+                $('#items_itemid').val(data.itemid);
+                $('#items_barcodeid').val(data.barcode_id);
+                $('#items_supplier').val(data.supplier_name);
+                $('#items_supplier_id').val(data.supplier_id);
+                /* Re-load with the item's own supplier selected. The list may not
+                   carry an inactive or deleted one, and loadSelectSupplier adds it
+                   back rather than letting an edit silently clear the field. */
+                PosnicPro.items.loadSelectSupplier(data.supplier_id, data.supplier_name);
+                $("#items_category").val(data.category_id).trigger("change");
+                $('#items_discount_amount').val(data.discount_amount);
+                $('#items_discount_percentage').val(data.discount_percentage);
+                $('#items_mrp_price').val(data.mrp_price);
+                $('#items_company_price').val(data.company_price);
+                $('#items_selling_price').val(data.selling_price);
+                $('#items_available_quantity').val(data.available_quantity);
+                $('#item_upload_image_status').val('no');
+                $('#item-display-preview').html('');
+                $.each(data.multi_image, function (key, val) {
+                    var image_path = val.name;
+                    var convertFunction = PosnicPro.convertFileToDataURLviaFileReader;
+                    convertFunction(image_path, function (base64Img) {
+                        var strImage = base64Img.replace(/^data:image\/[a-z]+;base64,/, "");
+                        PosnicPro.items.imageParams[key] = {
+                            name: val.name,
+                            data: strImage,
+                            size: base64Img.length,
+                            cover: val.cover
+                        };
+                    });
+                    $('#item-display-preview').append(
+                            '<div id="selector_' + key + '" class="receiving-image-wrapper image-area" style="position: relative;"> \
+                        <img loading="lazy" decoding="async" class="image_style" class="img-thumbnail" src="' + image_path + '" \
+                        title="' + escape(val.name) + '" /><br /> \
+                    <span id="coverimage_selector_' + key + '" class="coverImageAdd" style="display: block;border: 1px solid #ddd;border-radius: 5px;margin-top: 2px; background: #506fe4; color: #fff" onclick="PosnicPro.items.coverImageEdit(this.id,\'' + key + '\',\'' + val.name + '\',\'' + val.size + '\')">Choose Cover</span><a class="remove-image" style="cursor:pointer;display: inline;position: absolute; top: -10px; right: -10px; border-radius: 10em; padding: 2px 6px 3px; text-decoration: none; font: 700 21px/20px sans-serif; background: #f48787; border: 3px solid #fff; color: #FFF; box-shadow: 0 2px 6px rgba(0,0,0,0.5), inset 0 2px 4px rgba(0,0,0,0.3); text-shadow: 0 1px 2px rgba(0,0,0,0.5); -webkit-transition: background 0.5s; transition: background 0.5s;" onclick="PosnicPro.items.image_edit_remove_selected(\'' + key + '\',\'' + val.name + '\')">&#215;</a> \
+                        </div>');
+
+                    if (val.cover === "yes") {
+                        $('#item_logo').val(val.name);
+                        $('#coverimage_selector_' + key).html('');
+                        var styles = {
+                            display: 'block',
+                            border: '1px solid #ddd',
+                            'border-radius': '5px',
+                            'margin-top': '2px',
+                            background: 'green',
+                            color: '#fff'
+                        };
+                        $('#coverimage_selector_' + key).css(styles).append('Cover');
+                    }
+
+                });
+
+                $('#items_sort').val(data.sort_order);
+                $('#items_hsncode').val(data.hsncode);
+                $('#items_hsndescription').val(data.hsndescription);
+                if (data.hsncode > 0) {
+                    $('#item_tax_hsncode').prop('checked', true);
+                    $('#hsn_code_show').show();
+                    $('#hsn_tax').show().val(data.tax);
+                    $('#default_tax').hide();
+                } else {
+                    $('#item_tax_default').prop('checked', true);
+                    $('#hsn_code_show').hide();
+                    $('#hsn_tax').hide();
+                    $('#default_tax').show();
+                }
+                (data.track_inventory === true) ? $('#item_track_inventory').prop('checked', true) : $('#item_track_inventory').prop("checked", false);
+                (data.ecommerce === true) ? $('#item_ecommerce').prop('checked', true) : $('#item_ecommerce').prop("checked", false);
+                /* Absent means shown: an item saved before this field existed
+                   belongs on the menu, which is what a menu is for. */
+                $('#item_show_on_menu').prop('checked', data.show_on_menu !== false);
+                $('#item_diet').val(data.diet || '');
+                PosnicPro.itemDayparts.set(data.daypart_ids || []);
+                PosnicPro.itemGoesWith.set(data.goes_with || []);
+                PosnicPro.itemChannels.set(data.channel_off || []);
+                $('#item_prep_note').val(data.prep_note || '');
+                $('#item_prep_minutes').val(data.prep_minutes || '');
+                PosnicPro.itemPlate.set(data);
+                (data.negative_stock === true) ? $('#item_negative_stock').prop('checked', true) : $('#item_negative_stock').prop("checked", false);
+                (data.item_weight_machine_based === true) ? $('#item_weight_machine_based').prop('checked', true) : $('#item_weight_machine_based').prop("checked", false);
+                (data.open_price === true) ? $('#item_open_price').prop('checked', true) : $('#item_open_price').prop("checked", false);
+                $('#item_is_service').prop('checked', data.item_kind === 'service');
+                $('#item_service_unit').val(data.service_unit || 'fixed');
+                PosnicPro.items.applyServiceMode();
+                $('#items_brand').val(data.brand || '');
+                $('#items_tags').val(Array.isArray(data.tags) ? data.tags.join(', ') : '');
+                $('#items_reorder_point').val(data.reorder_point === null || data.reorder_point === undefined ? '' : data.reorder_point);
+                $('#items_gtin').val(data.gtin || '');
+                PosnicPro.items.checkGtin();
+                PosnicPro.items.setTileColor(data.tile_color || '');
+                PosnicPro.items.setTileShape(data.tile_shape || '');
+                /* What the shop chose, and - so the form can tell "chosen"
+                   from "suggested" - what the name would have suggested. */
+                PosnicPro.items.setIcon(data.icon || '');
+                PosnicPro.items.suggestIcon();
+                $('#items_plu_code').val(data.plu_code || '');
+                (data.tax_type === 'inclusive') ? $('#item_tax_inclusive').prop('checked', true) : $('#item_tax_exclusive').prop("checked", true);
+                $("#items_tax").val(data.tax_id).trigger("change");
+                var radionbutton = $('#items_discount_amount').val();
+                if (radionbutton > 0) {
+                    $("#item_radio_discount_amount").prop('checked', 'checked');
+                    $('#items_discount_percentage').attr('disabled', 'disabled').addClass('bg-white').hide();
+                    $('#items_discount_amount').removeAttr('disabled', 'disabled').show();
+                } else {
+                    $("#item_radio_discount_percentage").prop('checked', 'checked');
+                    $('#items_discount_amount').attr('disabled', 'disabled').addClass('bg-white').hide();
+                    $('#items_discount_percentage').removeAttr('disabled', 'disabled').show();
+                }
+                if (data.description !== '') {
+                    $('#items_description').val(
+                        $('<div>').html(data.description).text() || data.description
+                    );
+                }
+                loader.find(".loadingSpinner:first").remove();
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        });
+    },
+    loadOnchangeSku: function () {
+        if (PosnicPro.local.get('sameassku') === "true") {
+            PosnicPro.items.sameAsSku(true);
+        } else {
+            PosnicPro.items.sameAsSku(false);
+        }
+    },
+    sameAsSku: function (checked) {
+        if ($("#product_without_variant").is(":checked")) {
+            if (checked) {
+                $('#items_barcodeid').val($('#items_itemid').val());
+                $('#items_barcodeid').attr('disabled', 'disabled');
+                $("#same_as_sku").prop("checked", true);
+                PosnicPro.local.set('sameassku', "true");
+            } else {
+                $("#same_as_sku").prop("checked", false);
+                PosnicPro.local.set('sameassku', "false");
+                $('#items_barcodeid').removeAttr('disabled');
+            }
+        } else {
+            var variant_value = $('#item_variant_list').val();
+            Array.from(variant_value || []).forEach(function (id, key) {
+                if (checked) {
+                    $('#items_barcodeid_' + key + '').val($('#items_itemid_' + key + '').val());
+                    $('#items_barcodeid_' + key + '').attr('disabled', 'disabled');
+                    $('#same_as_sku_' + key + '').prop("checked", true);
+                    PosnicPro.local.set('sameassku', "true");
+                } else {
+                    $('#same_as_sku_' + key + '').prop("checked", false);
+                    PosnicPro.local.set('sameassku', "false");
+                    $('#items_barcodeid_' + key + '').removeAttr('disabled');
+                }
+            });
+        }
+    },
+
+    printLableView: function (id) {
+        var loader = $(".loader-label-item");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        $("#mfg_checkbox").prop("checked", false);
+        $('#mfg-date-value').attr('disabled', 'disabled');
+        $("#exp_checkbox").prop("checked", false);
+        $('#exp-date-value').attr('disabled', 'disabled');
+        PosnicPro.get('items/' + id, function (response) {
+            if (response.type === 'success') {
+                var data = response.data;
+                var currency = PosnicPro.local.get('currencySign');
+                PosnicPro.record_id = data.barcode_id;
+                let items_mfg_date = data.items_mfg_date !== null ? data.items_mfg_date : '';
+                let items_expiry_date = data.items_expiry_date !== null ? data.items_expiry_date : '';
+                items_mfg_date = items_mfg_date.split(' ')[0];
+                items_expiry_date = items_expiry_date.split(' ')[0];
+                $('#userInput').val(data.barcode_id);
+                $('#branch-value').val(data.name);
+                $('#branch-name').text(data.name);
+                $('#price-name').text('PRICE' + " " + currency + " " + data.selling_price);
+                $('#mrp-price').text('MRP' + " " + currency + " " + data.mrp_price);
+                $('#price-value').val('PRICE' + " " + currency + " " + data.selling_price);
+                $('#mrp-price-value').val('MRP' + " " + currency + " " + data.mrp_price);
+                $('#mfg-date-value').val('MFG DATE' + " " + items_mfg_date);
+                $('#exp-date-value').val('EXP DATE' + " " + items_expiry_date);
+                $('#view_print_lable').modal('show');
+                loader.find(".loadingSpinner:first").remove();
+                newBarcode();
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+
+    mfgCheckbox: function (checked) {
+        if (checked) {
+            $("#mfg_checkbox").prop("checked", true);
+            $('#mfg-date-value').removeAttr('disabled');
+            $("#mfg-date").text($('#mfg-date-value').val());
+        } else {
+            $("#mfg_checkbox").prop("checked", false);
+            $('#mfg-date-value').attr('disabled', 'disabled');
+            $("#mfg-date").text('');
+        }
+    },
+
+    expCheckbox: function (checked) {
+        if (checked) {
+            $("#exp_checkbox").prop("checked", true);
+            $('#exp-date-value').removeAttr('disabled');
+            $("#exp-date").text($('#exp-date-value').val());
+        } else {
+            $("#exp_checkbox").prop("checked", false);
+            $('#exp-date-value').attr('disabled', 'disabled');
+            $("#exp-date").text('');
+        }
+    },
+
+    printLabelBarcode: function () {
+        var labelWidth = $('#document_width').val();   // in inches
+        var labelHeight = $('#document_height').val(); // in inches
+
+        // Create a copy of the print preview for printing
+        var printContent = document.getElementById("print-preview").cloneNode(true);
+        printContent.id = 'print-content-copy';
+
+        // Get current settings
+        var fontFamily = $('#font').val();
+        var textAlign = $(".text-align.btn-primary").val() || 'center';
+        var backgroundColor = $('#background-color').val();
+
+        // Apply exact dimensions and styling for printing
+        var printStyle =
+            "@page { " +
+            "size: " + labelWidth + "in " + labelHeight + "in; " +
+            "margin: 0; " +
+            "} " +
+
+            "html, body { " +
+            "margin: 0; " +
+            "padding: 0; " +
+            "width: " + labelWidth + "in; " +
+            "height: " + labelHeight + "in; " +
+            "font-family: " + fontFamily + "; " +
+            "} " +
+
+            "#print-content-copy { " +
+            "width: " + labelWidth + "in !important; " +
+            "height: " + labelHeight + "in !important; " +
+            "padding: 2px; " +
+            "box-sizing: border-box; " +
+            "border: none; " +
+            "background: " + backgroundColor + "; " +
+            "} " +
+
+            "#print-content-copy > div { " +
+            "width: 100% !important; " +
+            "height: 100% !important; " +
+            "display: flex !important; " +
+            "flex-direction: column !important; " +
+            "justify-content: center !important; " +
+            "align-items: center !important; " +
+            "} " +
+
+            "#print-content-copy p { " +
+            "margin: 0 !important; " +
+            "font-family: " + fontFamily + " !important; " +
+            "text-align: " + textAlign + " !important; " +
+            "} " +
+
+            "#print-content-copy svg { " +
+            "display: block !important; " +
+            "margin: 2px auto !important; " +
+            "max-width: 100% !important; " +
+            "max-height: 100px !important; " +
+            "} " +
+
+            ".fontfamily { " +
+            "font-family: " + fontFamily + " !important; " +
+            "text-align: " + textAlign + " !important; " +
+            "}";
+
+        // Use PrintJS to print with exact dimensions
+        printJS({
+            printable: printContent.outerHTML,
+            type: 'raw-html',
+            style: printStyle,
+            scanStyles: false
+        });
+
+        // $('#view_print_lable').modal('hide');
+        //
+        // Navigate back to barcode view if needed
+        // let parts = window.location.hash.split('/');
+        // if (parts.length > 1) {
+        //     PosnicPro.items.showBarcode(parts[1]);
+        // }
+
+        return false;
+    },
+
+    /*
+     * The rows this family will create, in order - the ONE list.
+     *
+     * loadVariant and saveVariantFamily each used to walk
+     * $('#item_variant_list').val() themselves, and agreed only because they
+     * happened to walk the same thing. The moment a second axis makes the row
+     * list a PRODUCT rather than the values themselves, two independent walks
+     * are two chances to disagree - and disagreeing here means the price typed
+     * into row 3 is saved against variant 5, silently, with nothing on screen
+     * to show it. Indices are the contract (items_selling_price_<key>), so the
+     * list that defines them has to be built once.
+     *
+     * Single axis returns the values unchanged, so a shop that never opens the
+     * second picker gets byte-identical behaviour to before.
+     */
+    variantCombinations: function () {
+        var first = $('#item_variant_list').val() || [];
+        var second = $('#item_variant_list_2').val() || [];
+        if (!second.length) {
+            return $.map(first, function (v) { return { value: v }; });
+        }
+        var out = [];
+        $.each(first, function (_, a) {
+            $.each(second, function (__, b) {
+                /* " / " matches how the family already reads on the item list
+                   ("Shirt / Red / L"), and the server treats variant_value as
+                   an opaque unique string, so a compound value needs nothing
+                   added to the model. */
+                out.push({ value: a + ' / ' + b });
+            });
+        });
+        return out;
+    },
+
+    /*
+     * Put the second axis away.
+     *
+     * A stale second axis is the worst possible leftover on this form: it does
+     * not look like an error, it silently MULTIPLIES the next item into
+     * combinations nobody asked for. Every path that clears the form has to
+     * clear it, so there is one function to call rather than four copies to
+     * keep in step.
+     */
+    resetSecondAxis: function () {
+        $('#item_variant_list_2').val(null).html('');
+        var $sel = $('#items_variant_2');
+        if ($sel.length) {
+            $sel.val('');
+            /* change.select2 repaints the widget without re-firing the app's
+               own change handlers - .trigger('change') here would rebuild the
+               value list from a selection that no longer exists. */
+            if ($sel.hasClass('select2-hidden-accessible')) { $sel.trigger('change.select2'); }
+        }
+        $('#variant_axis2_wrap').hide();
+        $('#variant_axis2_link').show().text('+ Add a second option');
+    },
+
+    /*
+     * Stop the same option being used for both axes.
+     *
+     * Size crossed with Size is not a grid, it is the same list twice: it
+     * produced "40 / 40", "40 / 42", "42 / 40" - items whose names say two
+     * different sizes for one garment, and a 40 that exists twice over.
+     *
+     * Disabled rather than removed. A greyed-out Size in the second list
+     * shows WHY it cannot be picked - it is already the first option -
+     * whereas quietly dropping it looks like the variant went missing.
+     */
+    syncAxisExclusion: function () {
+        var $one = $('#items_variant');
+        var $two = $('#items_variant_2');
+        if (!$two.length) { return; }
+        var a = String($one.val() || '');
+        var b = String($two.val() || '');
+
+        /* Already clashing - only reachable by changing the FIRST axis to
+           whatever the second was. The second gives way, because the first is
+           the one just chosen, and its values go with it: they belong to the
+           option that is no longer selected there. */
+        if (a && b && a === b) {
+            PosnicPro.items.resetSecondAxis();
+            /* resetSecondAxis puts the panel away. It was open and being used,
+               so it stays open - collapsing it here would read as the whole
+               second option being taken away rather than just its value. */
+            $('#variant_axis2_wrap').show();
+            $('#variant_axis2_link').hide();
+            b = '';
+        }
+
+        $two.find('option').each(function () {
+            $(this).prop('disabled', !!a && this.value === a);
+        });
+        $one.find('option').each(function () {
+            $(this).prop('disabled', !!b && this.value === b);
+        });
+
+        /* change.select2 repaints without re-firing the app handlers - a plain
+           .trigger('change') here would rebuild both value lists on every
+           keystroke-driven repaint. */
+        $.each([$one, $two], function (_, $el) {
+            if ($el.hasClass('select2-hidden-accessible')) { $el.trigger('change.select2'); }
+        });
+    },
+
+    /* A base64 photo needs a real mime type to render - browsers will not
+       sniff a data: URL. Taken from the file name, which is the only thing
+       we have; anything unrecognised falls back to png rather than to a
+       broken thumbnail. */
+    photoSrc: function (photo) {
+        if (!photo) { return ''; }
+        if (!photo.data) { return photo.name || ''; }
+        var ext = String(photo.name || '').split('.').pop().toLowerCase();
+        var mime = { jpg: 'jpeg', jpeg: 'jpeg', png: 'png', gif: 'gif', bmp: 'bmp' }[ext] || 'png';
+        return 'data:image/' + mime + ';base64,' + photo.data;
+    },
+
+    /*
+     * Paint each variant row's photo strip from the photos uploaded above.
+     *
+     * Repainted wholesale rather than patched: photos are added and removed
+     * while the rows are on screen, and a strip that only ever grows would go
+     * on offering a picture that is no longer part of the item.
+     *
+     * A choice pointing at a removed photo is dropped here too - keeping it
+     * would save a name the family no longer carries, and the variant would
+     * come back with no picture at all.
+     */
+    renderVariantPhotoPickers: function () {
+        var photos = $.grep(PosnicPro.items.imageParams || [], function (x) {
+            return !!(x && x.name);
+        });
+        $('[id^="items_photo_strip_"]').each(function () {
+            var key = this.id.replace('items_photo_strip_', '');
+            var $hidden = $('#items_photo_' + key);
+            var chosen = String($hidden.val() || '');
+            var stillThere = $.grep(photos, function (x) { return x.name === chosen; }).length;
+            if (chosen && !stillThere) { $hidden.val(''); chosen = ''; }
+
+            var $strip = $(this).empty();
+            if (!photos.length) {
+                $strip.append($('<small class="text-muted">')
+                    .text(PosnicPro.i18n.t('lang_add_photos_above_to_give_this_variant_its', 'Add photos above to give this variant its own')));
+                return;
+            }
+            $.each(photos, function (_, photo) {
+                /* Built as elements, not markup: a file name is user-supplied
+                   text and goes into a title attribute. */
+                $strip.append($('<img>')
+                    .attr('src', PosnicPro.items.photoSrc(photo))
+                    .attr('title', photo.name)
+                    .attr('alt', photo.name)
+                    .attr('data-photo', photo.name)
+                    .addClass('items-variant-photo' + (photo.name === chosen ? ' is-chosen' : '')));
+            });
+        });
+    },
+
+    /* "Colour / Size" when both are in play, else just the one. */
+    variantAxisLabel: function () {
+        var one = PosnicPro.items.selectText('#items_variant');
+        var two = ($('#item_variant_list_2').val() || []).length
+            ? PosnicPro.items.selectText('#items_variant_2')
+            : '';
+        return two ? one + ' / ' + two : one;
+    },
+
+    /* select2('data') throws if the widget was never initialised, and these
+       two are read on every save. */
+    selectText: function (selector) {
+        try {
+            var d = $(selector).select2('data');
+            return (d && d.length) ? d[0].text : '';
+        } catch (e) {
+            return '';
+        }
+    },
+
+    /*
+     * Say how many items Save is about to create.
+     *
+     * A variant family is the one place on this form where Save creates
+     * SEVERAL records rather than one, and nothing said so - you found out
+     * afterwards, by looking at the item list. Pick eight sizes and you get
+     * eight items, each needing its own price.
+     *
+     * Stated where the choice is made, not in a confirmation dialog: a dialog
+     * arrives after the decision and gets clicked through, while a line under
+     * the picker is read while the picker is still being used.
+     */
+    refreshVariantCount: function () {
+        var $hint = $('#variant_count_hint');
+        if (!$hint.length) { return; }
+        var n = PosnicPro.items.variantCombinations().length;
+        if (!n || !$('#product_with_variant').is(':checked')) { $hint.hide(); return; }
+        $hint.text(n === 1
+            ? 'Saving creates 1 item, priced below'
+            : 'Saving creates ' + n + ' items, each priced below').show();
+    },
+
+    /*
+     * Fill an axis's value list from whichever variant is selected on it.
+     *
+     * This used to happen ONLY inside a select2:select handler - that is, only
+     * when somebody actively picked a variant from the dropdown. But
+     * loadSelectVariant PRESELECTS the first variant with
+     * .val(1).trigger('change.select2'), and a namespaced trigger does not run
+     * a plain 'change' handler, let alone select2's own select event.
+     *
+     * So the form opened showing "size" chosen with an EMPTY value list behind
+     * it (reported: "variant values not loaded"). The only way out was to open
+     * the dropdown and re-pick the option that already looked picked, which is
+     * not a thing anyone would think to try.
+     *
+     * Reading the selected OPTION rather than an event payload is what lets the
+     * same function serve both cases - a preselect has no event to read.
+     */
+    loadVariantValues: function (axisSelector, listSelector) {
+        var $list = $(listSelector);
+        if (!$list.length) { return; }
+        var raw = $(axisSelector).find('option:selected').attr('data-variant-fields');
+        var fields = [];
+        try {
+            fields = JSON.parse(raw || '[]') || [];
+        } catch (e) {
+            fields = []; /* a malformed field list must not take the page down */
+        }
+        /* One option per DISTINCT value.
+           A variant saved with 38, 40, 40 offered 40 twice, and select2 keys a
+           multi-select on the option ELEMENT, not its value - so both copies
+           could be picked, producing two items called "Shirt / 40". The server
+           de-duplicates too; this covers a list already cached in the page. */
+        var seen = {};
+        var opts = [];
+        $.each(fields, function (_, f) {
+            var name = $.trim(String(f && f.name != null ? f.name : ''));
+            if (!name) { return; }
+            var key = name.toLowerCase();
+            if (seen[key]) { return; }
+            seen[key] = true;
+            /* Built as elements, not concatenated markup: a variant value is
+               shop-entered text, and a name containing a quote would otherwise
+               end the attribute and swallow the rest of the list. */
+            opts.push($('<option>').attr('value', name).text(name)[0]);
+        });
+        $list.empty().append(opts).val(null).trigger('change');
+    },
+
+    /*
+     * Say whether what was typed is actually a GTIN, while it is being typed.
+     *
+     * The server is the authority and refuses anything invalid - but silently,
+     * by storing an empty field. Without a word here, somebody mistypes a digit,
+     * saves, and the item simply has no GTIN with nothing to explain why.
+     *
+     * The check digit is the whole point: it catches exactly the single-digit
+     * and transposition errors a person makes copying fourteen numbers off a
+     * pack, which is why GS1 put it there.
+     */
+    checkGtin: function () {
+        var $hint = $('#items_gtin_hint');
+        if (!$hint.length) { return; }
+        var raw = String($('#items_gtin').val() || '').replace(/[\s-]/g, '');
+
+        if (!raw) {
+            /* Empty is the NORMAL case. Most shop items - loose produce,
+               own-brand, anything made on site - will never have one, and
+               nagging about it would train people to ignore the field. */
+            $hint.text('').removeClass('text-danger text-success');
+            return;
+        }
+        if (!/^\d+$/.test(raw) || [8, 12, 13, 14].indexOf(raw.length) === -1) {
+            $hint.text(PosnicPro.i18n.t('lang_a_gtin_is_8_12_13_or_14_digits', 'A GTIN is 8, 12, 13 or 14 digits'))
+                .addClass('text-danger').removeClass('text-success');
+            return;
+        }
+
+        /* GS1 check digit: from the right, weight 3 and 1 alternately. */
+        var body = raw.slice(0, -1);
+        var sum = 0;
+        for (var i = 0; i < body.length; i++) {
+            var fromRight = body.length - 1 - i;
+            sum += Number(body[i]) * (fromRight % 2 === 0 ? 3 : 1);
+        }
+        if (((10 - (sum % 10)) % 10) !== Number(raw[raw.length - 1])) {
+            $hint.text(PosnicPro.i18n.t('lang_that_is_not_a_valid_barcode_check_the_digi', 'That is not a valid barcode - check the digits'))
+                .addClass('text-danger').removeClass('text-success');
+            return;
+        }
+
+        /* Valid, but is it a number the world shares? Prefixes 02, 04 and
+           20-29 are printed by shops for loose goods; they scan correctly and
+           mean something different in every shop. Worth saying, because a
+           person scanning their own shelf label would otherwise think they had
+           found the manufacturer's number. */
+        var p = raw.padStart(14, '0').slice(1, 3);
+        if (p === '02' || p === '04' || (Number(p) >= 20 && Number(p) <= 29)) {
+            $hint.text('Valid, but this is an in-store code - not the maker\'s number')
+                .removeClass('text-danger text-success');
+            return;
+        }
+        $hint.text(PosnicPro.i18n.t('lang_valid_barcode', 'Valid barcode')).addClass('text-success').removeClass('text-danger');
+    },
+
+    /* "2 ) Shirt / Large" once the item has a name, plain "2 ) Large" before
+       then. The row is usable either way - the heading is a label, not data. */
+    variantRowTitle: function (index, itemName, value) {
+        var name = $.trim(itemName || '');
+        return index + ' ) ' + (name ? name + ' / ' : '') + value;
+    },
+
+    /* Fill the headings in as the name is typed.
+       A retitle rather than a rebuild: rebuilding would discard every price
+       already typed into the rows, and on a per-keystroke handler that is the
+       difference between a form that helps and one that fights back. */
+    retitleVariantRows: function () {
+        var itemName = $('#items_name').val();
+        $('#load_price_fields .variant-row-title').each(function () {
+            var $t = $(this);
+            $t.text(PosnicPro.items.variantRowTitle(
+                $t.attr('data-variant-index'), itemName, $t.attr('data-variant-value')
+            ));
+        });
+    },
+
+    /*
+     * What is typed into the variant rows, kept across a rebuild.
+     *
+     * loadVariant empties #load_price_fields and builds it again on every
+     * change to the value lists. Adding a ninth size after pricing eight threw
+     * away all eight prices, the SKUs, the barcodes and the quantities - the
+     * form silently reset the moment you extended it, which is the one moment
+     * you are most likely to.
+     *
+     * Keyed by variant VALUE, never by row position. Removing '40' from the
+     * middle shifts every row after it up one, so restoring by index would
+     * hand '42' the price that was typed for '44' - worse than losing it,
+     * because a wrong price looks like a real one.
+     */
+    snapshotVariantRows: function () {
+        var snap = {};
+        $('#load_price_fields .variant-row-title').each(function () {
+            var value = $(this).attr('data-variant-value');
+            var i = Number($(this).attr('data-variant-index')) - 1;
+            if (!value || isNaN(i)) { return; }
+            snap[value] = {
+                itemid: $('#items_itemid_' + i).val(),
+                barcodeid: $('#items_barcodeid_' + i).val(),
+                company_price: $('#items_company_price_' + i).val(),
+                mrp_price: $('#items_mrp_price_' + i).val(),
+                selling_price: $('#items_selling_price_' + i).val(),
+                available_quantity: $('#items_available_quantity_' + i).val(),
+                sort: $('#items_sort_' + i).val(),
+                unit: $('#items_unit_' + i).val(),
+                discount_amount: $('#items_discount_amount_' + i).val(),
+                discount_percentage: $('#items_discount_percentage_' + i).val(),
+                photo: $('#items_photo_' + i).val(),
+            };
+        });
+        return snap;
+    },
+
+    /* The other half. A value that was not on screen before simply has no
+       entry, and keeps the fresh row's defaults. */
+    restoreVariantRows: function (snap) {
+        if (!snap) { return; }
+        $('#load_price_fields .variant-row-title').each(function () {
+            var value = $(this).attr('data-variant-value');
+            var i = Number($(this).attr('data-variant-index')) - 1;
+            var was = value ? snap[value] : null;
+            if (!was || isNaN(i)) { return; }
+            var put = function (prefix, v) {
+                /* An empty value means the field was never filled, and the
+                   fresh row's default (0.00, 0, 99) is the better answer. */
+                if (v !== undefined && v !== null && v !== '') { $(prefix + i).val(v); }
+            };
+            put('#items_itemid_', was.itemid);
+            put('#items_barcodeid_', was.barcodeid);
+            put('#items_company_price_', was.company_price);
+            put('#items_mrp_price_', was.mrp_price);
+            put('#items_selling_price_', was.selling_price);
+            put('#items_available_quantity_', was.available_quantity);
+            put('#items_sort_', was.sort);
+            put('#items_discount_amount_', was.discount_amount);
+            put('#items_discount_percentage_', was.discount_percentage);
+            put('#items_photo_', was.photo);
+            /* The unit list is fetched per row and is still empty here, so
+               setting it now would select nothing. Applied in that request's
+               own callback instead. */
+        });
+    },
+
+    loadVariant: function () {
+        /* variantCombinations already normalises jQuery's null-from-an-empty
+           multiple-select into an array, so .length below is always safe. */
+        /* The product of both axes when a second one is in use - see
+           variantCombinations for why this is not derived twice. */
+        var variant_value = $.map(PosnicPro.items.variantCombinations(), function (c) {
+            return c.value;
+        });
+        /* Everything typed into the rows, before they are thrown away. Kept
+           on the module so the per-row unit request can reach it too. */
+        PosnicPro.items._rowSnapshot = PosnicPro.items.snapshotVariantRows();
+        $("#load_price_fields").html('');
+        var html = "";
+        var item_name = $("#items_name").val();
+        /*
+         * The item name is deliberately NOT required here.
+         *
+         * This used to refuse to build anything until the name was typed,
+         * because each row is headed "<item> / <value>". That reason does not
+         * survive contact with the save: saveVariantFamily recomputes the name
+         * from the live field at submit time, so the heading is display only
+         * and never was an input to what gets stored.
+         *
+         * What the guard actually did was error the moment a variant value was
+         * picked and leave #load_price_fields empty - so there was nowhere to
+         * type a price, and nothing on screen said why (reported: "as soon as i
+         * select variant value i am seeing error and no price entering form not
+         * exist"). Clicking Save then re-entered here with the name filled and
+         * finally rendered the rows, which is why Save appeared to show the
+         * price box instead of saving.
+         *
+         * Now the rows appear on the first pick and the heading fills itself in
+         * as the name is typed. The name stays required to SAVE - the validator
+         * on #items_name already enforces that, and it says so in place.
+         */
+        if (variant_value.length === 0) {
+            PosnicPro.alert('error', PosnicPro.i18n.t('lang_choose_at_least_one_variant_value_a_size_a', 'Choose at least one variant value - a size, a colour, a pack'));
+            $("#item_variant_list").focus();
+            return false;
+        } else {
+
+            $(variant_value).each(function (key, name) {
+                $("#load_price_fields").show();
+                html = html + '<div class="card-body">';
+                html = html + '<div class="card-body">';
+                html = html + '<div class="card-header">';
+                html = html + '<h5 class="card-title text-primary variant-row-title" data-variant-value="' + name + '" data-variant-index="' + (key + 1) + '">' + PosnicPro.items.variantRowTitle(key + 1, item_name, name) + '</h5>';
+                html = html + '</div>';
+                html = html + '<div class="row">';
+                html = html + '<div class="col-md-6">';
+                html = html + '<label class="form-control-placeholder" for="items_itemid_' + key + '">';
+                html = html + '<lang class="lang_sku_title"> SKU </lang>';
+                html = html + '<span class="tool" data-tip="sku number is unique code that is assigned to each product" tabindex="6">';
+                html = html + '<i class="mdi mdi mdi-help-circle"></i>';
+                html = html + '</span>';
+                html = html + '</label>';
+                html = html + '<input type="text" class="form-control" id="items_itemid_' + key + '" name="items_itemid_' + key + '" minlength="1" maxlength="20" placeholder="Enter SKU Code" data-t-placeholder="lang_enter_sku_code"  autocomplete="off" onkeyup="PosnicPro.items.loadOnchangeSku();"/>';
+                html = html + '</div>';
+                html = html + '<div class="col-md-6">';
+                html = html + '<label class="form-control-placeholder" for="items_barcodeid_' + key + '">';
+                html = html + '<lang class="lang_barcode_title"> Barcode </lang>';
+                html = html + '<span style="padding-left:50px">';
+                html = html + '<input type="checkbox" class="custom-control-input" id="same_as_sku_' + key + '" name="same_as_sku_' + key + '" onclick="PosnicPro.items.sameAsSku(this.checked);"/>';
+                html = html + '<label class="custom-control-label" for="same_as_sku_' + key + '">';
+                html = html + '<span class="text-dark" style="font-size:11px;"><lang class="lang_same_sku">Same as SKU</lang></span>';
+                html = html + '</label>';
+                html = html + '</span>';
+                html = html + '</label>';
+                html = html + '<input type="text" class="form-control" id="items_barcodeid_' + key + '" name="items_barcodeid_' + key + '" minlength="1" maxlength="100" placeholder="Scan From Bar Code Reader" data-t-placeholder="lang_scan_from_bar_code_reader" autocomplete="off">';
+                html = html + '</div>';
+                html = html + '</div>';
+                html = html + '<div class="row">';
+                html = html + '<div class="col-md-6">';
+                html = html + '<label class="form-control-placeholder" for="items_company_price_' + key + '">';
+                html = html + '<lang class="lang_company_title"> Cost </lang>';
+                html = html + '</label>';
+                html = html + '<input type="text" class="form-control allow_decimal text-right" id="items_company_price_' + key + '" name="items_company_price_' + key + '" minlength="1" maxlength="10" value="0.00" placeholder="Cost" data-t-placeholder="lang_companyamount_title">';
+                html = html + '</div>';
+                html = html + '<div class="col-md-6">';
+                html = html + '<label class="form-control-placeholder" for="items_mrp_price_' + key + '">';
+                html = html + '<lang class="lang_m_r_p"> M.R.P </lang>';
+                html = html + '</label>';
+                html = html + '<input type="text" class="form-control allow_decimal text-right" id="items_mrp_price_' + key + '" name="items_mrp_price_' + key + '" minlength="1" maxlength="10" value="0.00" placeholder="M.R.P">';
+                html = html + '</div>';
+                html = html + '</div>';
+                html = html + '<div class="row">';
+                html = html + '<div class="col-md-6">';
+                html = html + '<label class="form-control-placeholder" for="items_selling_price_' + key + '">';
+                html = html + '<lang class="lang_selling"> Selling </lang>';
+                html = html + '</label>';
+                html = html + '<input type="text" class="form-control allow_decimal text-right" id="items_selling_price_' + key + '" name="items_selling_price_' + key + '" minlength="1" maxlength="10" value="0.00" placeholder="Sale Price" data-t-placeholder="lang_sale_price">';
+                html = html + '</div>';
+                html = html + '<div class="col-md-6">';
+                html = html + '<label class="form-control-placeholder" for="items_available_quantity_' + key + '">';
+                html = html + '<lang class="lang_quantity"> Quantity </lang>';
+                html = html + '</label>';
+                html = html + '<input type="number" class="form-control allow_decimal text-right" id="items_available_quantity_' + key + '" name="items_available_quantity_' + key + '" minlength="1" maxlength="10" value="0" placeholder="Available Quantity" data-t-placeholder="lang_availablequatity_title">';
+                html = html + '</div>';
+                html = html + '</div>';
+                html = html + '<div class="row">';
+                html = html + '<div class="col-md-6">';
+                html = html + '<label class="form-control-placeholder" for="items_sort_' + key + '">';
+                html = html + '<lang class="lang_showitemposition_title"> Item Position </lang>';
+                html = html + '</label>';
+                html = html + '<input type="number" class="form-control allow_decimal text-right" id="items_sort_' + key + '" name="items_sort_' + key + '" minlength="1" maxlength="10" value="99" placeholder="Available Quantity" data-t-placeholder="lang_availablequatity_title">';
+                html = html + '</div>';
+                html = html + '<div class="col-md-6">';
+                html = html + '<label class="form-control-placeholder" for="items_unit_' + key + '">';
+                html = html + '<lang class="lang_item_units"> Item Units </lang>';
+                html = html + '</label>';
+                html = html + '<select class="form-control items_units select2" id="items_unit_' + key + '" name="items_unit_' + key + '"></select>';
+                html = html + '</div>';
+                html = html + '</div>';
+
+                html += '<div class="row">';
+                html += '  <div class="col-md-6">';
+                html += '    <div class="custom-control custom-radio custom-control-inline">';
+                html += '      <input type="radio" id="item_radio_discount_amount_' + key + '" name="radio_discount_' + key + '" class="custom-control-input" checked>';
+                html += '      <label class="custom-control-label" for="item_radio_discount_amount_' + key + '">Discount Amount</label>';
+                html += '    </div>';
+                html += '    <div class="custom-control custom-radio custom-control-inline">';
+                html += '      <input type="radio" id="item_radio_discount_percentage_' + key + '" name="radio_discount_' + key + '" class="custom-control-input">';
+                html += '      <label class="custom-control-label" for="item_radio_discount_percentage_' + key + '">Discount Percentage</label>';
+                html += '    </div>';
+                html += '    <div class="col-md-12" style="padding: 0 !important; margin-top: 10px;">';
+                html += '      <div class="floating-label">';
+                html += '        <input name="items_discount_amount_' + key + '" id="items_discount_amount_' + key + '" type="text" class="form-control border-control allow_decimal text-right" min="0" minlength="1" maxlength="10" value="0">';
+                html += '        <input name="items_discount_percentage_' + key + '" id="items_discount_percentage_' + key + '" type="number" class="form-control border-control text-right" min="0" max="100" minlength="1" maxlength="4" onkeyup="this.value = PosnicPro.minmax(this.value, 0, 100)" onkeypress="return PosnicPro.isNumber(event)" value="0" style="display: none;">';
+                html += '      </div>';
+                html += '    </div>';
+                html += '  </div>';
+                html += '</div>';
+
+                /*
+                 * This variant's own photo.
+                 *
+                 * Every variant is its own item record with its own image
+                 * field, but the form only ever offered one uploader - so a
+                 * family of shirts saved the SAME picture against red, blue
+                 * and green, and the sale grid showed three identical tiles.
+                 *
+                 * Chosen from the photos already added above rather than a
+                 * second uploader per row: the pictures of a red shirt and a
+                 * blue shirt are pictures of the same family, they belong in
+                 * one place, and uploading each one twice is work nobody
+                 * should have to do.
+                 *
+                 * Optional. A row with nothing chosen keeps the family's whole
+                 * set, which is what every existing item already does.
+                 */
+                html += '<div class="row">';
+                html += '  <div class="col-md-12">';
+                html += '    <label class="form-control-placeholder"><lang class="lang_photo_for_this_variant">Photo for this variant</lang></label>';
+                html += '    <input type="hidden" id="items_photo_' + key + '" value="">';
+                html += '    <div class="items-variant-photos" id="items_photo_strip_' + key + '"></div>';
+                html += '  </div>';
+                html += '</div>';
+
+// Add toggle behavior using jQuery
+                html += '<script>';
+                html += '$(document).ready(function () {';
+                html += '    $("input[name=\'radio_discount_' + key + '\']").change(function () {';
+                html += '        if ($(this).attr("id").includes("amount")) {';
+                html += '            $("#items_discount_amount_' + key + '").show();';
+                html += '            $("#items_discount_percentage_' + key + '").hide();';
+                html += '        } else {';
+                html += '            $("#items_discount_percentage_' + key + '").show();';
+                html += '            $("#items_discount_amount_' + key + '").hide();';
+                html += '        }';
+                html += '    });';
+                html += '});';
+                html += '</script>';
+
+
+                var params = {
+                    url: 'setting/getUnitAjaxList',
+                    data: 'query='
+                };
+                PosnicPro.get(params, function (response) {
+                    var $sel = $("#items_unit_" + key).empty();
+                    /* This select was empty when restoreVariantRows ran, so
+                       setting the unit then would have selected nothing. */
+                    var wasRow = PosnicPro.items._rowSnapshot && PosnicPro.items._rowSnapshot[name];
+                    /* `let unitOption;` started undefined, so the first += put the
+                       literal "undefined" in front of the first option - and the
+                       string accumulated across every variant row built after it. */
+                    $sel.append($.map(response.suggestions || [], function (dataItem) {
+                        return $('<option>')
+                            .attr('value', dataItem.unit_id)
+                            .attr('data-unit-id', dataItem.unit_id)
+                            .attr('data-unit-name', dataItem.unit_name)
+                            .attr('data-unit-value', dataItem.unit_value)
+                            .text(dataItem.unit_name + ' - ' + dataItem.unit_value)[0];
+                    }));
+                    if (wasRow && wasRow.unit) {
+                        $sel.val(wasRow.unit);
+                        if ($sel.hasClass('select2-hidden-accessible')) { $sel.trigger('change.select2'); }
+                    }
+                });
+
+                html = html + '</select>';
+                html = html + '</div>';
+                html = html + '</div>';
+                html = html + '</div>';
+                html = html + '</div>';
+            });
+            $("#load_price_fields").append(html);
+            PosnicPro.items.restoreVariantRows(PosnicPro.items._rowSnapshot);
+            /* The rows only exist now, so this is the first moment their
+               strips can be filled from whatever is already uploaded. */
+            PosnicPro.items.renderVariantPhotoPickers();
+            $("#items_itemid_0").focus();
+        }
+    },
+    item_image_preview: function () {
+
+        var len_files = $("#item_upload_image").prop("files").length;
+        for (var i = 0; i < len_files; i++) {
+            var file_data = $("#item_upload_image").prop("files")[i];
+            PosnicPro.items.form_data.append(file_data.name, file_data);
+            reader = new FileReader();
+            reader.onload = function (e) {
+                var count = $('#item-display-preview').find('div').length;
+                var validExtensions = ['gif', 'GIF', 'jpg', 'JPG', 'png', 'PNG', 'jpeg', 'JPEG', 'bmp', 'BMP'];
+                var fileName = file_data.name;
+                var fileNameExt = fileName.substr(fileName.lastIndexOf('.') + 1);
+                if ($.inArray(fileNameExt, validExtensions) === -1) {
+                    this.type = '';
+                    this.type = 'file';
+                    PosnicPro.alert('error', "Only these file types are accepted : " + validExtensions.join(', '));
+                    return false;
+                }
+                let imageSizeArr = 0;
+                let imageArr = document.getElementById('item_upload_image');
+                let fileNameArray = [];
+                let imageToBig = false;
+                for (let i = 0; i < imageArr.files.length; i++) {
+                    let imageSize = imageArr.files[i].size;
+                    let imageName = imageArr.files[i].name;
+                    if (imageSize > 5242880) {
+                        imageSizeArr = 1;
+                    }
+                    if (imageSizeArr == 1) {
+                        fileNameArray.push(imageName);
+                        imageToBig = true;
+                    }
+                }
+                if (imageToBig) {
+                    //give an alert that at least one image is to big
+                    PosnicPro.alert('error', fileNameArray + "Each file must be under 5 MB.");
+                    return false;
+                }
+                if ($('#item-display-preview').find('div').length > 11) {
+                    PosnicPro.alert('error', PosnicPro.i18n.t('lang_you_can_upload_up_to_12_files', 'You can upload up to 12 files.'));
+                    return false;
+                }
+
+                var fileImage = e.target.result.substr(e.target.result.indexOf(',') + 1);
+                $('#item_upload_image_status').val('yes');
+                $('#item-display-preview').append(
+                        '<div id="selector_' + count + '" class="receiving-image-wrapper image-area" style="position: relative;"> \
+                        <img loading="lazy" decoding="async" class="image_style" class="img-thumbnail" src="' + e.target.result + '" \
+                        title="' + escape(file_data.name) + '" /><br /> \
+                            <span id="coverimage_selector_' + count + '" class="coverImageAdd" style="display: block;border: 1px solid #ddd;border-radius: 5px;margin-top: 2px; background: #506fe4; color: #fff" onclick="PosnicPro.items.coverImage(this.id,\'' + count + '\',\'' + file_data.name + '\',\'' + file_data.size + '\',\'' + fileImage + '\')">Choose Cover</span><a class="remove-image" style="cursor:pointer;display: inline;position: absolute; top: -10px; right: -10px; border-radius: 10em; padding: 2px 6px 3px; text-decoration: none; font: 700 21px/20px sans-serif; background: #f48787; border: 3px solid #fff; color: #FFF; box-shadow: 0 2px 6px rgba(0,0,0,0.5), inset 0 2px 4px rgba(0,0,0,0.3); text-shadow: 0 1px 2px rgba(0,0,0,0.5); -webkit-transition: background 0.5s; transition: background 0.5s;" onclick="PosnicPro.items.image_remove_selected(\'' + count + '\',\'' + file_data.name + '\')">&#215;</a> \
+                        </div>');
+                // Determine cover flag based on count
+                let coverFlag = count === 0 ? 'yes' : 'no';
+
+                // Set image parameters
+                PosnicPro.items.imageParams[count] = {
+                    name: file_data.name,
+                    size: file_data.size,
+                    data: fileImage,
+                    cover: coverFlag
+                };
+
+                /* Newly added - offer it to every variant row on screen. */
+                PosnicPro.items.renderVariantPhotoPickers();
+
+                // If it's the first image, update the logo and styles
+                if (count === 0) {
+                    $('#item_logo').val(file_data.name);
+                    const coverImageSelector = "#coverimage_selector_" + count;
+
+                    $(coverImageSelector).html('').css({
+                        display: 'block',
+                        border: '1px solid #ddd',
+                        'border-radius': '5px',
+                        'margin-top': '2px',
+                        background: 'green',
+                        color: '#fff'
+                    }).append('Cover');
+                }
+
+
+            };
+            reader.readAsDataURL(file_data);
+        }
+    },
+    coverImage: function (id, row, name, size, image) {
+        $('.receiving-image-wrapper').removeClass('category-focused');
+        $('#selector_' + id).addClass('category-focused');
+        $('.coverImageAdd').text('');
+        var styleblue = {
+            display: 'block',
+            border: '1px solid #ddd',
+            'border-radius': '5px',
+            'margin-top': '2px',
+            background: '#506fe4',
+            color: '#fff'
+        };
+        $('.coverImageAdd').css(styleblue).append('Choose Cover');
+        $('#' + id).html('');
+        var styles = {
+            display: 'block',
+            border: '1px solid #ddd',
+            'border-radius': '5px',
+            'margin-top': '2px',
+            background: 'green',
+            color: '#fff'
+        };
+        $('#' + id).css(styles).append('cover');
+
+        PosnicPro.items.imageParams.map(function (item, index) {
+            PosnicPro.items.imageParams[index] = {
+                name: item.name,
+                size: item.size,
+                data: item.data,
+                cover: 'no'
+            };
+        });
+
+        PosnicPro.items.imageParams[row] = {
+            name: name,
+            size: size,
+            data: image,
+            cover: 'yes'
+        };
+
+    },
+    image_remove_selected: function (id, name) {
+        var removeIndex = PosnicPro.items.imageParams.map(function (item) {
+            return item.name;
+        }).indexOf(name);
+        PosnicPro.items.imageParams.splice(removeIndex, 1);
+        /* A variant may have been pointing at the photo just deleted. */
+        PosnicPro.items.renderVariantPhotoPickers();
+        $('#selector_' + id).remove();
+        if (PosnicPro.items.imageParams.length === 0) {
+            $('#item_logo').val('item.svg');
+            $('#item_upload_image_status').val('no');
+        }
+    },
+    coverImageEdit: function (id, row, name, size) {
+        $('.receiving-image-wrapper').removeClass('category-focused');
+        $('#selector_' + id).addClass('category-focused');
+        $('.coverImageAdd').text('');
+        var styleblue = {
+            display: 'block',
+            border: '1px solid #ddd',
+            'border-radius': '5px',
+            'margin-top': '2px',
+            background: '#506fe4',
+            color: '#fff'
+        };
+        $('.coverImageAdd').css(styleblue).append('Choose Cover');
+        $('#' + id).html('');
+        $('#item_logo').val(name);
+        var styles = {
+            display: 'block',
+            border: '1px solid #ddd',
+            'border-radius': '5px',
+            'margin-top': '2px',
+            background: 'green',
+            color: '#fff'
+        };
+        $('#' + id).css(styles).append('cover');
+
+        PosnicPro.items.imageParams.map(function (item, index) {
+            PosnicPro.items.imageParams[index] = {
+                name: item.name,
+                size: item.size,
+                cover: 'no'
+            };
+        });
+
+        PosnicPro.items.imageParams[row] = {
+            name: name,
+            size: size,
+            cover: 'yes'
+        };
+
+
+    },
+    image_edit_remove_selected: function (id, name) {
+        var removeIndex = PosnicPro.items.imageParams.map(function (item) {
+            return item.name;
+        }).indexOf(name);
+        PosnicPro.items.imageParams.splice(removeIndex, 1);
+        /* A variant may have been pointing at the photo just deleted. */
+        PosnicPro.items.renderVariantPhotoPickers();
+        $('#selector_' + id).remove();
+        if (PosnicPro.items.imageParams.length === 0) {
+            $('#item_upload_image_status').val('no');
+            $('#item_logo').val('item.svg');
+        }
+        PosnicPro.items.imageParams.map(function (item) {
+            if (item.cover === 'yes') {
+                $('#item_logo').val(item.name);
+            } else {
+                $('#item_logo').val('item.svg');
+            }
+        });
+    },
+    applyCategoryDiscount: function(selectedOption) {
+        if (!selectedOption) {
+            return;
+        }
+        var $option = $(selectedOption);
+        var discountAmount = parseFloat($option.attr('data-item-discountamount')) || 0;
+        var discountPercentage = parseFloat($option.attr('data-item-discountpercentage')) || 0;
+
+        /*
+         * Offer, never impose (IC1): the category's discount fills the form
+         * only while the user has not touched the discount fields this entry
+         * (a dirty flag, because the shop-default discount pre-fills values
+         * and must still lose to the more specific category discount). A
+         * value the user typed survives a category change - the old code
+         * overwrote it, and reset it to 0 when the category had no discount.
+         */
+        if (PosnicPro.items._discountTouched) {
+            return;
+        }
+
+        if (discountAmount > 0 && discountPercentage === 0) {
+            $("#item_radio_discount_amount").prop('checked', true).trigger('click');
+            $('#items_discount_percentage').attr('disabled', 'disabled').addClass('bg-white').hide();
+            $('#items_discount_amount').removeAttr('disabled').removeClass('bg-white').show();
+            $('#items_discount_amount').val(discountAmount);
+        } else if (discountPercentage > 0) {
+            $("#item_radio_discount_percentage").prop('checked', true).trigger('click');
+            $('#items_discount_amount').attr('disabled', 'disabled').addClass('bg-white').hide();
+            $('#items_discount_percentage').removeAttr('disabled').removeClass('bg-white').show();
+            $('#items_discount_percentage').val(discountPercentage);
+        }
+    },
+    /*
+     * Supplier picker, the same shape as Category (owner ask).
+     *
+     * It was a bare autocomplete: an empty box that showed nothing until you
+     * guessed part of a name, which only helps someone who already knows what
+     * they are looking for. Now the list is fetched when the form opens, so it
+     * opens showing real suppliers and typing filters what is already there.
+     *
+     * NEVER AN EMPTY LIST (owner: "if there is no recent item fire db query get
+     * latest or most used. i dont want empty list. make it very smart app").
+     * An empty query to getSuppliersAjaxList is exactly that DB read - it
+     * returns the branch's suppliers rather than nothing - so the picker is
+     * populated before anyone types. When a shop genuinely has none, the
+     * placeholder says so and points at the link that fixes it, because a
+     * dropdown that opens on nothing with no explanation reads as broken.
+     *
+     * The two hidden fields are kept in step, so every payload builder and
+     * edit-fill in this file keeps reading exactly what it read before.
+     */
+    /*
+     * Read one attribute off a select2's selection, or nothing.
+     *
+     * The save path did this instead:
+     *
+     *     taxDetail[0].element.attributes['data-tax-value'].value
+     *
+     * which throws "Cannot read properties of undefined (reading 'element')"
+     * the moment there IS no selection - and with the tax module turned off
+     * there is none, so saving any item threw before it reached the server.
+     * The same line existed twice, and the category read below it had the same
+     * shape: category_id was guarded, category_name was not, so an item saved
+     * without a category threw as well. Category is optional.
+     *
+     * A feature being off is not an error, and neither is an optional field
+     * being empty. Both mean "no value", which is what this returns.
+     */
+    selectAttr: function (selector, attribute, fallback) {
+        var data;
+        try {
+            data = $(selector).select2('data');
+        } catch (e) {
+            return fallback === undefined ? '' : fallback;
+        }
+        var el = data && data.length ? data[0].element : null;
+        var attr = el && el.attributes ? el.attributes[attribute] : null;
+        if (attr && attr.value !== undefined && attr.value !== null && attr.value !== '') {
+            return attr.value;
+        }
+        return fallback === undefined ? '' : fallback;
+    },
+
+    loadSelectSupplier: function (selectedId, selectedName) {
+        var $pick = $('#items_supplier_pick');
+        if (!$pick.length) { return; }
+        var params = {
+            url: 'suppliers/getSuppliersAjaxList',
+            data: 'query=&branch=' + (PosnicPro.local.get('branch_id_set') || '')
+        };
+        PosnicPro.get(params, function (response) {
+            var rows = (response && response.suggestions) || [];
+            $pick.empty().append('<option value=""></option>');
+            $.each(rows, function (i, row) {
+                $pick.append(
+                    $('<option>').attr('value', row.id).attr('data-supplier-name', row.name).text(row.name)
+                );
+            });
+            /* An id we were given but the list does not carry - an inactive or
+               deleted supplier on an existing item. Keeping it selectable means
+               editing an item does not silently clear its supplier. */
+            if (selectedId && !$pick.find('option[value="' + selectedId + '"]').length) {
+                $pick.append(
+                    $('<option>').attr('value', selectedId)
+                        .attr('data-supplier-name', selectedName || '')
+                        .text(selectedName || selectedId)
+                );
+            }
+            /* view.js runs a global $(".select2").select2() when the page
+               renders, so this control is already an initialised, EMPTY select2
+               by the time the list arrives. Calling select2() again on a live
+               instance does not re-read the options - it has to be destroyed
+               first, or the box says "No results found" over a select that is
+               full of them. That is exactly what it did. */
+            if ($pick.hasClass('select2-hidden-accessible')) {
+                $pick.select2('destroy');
+            }
+            $pick.select2({
+                placeholder: rows.length
+                    ? 'Choose a Supplier'
+                    : 'No suppliers yet - add one from the Suppliers screen'
+            });
+            $pick.val(selectedId || '').trigger('change.select2');
+        }, function () {
+            /* A failed lookup must not leave a dead control: the item can still
+               be saved without a supplier, which is why the field is optional. */
+            if ($pick.hasClass('select2-hidden-accessible')) {
+                $pick.select2('destroy');
+            }
+            $pick.empty().append('<option value=""></option>')
+                .select2({ placeholder: PosnicPro.i18n.t('lang_suppliers_could_not_be_loaded', 'Suppliers could not be loaded') });
+        });
+    },
+
+    loadSelectCategory: function () {
+        var categorySelect = $('.items_category');
+        var params = {
+            url: 'categories/getCategoryAjaxList',
+            data: 'query='
+        };
+        PosnicPro.get(params, function (response) {
+            categorySelect.empty();
+            /* IC1: a real placeholder, selected. The old code auto-picked the
+               LAST category in the list, so an untouched form filed the item
+               under an arbitrary category - misfiled catalogues by default.
+               Category is required; choosing it is one deliberate tap. */
+            categorySelect.append('<option value=""></option>');
+            /*
+             * Built once, appended once, initialised once.
+             *
+             * This loop used to do all three per option: `var option;` starts
+             * undefined, so `option += '<option...'` produced the literal string
+             * "undefined" in front of every entry, and .select2() ran again on
+             * every pass - re-initialising the widget once per category. That
+             * re-entry is what threw "Cannot read properties of null (reading
+             * 'offsetWidth')": select2 measures a container that the previous
+             * init has already replaced.
+             */
+            var options = $.map(response.suggestions || [], function (dataItem) {
+                return $('<option>')
+                    .attr('value', dataItem.id)
+                    .attr('data-category-name', dataItem.name)
+                    .attr('data-category-id', dataItem.id)
+                    .attr('data-item-discountamount', dataItem.discount_amount)
+                    .attr('data-item-discountpercentage', dataItem.discount_percentage)
+                    .text(dataItem.name)[0];
+            });
+            categorySelect.append(options);
+            categorySelect.select2({ placeholder: "Choose a Category" });
+            /* AFTER init - firing change.select2 at a select that is not a
+               select2 yet is the other half of the same crash. */
+            categorySelect.val('').trigger('change.select2');
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    loadSelectVariant: function () {
+
+        var variantSelect = $('#items_variant');
+        var params = {
+            url: 'variants/getVariantsAjaxList',
+            data: 'query='
+        };
+        PosnicPro.get(params, function (response) {
+            variantSelect.empty();
+            var vOptions = $.map(response.suggestions || [], function (dataItem) {
+                return $('<option>')
+                    .attr('id', dataItem.id)
+                    .attr('value', dataItem.id)
+                    .attr('data-variant-name', dataItem.name)
+                    .attr('data-variant-id', dataItem.id)
+                    .attr('data-variant-fields', JSON.stringify(dataItem.fields))
+                    .text(dataItem.name)[0];
+            });
+            variantSelect.append(vOptions);
+            variantSelect.select2({ placeholder: "Choose a Variant" });
+            /* The value was set BEFORE select2 existed, so the widget never saw
+               it and the change fired at a plain select. */
+            variantSelect.val(1).trigger('change.select2');
+            /* The preselect above is a real selection, so its values belong on
+               screen. Clearing the list here was what left the form showing a
+               chosen variant with nothing to choose from. */
+            PosnicPro.items.loadVariantValues('#items_variant', '#item_variant_list');
+
+            /* The second axis offers the same list. Cloned from the response
+               rather than from the first select's DOM - moving option elements
+               between two selects would empty the first one. */
+            var second = $('#items_variant_2');
+            if (second.length) {
+                second.empty();
+                second.append($.map(response.suggestions || [], function (dataItem) {
+                    return $('<option>')
+                        .attr('value', dataItem.id)
+                        .attr('data-variant-name', dataItem.name)
+                        .attr('data-variant-id', dataItem.id)
+                        .attr('data-variant-fields', JSON.stringify(dataItem.fields))
+                        .text(dataItem.name)[0];
+                }));
+                /* Destroy first: view.js runs a global $('.select2').select2()
+                   at page render, and re-calling select2() on a live instance
+                   does NOT re-read the options. */
+                if (second.hasClass('select2-hidden-accessible')) { second.select2('destroy'); }
+                second.select2({ placeholder: PosnicPro.i18n.t('lang_choose_a_variant', 'Choose a Variant') });
+                /* No preselection - an unopened second axis must stay empty, or
+                   every plain item silently becomes a combination. */
+                second.val('').trigger('change.select2');
+                $('#item_variant_list_2').html('');
+                /* The first axis is preselected above, so its option in this
+                   list has to be greyed out before the list is ever opened. */
+                PosnicPro.items.syncAxisExclusion();
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    loadSelectTax: function () {
+        var taxSelect = $('#items_tax');
+        var params = {
+            url: 'setting/getTaxAjaxList',
+            data: 'query='
+        };
+        PosnicPro.get(params, function (response) {
+            taxSelect.empty();
+            /* One append and one change, not one of each per tax rate. */
+            var tOptions = $.map(response.suggestions || [], function (dataItem) {
+                return $('<option>')
+                    .attr('value', dataItem.tax_id)
+                    .attr('data-tax-id', dataItem.tax_id)
+                    .attr('data-tax-name', dataItem.tax_name)
+                    .attr('data-tax-value', dataItem.tax_value)
+                    .text(dataItem.tax_name)[0];
+            });
+            taxSelect.append(tOptions).trigger('change');
+            if (PosnicPro.local.get('default_tax_enable_disable') === 'false') {
+                taxSelect.val(1).trigger('change.select2');
+            } else {
+                var taxDetail = PosnicPro.local.get('default_tax_id');
+                taxSelect.val(taxDetail).trigger("change");
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+
+    loadSelectUnit: function () {
+        let unitSelect = $('.items_unit');
+        var params = {
+            url: 'setting/getUnitAjaxList',
+            data: 'query='
+        };
+        PosnicPro.get(params, function (response) {
+            unitSelect.empty();
+            var uOptions = $.map(response.suggestions || [], function (dataItem) {
+                return $('<option>')
+                    .attr('value', dataItem.unit_id)
+                    .attr('data-unit-id', dataItem.unit_id)
+                    .attr('data-unit-name', dataItem.unit_name)
+                    .attr('data-unit-value', dataItem.unit_value)
+                    .text(dataItem.unit_name + ' - ' + dataItem.unit_value)[0];
+            });
+            unitSelect.append(uOptions).trigger('change');
+            $('.items_unit option:eq(0)').prop('selected', true);
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+
+    itemClearForm: function () {
+        $('.error_item').css('display', 'none');
+        $('#item-display-preview').html('');
+        $('#items_description').val('');
+        $('#items_new .alert').remove();
+        if ($("#product_without_variant").is(":checked")) {
+            $('#show_variant_fields').hide();
+            $('#show_price_fields,#sku_card_col').show();
+            $('#product_without_variant').prop('checked', true);
+        } else {
+            $('#show_price_fields,#sku_card_col').hide();
+            $('#show_variant_fields').show();
+            $('#show_variant_fields').css("display", "block");
+            $('#item_variant_list').empty().trigger('change');
+            $('#product_with_variant').prop('checked', true);
+        }
+        $('#items_name').val('');
+        $("#items_variant").val('').trigger('change');
+        $("#item_variant_list").val('').trigger('change');
+        PosnicPro.items.resetSecondAxis();
+        $("#items_hsncode").val('');
+        $("#hsn_tax").val('');
+        $("#items_discount_amount").val('0.00');
+        $("#items_discount_percentage").val('0');
+        $("#load_price_fields").html('');
+        $(".clear_text_item").val('');
+        var defaultsupplier = JSON.parse(PosnicPro.local.get('defaultsupplier'));
+        if (PosnicPro.local.get('default_supplier_enable_disable') === 'false') {
+            $('#items_supplier_id').val('');
+            $('#items_supplier').val('');
+        } else {
+            $('#items_supplier_id').val(defaultsupplier.supplier_id);
+            $('#items_supplier').val(defaultsupplier.supplier_name);
+        }
+        $('#items_company_price,#items_mrp_price,#items_selling_price').val('0.00');
+        $('#items_available_quantity').val('0');
+        $('#items_sort').val('99');
+        $('#item_tax_default,#item_tax_inclusive').prop('checked', true);
+        $('#hsn_code_show').hide();
+        $('#hsn_tax').hide();
+        $('#default_tax').show();
+        $('#item_logo').val('item.svg');
+        PosnicPro.items.imageParams = [];
+        $(".items_category").select2({
+            placeholder: "Choose a Category"
+        });
+        $(".items_category").val('').trigger('change.select2');
+        PosnicPro.items.loadSelectCategory();
+        PosnicPro.items.loadSelectSupplier();
+        PosnicPro.items.loadSelectTax();
+        PosnicPro.items.loadSelectVariant();
+    }
+};
+
+PosnicPro.itemdetails = {
+
+    itemdetailsTable: function (type) {
+        PosnicPro.appendReportTableBody('customerdetails');
+        var loader = $(".loader-itemactivity");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        var table = $('#view_itemdetails');
+        if ($('a#view_items_page').hasClass('active')) {
+            var branch = [];
+            branch.push(PosnicPro.local.get("branch_id_set"));
+        } else {
+            var branch = $("#item_branch_value").val()
+        }
+        if (type === 'customerreportexport') {
+            var per_page = table.data('total');
+        } else {
+            var current_page = table.data('current_page');
+            var per_page = $('#view_itemdetails_per_page').val();
+        }
+        let item_id = currentHash.split('/');
+        var data = {
+            page: current_page,
+            limit: per_page,
+            item_id: item_id[1],
+            branch: branch
+        };
+        var params = {
+            url: 'sales/itemSaleDetails',
+            data: data
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                if (type !== 'itemreportexport') {
+                    table.data('total', response.data.table.data.total);
+                    table.data('total_pages', response.data.table.data.total_pages);
+                    table.data('current_page', response.data.table.data.current_page);
+                    table.data('per_page', response.data.table.data.per_page);
+                    PosnicPro.paging(response.data.table.data.total_pages, response.data.table.data.current_page);
+                    table.children('tbody').text('');
+                    $('#view_itemdetails_total,.item_details_noofsale').text(response.data.table.data.total);
+                    var row_total = (table.data('current_page') - 1) * table.data('per_page') + 1;
+                    $('#view_itemdetails_page_total').text(row_total);
+                    var page_totals = (table.data('current_page') - 1) * table.data('per_page');
+                    $('#view_itemdetails_page_perpage_total').text(page_totals + response.data.table.data.list.length);
+                    var currency = PosnicPro.local.get('currencySign');
+                    var rowTotal = response.data.table.data.total;
+                    if (rowTotal === 0) {
+                        $('.itemactivity_content').hide();
+                        $('#itemactivity_img_hide').show();
+
+                    } else {
+                        $('#itemactivity_img_hide').hide();
+                        $('.itemactivity_content').show();
+                    }
+                    var process_class = "badge badge-success-inverse";
+                    var saleTotalValue = 0;
+                    var returnTotalValue = 0;
+                    for (var i = 0; i < response.data.table.data.list.length; i++) {
+                        var row = response.data.table.data.list[i];
+                        // A sale without denormalised totals (demo seeds, old
+                        // imports) must cost that CELL its number, never the
+                        // page - undefined.toFixed() here white-paged items.
+                        var rowSaleTotal = Number(row.items_total) || 0;
+                        var rowReturnTotal = Number(row.items_return_total) || 0;
+                        saleTotalValue += rowSaleTotal;
+                        returnTotalValue += rowReturnTotal;
+                        if (!row.sale_process || row.sale_process == 'Add' || row.sale_process == 'Edit') {
+                            process_class = "badge badge-success-inverse";
+                        } else if (row.sale_process == 'PartialReturn') {
+                            process_class = "badge badge-secondary-inverse";
+                        } else {
+                            process_class = "badge badge-danger-inverse";
+                        }
+                        let salesQty = 0;
+                        $(row.items).each(function (key, val) {
+                            salesQty += val.item_quantity;
+                        });
+                        let returnQty = 0;
+                        $(row.items_return).each(function (key, val) {
+                            $(val.returnArray.returnValue).each(function (key, val) {
+                                returnQty += val.item_quantity;
+                            });
+                        });
+                        let row_no = (table.data('current_page') - 1) * table.data('per_page') + i + 1;
+
+                        // Prefer backend-provided string_date, but gracefully
+                        // fall back to raw date fields so we never show the
+                        // current time when no preformatted date is present.
+                        let rawDate = row.string_date || row.date || row.created_date || row.updated_date;
+                        let updateDate = rawDate ? PosnicPro.convertDate(rawDate) : '';
+                        let trow = '<tr> <td scope="row" data-label="#">' + row_no + '</td> <td data-label="Sale">' + row.sales_id + '</td> <td class="export-date" data-label="Date">' + updateDate + '</td> <td class="text-center" data-label="Process"><span class="' + process_class + '">' + (row.sale_process || 'Add') + '</span></td> <td class="text-center text-danger" data-label="Return qty">' + returnQty + '</td> <td class="text-right text-danger" data-label="Return total">' + currency + '&nbsp;' + rowReturnTotal.toFixed(2) + '</td><td class="text-center text-success" data-label="Qty">' + salesQty + '</td><td class="text-right text-success" data-label="Total">' + currency + '&nbsp;' + rowSaleTotal.toFixed(2) + '</td></tr>';
+                        $('#view_itemdetails').children('tbody').append(trow);
+                        $('span.number').number(true, 2);
+                    }
+                    let total = 0;
+                    $('.item_details_totalsale').html('0');
+                    if (response.data.sale.length !== 0) {
+                        total = response.data.sale[0];
+                        $('.item_details_totalsale').html(total);
+                    }
+
+                    let totalreturn = 0;
+                    $('.item_details_totalreturn').html('0');
+                    if (response.data.return.length !== 0) {
+                        totalreturn = response.data.return[0];
+                        $('.item_details_totalreturn').html(totalreturn);
+                    }
+
+                    // Prefer the server's item-revenue total (the sum of THIS
+                    // item's line totals across all its sales). The old fallback
+                    // summed each sale's whole-bill total over just the loaded
+                    // page, so it counted other items in the bill and changed as
+                    // you paged. Round to 2 decimals (no raw 1306.8600000000001).
+                    var itemSaleValue =
+                        response.data.sale_amount !== undefined && response.data.sale_amount !== null
+                            ? Number(response.data.sale_amount)
+                            : saleTotalValue;
+                    var itemReturnValue =
+                        response.data.return_amount !== undefined && response.data.return_amount !== null
+                            ? Number(response.data.return_amount)
+                            : returnTotalValue;
+                    $('.item_details_saletotalvalue').html(itemSaleValue.toFixed(2));
+                    $('.item_details_returntotalvalue').html(itemReturnValue.toFixed(2));
+                } else {
+                    var itemsalesreport = [];
+                    data = response.data.table.data.list;
+                    $(data).each(function (key, val) {
+                        let salesQty = 0;
+                        $(val.items).each(function (key, val) {
+                            salesQty += val.item_quantity;
+                        });
+                        let returnQty = 0;
+                        $(val.items_return).each(function (key, val) {
+                            $(val.returnArray.returnValue).each(function (key, val) {
+                                returnQty += val.item_quantity;
+                            });
+                        });
+
+                        // Use the same date fallback for CSV export so the
+                        // exported report matches the on-screen Date column.
+                        let exportRawDate = val.string_date || val.date || val.created_date || val.updated_date;
+                        let date = exportRawDate ? PosnicPro.convertDate(exportRawDate) : '';
+                        let process = val.sale_process || 'Add';
+                        let saleId = val.sales_id;
+                        let returnTotal = val.items_return_total;
+                        let saleTotal = val.items_total;
+                        itemsalesreport.push({SalesId: saleId, Date: date, Process: process, NoOfReturn: returnQty, ReturnAmount: returnTotal, NoOfSale: salesQty, SaleAmount: saleTotal});
+                    });
+                    PosnicPro.JSONToCSVConvertor(itemsalesreport, 'item-sales-reports', true);
+                    PosnicPro.itemdetails.itemdetailsTable();
+                }
+            }
+            loader.find(".loadingSpinner:first").remove();
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+
+    /*
+     * A single item's price trail.
+     *
+     * Inventory was already tracked; price was not, and shops that reprice
+     * often had no way to see what a product used to cost or who changed it.
+     * Every price change - a manual edit, a re-import, a bulk update - is
+     * recorded server-side; this reads it back, newest first.
+     */
+    priceHistory: function () {
+        var item_id = currentHash.split('/')[1];
+        if (!item_id) { return false; }
+
+        var loader = $('.loader-item-pricehistory');
+        $('#item_pricehistory_body').empty();
+        $('#item_history_filter_row').hide();
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+
+        PosnicPro.get({ url: 'items/priceHistory/' + item_id, data: '' }, function (response) {
+            loader.find('.loadingSpinner:first').remove();
+            var rows = (response && response.data) ? response.data : [];
+            PosnicPro.itemdetails._historyRows = rows;
+            if (!rows.length) {
+                $('#item_pricehistory_wrap').hide();
+                $('#item_history_filter_row').hide();
+                $('#item_pricehistory_empty').show();
+                return;
+            }
+            $('#item_pricehistory_empty').hide();
+            $('#item_pricehistory_wrap').show();
+            $('#item_history_filter').val('all');
+            $('#item_history_filter_row').show();
+            PosnicPro.itemdetails.renderHistory();
+        }, function (xhr) {
+            loader.find('.loadingSpinner:first').remove();
+            $('#item_pricehistory_wrap').hide();
+            $('#item_history_filter_row').hide();
+            $('#item_pricehistory_empty').show();
+        });
+        return false;
+    },
+
+    /*
+     * Draw the stored history through the current filter.
+     *
+     * The rows are already loaded, so filtering by "Price changes", "Name",
+     * "Category", "Tax" or "SKU / Barcode" is instant - no round trip. A field
+     * is matched by its stored `field`/`value_type`, so this keeps working as
+     * new tracked fields are added server-side.
+     */
+    renderHistory: function () {
+        var rows = PosnicPro.itemdetails._historyRows || [];
+        var filter = $('#item_history_filter').val() || 'all';
+        var match = function (r) {
+            var type = r.value_type || 'money';
+            var f = r.field || '';
+            switch (filter) {
+                case 'price': return type === 'money' || type === 'percent';
+                case 'name': return f === 'name';
+                case 'category': return f === 'category_name';
+                case 'tax': return f === 'tax' || f === 'tax_name';
+                case 'sku': return f === 'itemid' || f === 'barcode_id';
+                default: return true;
+            }
+        };
+
+        var legacyLabel = {
+            selling_price: 'Selling price',
+            mrp_price: 'MRP price',
+            company_price: 'Company price'
+        };
+        var currency = PosnicPro.local.get('currencySign') || '';
+        var esc = function (v) {
+            return String(v === undefined || v === null ? '' : v)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        };
+        var show = function (v, type) {
+            if (type === 'money') return currency + '&nbsp;' + (Number(v) || 0).toFixed(2);
+            if (type === 'percent') return (Number(v) || 0) + '%';
+            var t = esc(v);
+            return t === '' ? '<span class="text-muted">-</span>' : t;
+        };
+
+        var html = '';
+        var shown = 0;
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i];
+            if (!match(r)) continue;
+            shown += 1;
+            var type = r.value_type || 'money';
+            var label = r.label || legacyLabel[r.field] || r.field || '';
+
+            // The up/down arrow only means something for a number. A name going
+            // from "Pen" to "Pencil" gets a neutral dash instead.
+            var change = '<span class="text-muted">-</span>';
+            if (type === 'money' || type === 'percent') {
+                var oldN = Number(r.old_value) || 0;
+                var newN = Number(r.new_value) || 0;
+                change = (newN >= oldN)
+                    ? '<span class="text-success"><i class="feather icon-arrow-up"></i> ' + (newN - oldN).toFixed(2) + '</span>'
+                    : '<span class="text-danger"><i class="feather icon-arrow-down"></i> ' + (oldN - newN).toFixed(2) + '</span>';
+            }
+
+            var rawDate = r.date || r.created_date || r.updated_date;
+            var when = rawDate ? PosnicPro.convertDate(rawDate) : '';
+            var source = esc(r.process || 'Edit');
+            var by = esc(r.changed_by || '');
+            html += '<tr>'
+                + '<td>' + when + '</td>'
+                + '<td>' + esc(label) + '</td>'
+                + '<td class="text-right">' + show(r.old_value, type) + '</td>'
+                + '<td class="text-right f-w-6">' + show(r.new_value, type) + '</td>'
+                + '<td class="text-center">' + change + '</td>'
+                + '<td><span class="badge badge-info-inverse">' + source + '</span></td>'
+                + '<td>' + by + '</td>'
+                + '</tr>';
+        }
+        if (!shown) {
+            html = '<tr><td colspan="7" class="text-center text-muted" style="padding:20px;"><lang class="lang_no_changes_of_this_kind">No changes of this kind.</lang></td></tr>';
+        }
+        $('#item_pricehistory_body').html(html);
+        $('#item_history_filter_count').text(shown + ' of ' + rows.length);
+    },
+
+    itemdetailsreportexport: function (index) {
+        var type = $(index).data('id');
+        PosnicPro.itemdetails.itemdetailsTable(type);
+    }
+};
+
+
+$(function () {
+    $('#items_discount_percentage').attr('disabled', 'disabled').addClass('bg-white').val('0.00').hide();
+    // One-time init like the sale search: never rebuild per keystroke.
+    /* The supplier autocomplete lived here. It bound to #items_supplier, which
+       is a hidden input now - the picker above replaced it, and an autocomplete
+       on a hidden field can never fire. Removed rather than left: a plugin
+       initialised against something invisible is the kind of code that reads as
+       working for years. See loadSelectSupplier. */
+});
+
+$(function () {
+    $("#item_radio_discount_amount, #item_radio_discount_percentage").change(function () {
+        if ($("#item_radio_discount_amount").is(":checked")) {
+            $('#items_discount_percentage').attr('disabled', 'disabled').addClass('bg-white').val('0').hide();
+            $('#items_discount_amount').removeAttr('disabled', 'disabled').show().focus().select();
+        } else {
+            $('#items_discount_amount').attr('disabled', 'disabled').addClass('bg-white').val('0').hide();
+            $('#items_discount_percentage').removeAttr('disabled', 'disabled').show().focus().select();
+        }
+    });
+    $('#items_discount_amount').keyup(function () {
+        if ($('#items_discount_amount').val() === '')
+            $('#items_discount_amount').val('0');
+    });
+    var syncVariantLink = function () {
+        $('#variant_mode_link').text($('#product_with_variant').is(':checked')
+            ? 'Remove variants' : '+ This item has variants');
+    };
+    /* ------------------------------------------------------------------
+     * Getting through a tabbed form (owner ask: "next button to move next
+     * tab... if one tab full completed green tick or something").
+     *
+     * A tabbed form with no way forward makes people hunt for the next tab, and
+     * gives no sense of how much is left. Two small things fix both: a step
+     * button at the end of each pane, and a tick on each tab that has something
+     * in it.
+     *
+     * WHAT THE TICK MEANS is the part worth being careful about. Only the Item
+     * tab has required fields. Ticking Details and More for "correct" would be
+     * a claim the form cannot make - they are entirely optional - so the tick
+     * means "there is something in here". Item ticks when its REQUIRED fields
+     * are filled, which is the only tab where that is a real statement. A badge
+     * that lies is one people stop reading.
+     * ------------------------------------------------------------------ */
+    /*
+     * Colour and shape describe the sale-grid tile WHEN THERE IS NO IMAGE. The
+     * label always said so; the controls stayed on screen anyway, asking for a
+     * decision that an uploaded image immediately overrides.
+     *
+     * Driven off what is actually on screen (the preview strip) plus the stored
+     * cover name, because an image can arrive three ways - a fresh upload, an
+     * edit loading an existing item, and a clone - and hooking each one is how
+     * the third gets missed.
+     */
+    PosnicPro.items.refreshTileFallback = function () {
+        var cover = $.trim($('#item_logo').val() || '');
+        var hasImage = $('#item-display-preview').find('img').length > 0
+            || (cover !== '' && cover !== 'item.svg');
+        $('#item_tile_fallback').toggle(!hasImage);
+    };
+
+    /* The preview strip is written by several paths, so watch the node rather
+       than every writer. */
+    $(function () {
+        var node = document.getElementById('item-display-preview');
+        if (!node || typeof MutationObserver === 'undefined') { return; }
+        new MutationObserver(function () {
+            PosnicPro.items.refreshTileFallback();
+        }).observe(node, { childList: true, subtree: true });
+        PosnicPro.items.refreshTileFallback();
+    });
+
+    /*
+     * A tick means the tab is FINISHED - every field in it answered.
+     *
+     * It used to mean "there is something in here", which ticked a tab after one
+     * field and told nobody anything useful (owner: "enable tick only all fields
+     * filled. not just one in the tab").
+     *
+     * What counts as a field, and why:
+     *
+     *  - Only what is VISIBLE. Service mode hides stock, variant mode hides
+     *    price and SKU, and the mode radios are hidden by design. A tab cannot
+     *    be incomplete because of a box nobody can reach.
+     *  - Not checkboxes or radios. They are never empty - unchecked IS an
+     *    answer - so requiring them would mean ticking every toggle on the form
+     *    to earn a tick, which is the opposite of what it should encourage.
+     *  - Not disabled or readonly fields, for the same reason as hidden.
+     *  - An open-price item has no selling price ON PURPOSE. Demanding one would
+     *    leave that tab permanently unticked for a legitimate item.
+     */
+    PosnicPro.items.tabIsComplete = function (paneId) {
+        var $pane = $('#' + paneId);
+        if (!$pane.length) { return false; }
+        var openPrice = $('#item_open_price').is(':checked');
+        var complete = true;
+        var seen = 0;
+
+        $pane.find('input, select, textarea').each(function () {
+            var $f = $(this);
+            var type = ($f.attr('type') || '').toLowerCase();
+            if (type === 'checkbox' || type === 'radio' || type === 'hidden') { return; }
+            if ($f.is(':disabled') || $f.prop('readonly')) { return; }
+            /* A select2 hides its own <select> and shows a rendered box, so
+               :visible on the select itself is always false - ask the control
+               the user can actually see. */
+            var $shown = $f.hasClass('select2-hidden-accessible')
+                ? $f.next('.select2-container')
+                : $f;
+            if (!$shown.length || !$shown.is(':visible')) { return; }
+            if ($f.is('#items_selling_price') && openPrice) { seen += 1; return; }
+
+            seen += 1;
+            if ($.trim($f.val() || '') === '') { complete = false; }
+        });
+
+        /* A tab with nothing to fill is not "complete", it is empty - ticking it
+           would be a badge for having opened the page. */
+        return seen > 0 && complete;
+    };
+
+    PosnicPro.items.refreshTabTicks = function () {
+        $('#item_form_tabs .nav-link').each(function () {
+            var pane = $(this).data('tab-pane');
+            if (!pane) { return; }
+            $(this).toggleClass('is-complete', PosnicPro.items.tabIsComplete(pane));
+        });
+    };
+
+    /* Every edit can change a tick, so this listens broadly rather than
+       enumerating fields - a list would go stale the first time one is added. */
+    $(document).on('input change', '#item_image_upload_form input, #item_image_upload_form select, #item_image_upload_form textarea',
+        function () { PosnicPro.items.refreshTabTicks(); });
+
+    $(document).on('click', '.item-tab-next, .item-tab-back', function () {
+        var target = $(this).data('goto');
+        if (!target) { return; }
+        $('#item_form_tabs .nav-link[data-tab-pane="' + target + '"]').tab('show');
+        /* The form is taller than the viewport on a small screen, and switching
+           tabs leaves you wherever the last one had scrolled to. */
+        $('html, body').animate({ scrollTop: $('#item_form_tabs').offset().top - 70 }, 150);
+    });
+
+    $(document).on('shown.bs.tab', '#item_form_tabs .nav-link', function () {
+        PosnicPro.items.refreshTabTicks();
+    });
+
+    /* The picker drives the two hidden fields the rest of this file reads. */
+    $(document).on('change', '#items_supplier_pick', function () {
+        var $opt = $(this).find('option:selected');
+        $('#items_supplier_id').val($(this).val() || '');
+        $('#items_supplier').val($opt.attr('data-supplier-name') || '');
+    });
+
+    $(document).on('click', '#variant_mode_link', function () {
+        var withVariant = $('#product_with_variant').is(':checked');
+        $(withVariant ? '#product_without_variant' : '#product_with_variant')
+            .prop('checked', true).trigger('change');
+    });
+    $(window).on('hashchange', function () {
+        if (/items\/(new|[^/]+\/(edit|clone))/.test(window.location.hash)) {
+            setTimeout(syncVariantLink, 400);
+        }
+    });
+    $("#product_without_variant, #product_with_variant").change(function () {
+        syncVariantLink();
+        var plain = $("#product_without_variant").is(":checked");
+        /* The other half of the same rule (see applyServiceMode): a family of
+           variants is a family of stocked products, so the service tick has no
+           meaning while one is being built. Hidden rather than disabled - a
+           greyed control asks a question the form then refuses to answer. */
+        $('#item_is_service').closest('.custom-control').toggle(plain);
+        /* Leaving variant mode must clear the count too, or the hint outlives
+           the rows it is describing - and the second axis with it, or turning
+           variants back on restores combinations from the previous item. */
+        if (plain) { PosnicPro.items.resetSecondAxis(); }
+        PosnicPro.items.refreshVariantCount();
+        if (plain) {
+            $('#show_variant_fields').hide();
+            $('#show_price_fields,#sku_card_col').show();
+            $("#load_price_fields").html('');
+            $("#show-hide-item-discount").show();
+        } else {
+            $('#show_price_fields,#sku_card_col').hide();
+            $('#show_variant_fields').show();
+            $("#show-hide-item-discount").hide();
+        }
+        /*
+         * The PARENT's price and opening stock go too (owner: variant mode "is
+         * hiding so many stuff but those required. please check").
+         *
+         * It was hiding cost, MRP, units, SKU and barcode while KEEPING selling
+         * price and opening stock - and demanding a selling price, which is
+         * required. But every variant row carries its own: saveVariantFamily
+         * reads items_selling_price_<n> and items_available_quantity_<n> and
+         * never reads these. So the form asked for two numbers it then threw
+         * away, on the one screen where it also hid the fields you did need.
+         *
+         * Either the parent owns price and stock or the variants do. The save
+         * path already decided: the variants do.
+         */
+        $('#items_selling_price').closest('.form-group').toggle(plain);
+        $('#item_opening_wrap').toggle(plain && !$('#item_is_service').is(':checked'));
+    });
+});
+
+/*for display client validation of the form details*/
+$(document).ready(function () {
+    $("#item_radio_discount_amount").prop('checked', 'checked');
+    $('#items_discount_percentage').attr('disabled', 'disabled').val('0').hide();
+    $('#items_discount_amount').removeAttr('disabled', 'disabled').val('0').show();
+    jQuery.validator.addMethod("alphanumeric", function (value, element) {
+        if ((/[*|\":<>[\]{}`\\';@&#!]/.test(value))) {
+            return false;
+        }
+        return true;
+    }, "Use letters, numbers and spaces only");
+
+    /* IC1: a selling price is required unless the item is deliberately
+       open-price (ask at the till). The old form accepted the 0.00 default
+       silently, which is how shops end up with unpriced catalogues. */
+    /*
+     * Tax follows its feature toggle.
+     *
+     * The rule was `required: true` regardless, so a shop with the tax module
+     * turned off could not save an item at all: the select has no options and
+     * no selection, and the validator refused a field the shop had deliberately
+     * switched away.
+     *
+     * taxFeatureOn() is the same check the sale screen uses - the general
+     * settings blob first, the legacy flag only as a fallback - so the two
+     * screens cannot disagree about whether this shop charges tax.
+     */
+    jQuery.validator.addMethod("taxRequiredWhenEnabled", function (value) {
+        var on = (PosnicPro.sales && typeof PosnicPro.sales.taxFeatureOn === 'function')
+            ? PosnicPro.sales.taxFeatureOn()
+            : PosnicPro.local.get('default_tax_enable_disable') === 'true';
+        if (!on) { return true; }
+        return $.trim(value || '') !== '';
+    }, "Choose a tax rate");
+
+    jQuery.validator.addMethod("sellingPriceOrOpen", function (value) {
+        if ($('#item_open_price').is(':checked')) {
+            return true;
+        }
+        /* In variant mode the parent has no price of its own - saveVariantFamily
+           reads items_selling_price_<n> from each variant row and never looks at
+           this field. Demanding it here asked for a number that is discarded,
+           and did it on a field the same mode hides. */
+        if ($('#product_with_variant').is(':checked')) {
+            return true;
+        }
+        return (parseFloat(value) || 0) > 0;
+    }, "Enter a selling price, or tick Price at sale");
+
+    $("#item_image_upload_form").validate({
+        errorClass: 'error error_item',
+        /*
+         * An error on a hidden tab is an error nobody sees. Save appeared to do
+         * nothing, because the message was rendered on a pane that was not on
+         * screen and the focus landed on an element the browser will not focus
+         * (owner ask). The form now opens the pane holding the FIRST invalid
+         * field and focuses it there.
+         */
+        invalidHandler: function (event, validator) {
+            var bad = validator.invalidElements();
+            if (!bad || !bad.length) { return; }
+            var first = bad[0];
+            var pane = PosnicPro.items.tabOf(first);
+            if (pane) {
+                PosnicPro.items.goToTab(pane, '#' + $(first).attr('id'));
+            }
+        },
+        highlight: function (element, errorClass) {
+            $(element).css("border-color", "#f9616d");
+        },
+        unhighlight: function (element, errorClass) {
+            $(element).css("border-color", "#eae8e8");
+        },
+        errorPlacement: function (label, element) {
+            if (element.hasClass('items_choose_error') && element.next('.select2-container').length) {
+                label.insertAfter(element.next('.select2-container'));
+            } else {
+                label.addClass('mt-2 text-danger');
+                label.insertAfter(element);
+            }
+        },
+        rules: {
+            items_name: {
+                required: true,
+                alphanumeric: true,
+                minlength: 3,
+                maxlength: 500
+            },
+            /* NOT required. The form never marked it - no red asterisk - so a
+               rule demanding it refused a save while pointing at nothing (owner:
+               "item category is not mandatory i think"). It is also genuinely
+               optional: items arrive uncategorised and get filed later. */
+            items_category: {
+                maxlength: 250
+            },
+            items_supplier: {
+                maxlength: 250
+            },
+            items_itemid: {
+                minlength: 1,
+                maxlength: 20
+            },
+            items_barcodeid: {
+                minlength: 1,
+                maxlength: 100
+            },
+            items_mrp_price: {
+                minlength: 1,
+                maxlength: 7
+            },
+            items_company_price: {
+                minlength: 1,
+                maxlength: 7
+            },
+            items_selling_price: {
+                minlength: 1,
+                maxlength: 7,
+                sellingPriceOrOpen: true
+            },
+            items_available_quantity: {
+                minlength: 1,
+                maxlength: 10
+            },
+            items_discount_amount: {
+                minlength: 1,
+                maxlength: 10
+            },
+            items_discount_percentage: {
+                minlength: 1,
+                maxlength: 4
+            },
+            items_sort: {
+                minlength: 1,
+                maxlength: 10
+            },
+            /* Required only while the tax module is ON. With it off there is no
+               tax select to fill, so an unconditional rule refused every save on
+               a shop that does not charge tax (owner ask). */
+            items_tax: {
+                taxRequiredWhenEnabled: true
+            },
+            items_description: {
+                minlength: 5,
+                maxlength: 1000
+            },
+            items_variant: {
+                required: true
+            },
+            item_variant_list: {
+                required: true
+            },
+            items_mfg_date: {
+                dateISO: true
+            },
+            items_expiry_date: {
+                dateISO: true,
+                greaterThanMfgDate: "#items_mfg_date",
+                expiryGreaterThanCurrentDate: true
+            },
+            // Validated only when HSN tax mode shows it (hidden fields are
+            // ignored) - it is the tax source in that mode, so it must be a
+            // real HSN: 4-8 digits.
+            items_hsncode: {
+                digits: true,
+                minlength: 4,
+                maxlength: 8
+            }
+
+        },
+        messages: {
+            items_name: {
+                required: "Enter the item name",
+                minlength: "Item Name must consist of at least 3 characters",
+                maxlength: "Item Name should not be more than 500 characters"
+            },
+            items_category: {
+                required: "Choose a category"
+            },
+            items_variant: {
+                required: "Choose a variant"
+            },
+            item_variant_list: {
+                required: "Choose at least one variant field"
+            },
+            items_supplier: {
+                minlength: "Item supplier must consist of at least 3 characters",
+                maxlength: "Item supplier should not be more than 250 characters"
+            },
+            items_itemid: {
+                minlength: "This field must consist of at least 1 characters",
+                maxlength: "This field should not be more than 20 characters"
+            },
+            items_barcodeid: {
+                minlength: "This field must consist of at least 1 characters",
+                maxlength: "This field should not be more than 100 characters"
+            },
+            items_mrp_price: {
+                minlength: "This field must consist of at least 1 characters",
+                maxlength: "This field should not be more than 7 characters"
+            },
+            items_company_price: {
+                minlength: "This field must consist of at least 1 characters",
+                maxlength: "This field should not be more than 7 characters"
+            },
+            items_selling_price: {
+                minlength: "This field must consist of at least 1 characters",
+                maxlength: "This field should not be more than 7 characters"
+            },
+            items_available_quantity: {
+                minlength: "This field must consist of at least 1 characters",
+                maxlength: "This field should not be more than 10 characters"
+            },
+            items_discount_amount: {
+                minlength: "This field must consist of at least 1 characters",
+                maxlength: "This field should not be more than 10 characters"
+            },
+            items_discount_percentage: {
+                minlength: "This field must consist of at least 1 characters",
+                maxlength: "This field should not be more than 4 characters"
+            },
+            items_sort: {
+                minlength: "This field must consist of at least 1 characters",
+                maxlength: "This field should not be more than 10 characters"
+            },
+            items_description: {
+                minlength: "This field must consist of at least 100 characters",
+                maxlength: "This field should not be more than 10000 characters"
+            },
+            items_hsncode: {
+                digits: "HSN code is digits only",
+                minlength: "HSN code is 4 to 8 digits",
+                maxlength: "HSN code is 4 to 8 digits"
+            },
+            items_mfg_date: {
+                dateISO: "Use the date format YYYY-MM-DD",
+            },
+            items_expiry_date: {
+                dateISO: "Use the date format YYYY-MM-DD",
+                greaterThanMfgDate: "Expiry date must be greater than manufacturing date"
+            }
+        }
+    });
+    $.validator.addMethod("expiryGreaterThanCurrentDate", function (value, element) {
+        if (!value)
+            return true;
+        return moment(value, 'YYYY-MM-DD').isSameOrAfter(moment(), 'day');
+    }, "Expiry date must be today's date or in the future.");
+    $.validator.addMethod("greaterThanMfgDate", function (value, element, param) {
+        var mfgDate = $(param).val();
+        if (!mfgDate || !value)
+            return true;
+        return new Date(value) > new Date(mfgDate);
+    }, "Expiry date must be greater than manufacturing date");
+    jQuery.validator.addMethod("greaterThan", function (value, element, param) {
+        var $otherElement = $(param);
+        return parseFloat(value, 10) >= parseFloat($otherElement.val(), 10);
+    }, "Use the date format");
+
+    $('#items_category,#items_tax,#item_variant_list,#items_variant').on('change', function () {
+        $(this).trigger('blur');
+    });
+    $("#items_available_quantity,#items_sort").on('input', function () {
+        $(this).valid();
+    });
+    /* IC2: duplicate-name warning at entry, non-blocking. The server only
+       rejects when name AND barcode AND all three prices match, so this is
+       where a "did you mean the existing one?" moment actually happens. */
+    $('#items_name').on('blur', function () {
+        var typed = ($(this).val() || '').trim();
+        $('.item-dup-note').remove();
+        if ($('#itemid').val() !== '' || typed.length < 3) { return; }
+        PosnicPro.get({
+            url: 'base/autoSuggestionTableField',
+            data: 'query=' + encodeURIComponent(typed) + '&field=name&module=items'
+        }, function (response) {
+            var list = (response && response.data && response.data.suggestions) || [];
+            var clash = list.some(function (s) {
+                var value = (s && (s.value || s)) || '';
+                return typeof value === 'string' && value.trim().toLowerCase() === typed.toLowerCase();
+            });
+            // Re-check the field still shows what we looked up.
+            if (clash && ($('#items_name').val() || '').trim() === typed) {
+                $('#items_name').after(
+                    '<small class="item-dup-note text-warning d-block mt-1">An item named &quot;' +
+                    $('<span>').text(typed).html() + '&quot; already exists.</small>'
+                );
+            }
+        }, function () { /* advisory only - stay quiet on failure */ });
+    });
+
+    /* IC2: the per-variant price rows render the moment the values are
+       chosen - Save no longer has a silent first click that only rendered
+       rows. The submit-time render below stays as a fallback (with a voice)
+       for any path that reaches Save with the rows still missing. */
+    /* Reveal the second axis, and put it away again.
+       It has to close as well as open: the tab tick counts every VISIBLE
+       field, so a second axis revealed by accident and impossible to collapse
+       would hold the Item tab permanently unticked with nothing explaining
+       why. Same toggle shape as the variants link above it. */
+    /* Open and close the filter panel. Delegated, because the button lives in
+       markup that is re-rendered on page entry. */
+    $(document).on('click', '#items_filter_btn', function () {
+        PosnicPro.items.mountFilters();
+        PosnicPro.listFilter.toggle('items');
+    });
+
+    $(document).on('click', '#variant_axis2_link', function () {
+        if ($('#variant_axis2_wrap').is(':visible')) {
+            PosnicPro.items.resetSecondAxis();
+        } else {
+            $('#variant_axis2_wrap').show();
+            $(this).text('- Remove second option');
+        }
+        PosnicPro.items.refreshVariantCount();
+        if ($('#product_with_variant').is(':checked')
+            && ($('#item_variant_list').val() || []).length > 0) {
+            PosnicPro.items.loadVariant();
+        }
+    });
+
+    /* Choosing second-axis values changes the ROW LIST, so the rows and the
+       count both have to follow it, exactly as they follow the first. */
+    $(document).on('change', '#item_variant_list_2', function () {
+        PosnicPro.items.refreshVariantCount();
+        if ($('#product_with_variant').is(':checked')
+            && ($('#item_variant_list').val() || []).length > 0) {
+            PosnicPro.items.loadVariant();
+        }
+    });
+
+    $('#item_variant_list').on('change', function () {
+        PosnicPro.items.refreshVariantCount();
+        if ($('#product_with_variant').is(':checked') && ($(this).val() || []).length > 0) {
+            PosnicPro.items.loadVariant();
+        }
+    });
+
+    /* Naming the item after choosing its variants fills the row headings in
+       as you type. No debounce needed - this only rewrites text nodes that
+       already exist, so nothing typed into the rows can be lost. */
+    $(document).on('input', '#items_name', function () {
+        if (!$('#product_with_variant').is(':checked')) { return; }
+        PosnicPro.items.retitleVariantRows();
+    });
+    $("#item_image_upload_form").submit(function (event) {
+        event.preventDefault();
+        if ($('#item_image_upload_form').valid()) {            // checks form for validity
+            if ($("#product_with_variant").is(":checked") && $("#load_price_fields").html() === '') {
+                PosnicPro.items.loadVariant();
+                PosnicPro.alert('info', 'Review each variant\'s price below, then Save');
+            } else {
+                if ($('#item_upload_image_status').val() === 'no') {
+                    PosnicPro.items.item();
+                } else {
+                    PosnicPro.items.itemImageFormSubmit();
+                }
+            }
+
+        }
+    });
+
+});
+
+
+$(document).ready(function () {
+
+    db.printLableValues.get('1').then(function (data) {
+        $(data.printLabel).each(function (key, val) {
+            // Set input values first
+            $('#document_width').val(val.document_width);
+            $('#document_height').val(val.document_height);
+            $("#margin_top").val(val.margin_top);
+            $("#margin_bottom").val(val.margin_bottom);
+            $("#margin_left").val(val.margin_left);
+            $("#margin_right").val(val.margin_right);
+            $("#barcodeLabelType").val(val.format);
+
+            // Set color values (MISSING BEFORE)
+            $("#background-color").val(val.backgroundColor || '#FFFFFF');
+            $("#line-color").val(val.lineColor || '#000000');
+
+            // Update slider limits based on loaded document size
+            updateSliderLimits();
+
+            // Set text alignment
+            $(".text-align").removeClass("btn-primary");
+            $(".text-align[value='" + val.textAlign + "']").addClass("btn-primary");
+            $(".fontfamily").css({"text-align": val.textAlign});
+
+            // Set slider values AND trigger visual updates in one go
+            /* Guarded: 'update' re-measures through the same hidden-parent
+               walk that throws on a detached input, and these five run from a
+               stored-preset load that can land after a page swap. */
+            PosnicPro.items.initBarcodeSliders();
+            [['#bar-height', val.height], ['#bar-width', val.width], ['#bar-margin', val.margin],
+             ['#bar-text-margin', val.textMargin], ['#bar-fontSize', val.fontSize || 9]
+            ].forEach(function (pair) {
+                var $el = $(pair[0]).val(pair[1]);
+                if ($el.length && document.contains($el[0]) && PosnicPro.items._barcodeSlidersReady) {
+                    try { $el.rangeslider('update', true); } catch (e) { /* redrawn on open */ }
+                }
+            });
+
+            // Set font
+            $("#font").val(val.font);
+
+            // Update display values manually
+            $("#bar-width-display").text(val.width);
+            $("#bar-height-display").text(val.height);
+            $("#bar-margin-display").text(val.margin);
+            $("#bar-text-margin-display").text(val.textMargin);
+            $("#bar-fontSize-display").text(val.fontSize || 9);
+
+            // Update preview and generate barcode
+            updatePreviewDimensions();
+            newBarcode();
+        });
+    }).catch(function(error) {
+        console.log('No saved label values found, using defaults');
+        // Initialize with defaults
+        updateSliderLimits();
+        updatePreviewDimensions();
+        newBarcode();
+    });
+
+    $("#userInput").on('input', newBarcode);
+    $("#barcodeLabelType").change(function () {
+        $("#userInput").val($('#userInput').val());
+        newBarcode();
+    });
+
+    $("#branch-value,#price-value,#address-value,#mrp-price-value,#mfg-date-value,#exp-date-value,#margin_top,#margin_bottom,#margin_left,#margin_right").on('input load', function () {
+        updateLabelPreview();
+        newBarcode();
+    });
+
+    $(".text-align").click(function () {
+        $(".text-align").removeClass("btn-primary");
+        $(this).addClass("btn-primary");
+        newBarcode();
+    });
+
+    $(".font-option").click(function () {
+        if ($(this).hasClass("btn-primary")) {
+            $(this).removeClass("btn-primary");
+        } else {
+            $(this).addClass("btn-primary");
+        }
+        newBarcode();
+    });
+
+    $(".display-text").click(function () {
+        $(".display-text").removeClass("btn-primary");
+        $(this).addClass("btn-primary");
+
+        if ($(this).val() === "true") {
+            $("#font-options").slideDown("fast");
+        } else {
+            $("#font-options").slideUp("fast");
+        }
+        newBarcode();
+    });
+
+    $("#font").change(function () {
+
+        newBarcode();
+
+    });
+
+    /*
+     * Lazily, on the barcode designer actually opening - and only for inputs
+     * still IN the document.
+     *
+     * rangeslider (polyfill:false wraps everything) measures its input by
+     * walking parentNodes until a visible ancestor; on a DETACHED input that
+     * walk runs off the document into null and throws "Cannot read
+     * properties of null (reading 'offsetWidth')" - the exact line the boot
+     * watchdog carried on the owner's screen, on every refresh of one shop.
+     * Registering at module-ready also left the plugin's window-resize
+     * re-measure armed for the whole session over inputs whose panel the SPA
+     * may rebuild. Initialised where they are used, they exist, they are
+     * attached, and a shop that never opens the designer never runs any of
+     * this.
+     */
+    PosnicPro.items.initBarcodeSliders = function () {
+        if (PosnicPro.items._barcodeSlidersReady) { return; }
+        var $connected = $('.range-type').filter(function () {
+            return document.contains(this);
+        });
+        if (!$connected.length) { return; }
+        PosnicPro.items._barcodeSlidersReady = true;
+        try {
+            $connected.rangeslider({
+                polyfill: false,
+                rangeClass: 'rangeslider',
+                fillClass: 'rangeslider__fill',
+                handleClass: 'rangeslider__handle',
+                onSlide: newBarcode,
+                onSlideEnd: newBarcode
+            });
+        } catch (e) {
+            /* A failed slider must cost the slider, never the boot. */
+            console.error('[barcode] slider init failed:', e.message);
+        }
+    };
+    $(document).on('click focusin', '#barcode-container, .slider-container', function () {
+        PosnicPro.items.initBarcodeSliders();
+    });
+
+    $('.color').colorPicker({renderCallback: newBarcode});
+    newBarcode();
+    $('.hide_price_digit').on('focus', function () {
+        var enteredValue = $(this).val();
+        if (enteredValue === '0.00') {
+            $(this).val('');
+        }
+    });
+
+    $('#document_width, #document_height').on('input change', function() {
+        // Small delay to allow input to complete
+        setTimeout(() => {
+            updateSliderLimits();
+            updatePreviewDimensions();
+            newBarcode();
+        }, 100);
+    });
+
+    // Validate when barcode dimensions change
+    $('#bar-width, #bar-height, #bar-fontSize').on('input change', function() {
+        setTimeout(() => {
+            newBarcode();
+        }, 100);
+    });
+
+});
+
+/* IC1c followup: the description is a plain textarea now (maxlength
+   in the markup). The Summernote WYSIWYG toolbar was heavyweight for
+   a 1000-char field no receipt renders rich. */
+
+// Update preview function to work with existing system
+var updateLabelPreview = function() {
+    $("#branch-name").text($('#branch-value').val());
+    $("#price-name").text($('#price-value').val());
+    $("#mrp-price").text($('#mrp-price-value').val());
+    $("#address-name").text($('#address-value').val());
+
+    if ($('#mfg_checkbox').is(':checked')) {
+        $("#mfg-date").text($('#mfg-date-value').val());
+    } else {
+        $("#mfg-date").text('');
+    }
+
+    if ($('#exp_checkbox').is(':checked')) {
+        $("#exp-date").text($('#exp-date-value').val());
+    } else {
+        $("#exp-date").text('');
+    }
+};
+
+function updatePreviewDimensions() {
+    var labelWidth = parseFloat($('#document_width').val()) || 1.96;
+    var labelHeight = parseFloat($('#document_height').val()) || 1.18;
+
+    // Update dimension display
+    $('#preview-width').text(labelWidth);
+    $('#preview-height').text(labelHeight);
+
+    // Calculate scaled dimensions for preview (max 300px width for screen display)
+    var maxPreviewWidth = 300;
+    var aspectRatio = labelHeight / labelWidth;
+
+    var previewWidth = Math.min(maxPreviewWidth, labelWidth * 96); // 96 DPI conversion
+    var previewHeight = previewWidth * aspectRatio;
+
+    // Apply dimensions to preview container
+    $('#preview-container').css({
+        'width': previewWidth + 'px',
+        'height': previewHeight + 'px'
+    });
+
+    // Adjust font sizes based on preview size
+    var fontScale = previewWidth / 200; // Scale factor based on 200px base
+    var baseFontSize = Math.max(8, 12 * fontScale);
+
+    $('#print-preview').css({
+        'font-size': baseFontSize + 'px'
+    });
+}
+
+function updateSliderLimits() {
+    var docWidth = parseFloat($('#document_width').val()) || 1.96;
+    var docHeight = parseFloat($('#document_height').val()) || 1.96;
+
+    // Calculate reasonable max values based on document size
+    var maxBarWidth = Math.max(1, docWidth * 1.5); // Allow reasonable width range
+    var maxBarHeight = Math.max(10, docHeight * 40); // Convert inches to reasonable pixel height
+
+    // Update slider max attributes
+    $('#bar-width').attr('max', maxBarWidth);
+    $('#bar-height').attr('max', maxBarHeight);
+
+    // Update rangeslider if it exists
+    if ($.fn.rangeslider) {
+        $('#bar-width').rangeslider('destroy').rangeslider({
+            polyfill: false,
+            rangeClass: 'rangeslider',
+            fillClass: 'rangeslider__fill',
+            handleClass: 'rangeslider__handle',
+            onSlide: newBarcode,
+            onSlideEnd: newBarcode
+        });
+
+        $('#bar-height').rangeslider('destroy').rangeslider({
+            polyfill: false,
+            rangeClass: 'rangeslider',
+            fillClass: 'rangeslider__fill',
+            handleClass: 'rangeslider__handle',
+            onSlide: newBarcode,
+            onSlideEnd: newBarcode
+        });
+    }
+}
+
+
+// Updated newBarcode function with validation
+var newBarcode = function () {
+    // Update preview dimensions first
+    updatePreviewDimensions();
+
+
+    // Get values needed outside labelSettings
+    var barcodeValue = $("#userInput").val();
+    var backgroundColor = $("#background-color").val();
+    var lineColor = $("#line-color").val();
+    var fontSize = parseInt($("#bar-fontSize").val());
+
+    // Create settings object - get values directly
+    var labelSettings = {
+        document_width: $('#document_width').val(),
+        document_height: $('#document_height').val(),
+        format: $("#barcodeLabelType").val(),
+        margin_top: parseInt($('#margin_top').val()),
+        margin_bottom: parseInt($('#margin_bottom').val()),
+        margin_left: parseInt($('#margin_left').val()),
+        margin_right: parseInt($('#margin_right').val()),
+        textAlign: $(".text-align.btn-primary").val() || 'center',
+        height: parseInt($("#bar-height").val()),
+        width: parseFloat($("#bar-width").val()),
+        margin: parseFloat($("#bar-margin").val()),
+        textMargin: parseFloat($("#bar-text-margin").val()),
+        font: $("#font").val(),
+
+        // MISSING VALUES - Add these:
+        fontSize: parseInt($("#bar-fontSize").val()),
+        backgroundColor: $("#background-color").val(),
+        lineColor: $("#line-color").val()
+    };
+
+    // Save to database early
+    db.printLableValues.put({id: '1', printLabel: [labelSettings]});
+
+    // Update display values
+    $("#bar-width-display").text(labelSettings.width);
+    $("#bar-height-display").text(labelSettings.height);
+    $("#bar-fontSize-display").text(fontSize);
+    $("#bar-margin-display").text(labelSettings.margin);
+    $("#bar-text-margin-display").text(labelSettings.textMargin);
+
+    // Update font and alignment for preview elements
+    $(".fontfamily").css({
+        "font-family": labelSettings.font,
+        "text-align": labelSettings.textAlign,
+        "font-size": fontSize + 'px'
+    });
+
+    // Generate barcode with current settings - reuse labelSettings
+    $("#labelBarcode").JsBarcode(barcodeValue, {
+        "format": labelSettings.format,
+        "background": backgroundColor,
+        "lineColor": lineColor,
+        "fontSize": fontSize,
+        "height": labelSettings.height,
+        "width": labelSettings.width,
+        "margin": labelSettings.margin,
+        "textMargin": labelSettings.textMargin,
+        "displayValue": "true",
+        "font": labelSettings.font,
+        "textAlign": labelSettings.textAlign,
+        "marginTop": labelSettings.margin_top,
+        "marginBottom": labelSettings.margin_bottom,
+        "marginLeft": labelSettings.margin_left,
+        "marginRight": labelSettings.margin_right,
+        "fontOptions": $(".font-option.btn-primary").map(function () {
+            return this.value;
+        }).get().join(" "),
+        "valid": function (valid) {
+            if (valid) {
+                $("#labelBarcode").show();
+                $("#invalid").hide();
+            } else {
+                $("#labelBarcode").hide();
+                $("#invalid").show();
+            }
+        }
+    });
+
+    // Update preview content
+    updateLabelPreview();
+};
+
+
+$('#bar-fontSize').change(function () {
+    $(".fontfamily").css({"font-size": $("#bar-fontSize").val() + 'px'});
+});
+
+
+
+/*
+ * HSN lookup (owner ask): search by text as well as code - "electron"
+ * finds electronics rows - and suggest codes from the item and category
+ * names. The 8,924-row list loads once on demand and stays in memory;
+ * every keystroke filters locally, nothing blocks typing.
+ */
+PosnicPro.items._hsnRows = null;
+PosnicPro.items._hsnLoad = function (done) {
+    if (PosnicPro.items._hsnRows) { done(PosnicPro.items._hsnRows); return; }
+    PosnicPro.get({ url: 'items/getJSONhsncode' }, function (data) {
+        var rows = (data && data.data && data.data.hsn) || [];
+        rows.forEach(function (r) { r._d = (r.description || '').toLowerCase(); });
+        PosnicPro.items._hsnRows = rows;
+        done(rows);
+    }, function () { done([]); });
+};
+PosnicPro.items._hsnRate = function (r) {
+    var n = parseFloat(String(r.taxrate || '').replace('%', ''));
+    return isFinite(n) ? n : 0;
+};
+/* GST 2.0 (CBIC Notif. 9/2025, eff. 22 Sep 2025) retired the 12% and 28%
+   slabs. Rows still carrying them are pre-2025 data: never auto-fill a
+   dead slab - name it and make the owner pick the current one. */
+PosnicPro.items._hsnDeadSlab = function (r) {
+    var n = PosnicPro.items._hsnRate(r);
+    return n === 12 || n === 28;
+};
+PosnicPro.items._hsnApply = function (r) {
+    $('#items_hsncode').val(r.value);
+    $('#items_hsndescription').val(r.description);
+    if (PosnicPro.items._hsnDeadSlab(r)) {
+        $('#hsn_tax').val('');
+        PosnicPro.alert('info', 'This code\'s stored rate (' + PosnicPro.items._hsnRate(r)
+            + '%) predates GST 2.0 - most such goods moved to '
+            + (PosnicPro.items._hsnRate(r) === 12 ? '5% or 18%' : '18% or 40%')
+            + '. Set the current slab (Notif. 9/2025, eff. 22 Sep 2025).');
+    } else {
+        $('#hsn_tax').val(PosnicPro.items._hsnRate(r));
+    }
+    $('#hsn_suggest_row').hide();
+};
+/* Top matches for the item + category words - the "right tax" nudge. */
+PosnicPro.items.hsnSuggest = function () {
+    if ($("input[name='hsntax_radio_value']:checked").val() !== 'hsncode') { return; }
+    if ($.trim($('#items_hsncode').val())) { return; }
+    var words = ($('#items_name').val() + ' ' + ($('.items_category option:selected').text() || ''))
+        .toLowerCase().split(/[^a-z]+/).filter(function (w) { return w.length > 3; });
+    if (!words.length) { $('#hsn_suggest_row').hide(); return; }
+    PosnicPro.items._hsnLoad(function (rows) {
+        var scored = [];
+        for (var i = 0; i < rows.length; i++) {
+            var hit = 0;
+            for (var j = 0; j < words.length; j++) {
+                if (rows[i]._d.indexOf(words[j]) !== -1) { hit++; }
+            }
+            if (hit) { scored.push([hit, rows[i]]); }
+        }
+        scored.sort(function (a, b) { return b[0] - a[0]; });
+        var top = scored.slice(0, 3).map(function (x) { return x[1]; });
+        if (!top.length) { $('#hsn_suggest_row').hide(); return; }
+        var esc = function (v) { return $('<i>').text(v == null ? '' : v).html(); };
+        $('#hsn_suggest_row').html('<small class="text-muted mr-1"><lang class="lang_suggested">Suggested:</lang></small>' + top.map(function (r, i) {
+            var rate = String(r.taxrate || '').replace('%', '') || '0';
+            var rateLabel = PosnicPro.items._hsnDeadSlab(r) ? rate + '% (pre-2025)' : rate + '%';
+            return '<a href="javascript:void(0)" class="badge badge-light border mr-1 hsn-chip" data-i="' + i + '">'
+                + esc(r.value) + ' &middot; ' + esc((r.description || '').slice(0, 34))
+                + ' &middot; ' + esc(rateLabel) + '</a>';
+        }).join('')).show().data('rows', top);
+    });
+};
+$(document).on('click', '.hsn-chip', function () {
+    var rows = $('#hsn_suggest_row').data('rows') || [];
+    var r = rows[$(this).data('i')];
+    if (r) { PosnicPro.items._hsnApply(r); }
+});
+$(document).on('change', "input[name='hsntax_radio_value']", function () {
+    setTimeout(PosnicPro.items.hsnSuggest, 50);
+});
+$('.hsnCode').one({
+    click: function () {
+        PosnicPro.items._hsnLoad(function (rows) {
+            $('.hsnCode').autocomplete({
+                lookup: rows,
+                autoSelectFirst: false,
+                minChars: 1,
+                deferRequestBy: 80,
+                lookupLimit: 8,
+                onSelect: function (suggestion) {
+                    PosnicPro.items._hsnApply(suggestion);
+                },
+                lookupFilter: function (suggestion, query, queryLowerCase) {
+                    return suggestion.value.indexOf(queryLowerCase) === 0
+                        || suggestion._d.indexOf(queryLowerCase) !== -1;
+                },
+                formatResult: function (suggestion, currentValue) {
+                    var rate = String(suggestion.taxrate || '').replace('%', '') || '0';
+                    var dead = PosnicPro.items._hsnDeadSlab(suggestion);
+                    return '<div class="sug-row">'
+                        + '<div class="sug-main"><div class="sug-name">'
+                        + $.Autocomplete.formatResult(suggestion, currentValue)
+                        + '</div><div class="sug-meta">' + $('<i>').text(suggestion.description || '').html()
+                        + '</div></div><div class="sug-side"><span class="sug-stock ' + (dead ? 'low' : 'in') + '">GST '
+                        + rate + '%' + (dead ? ' pre-2025' : '') + '</span></div></div>';
+                }
+            });
+        });
+    }
+});
+
+$(document).ready(function () {
+    $('#hsn_code_show').hide();
+    $('#hsn_tax').hide();
+    $('#default_tax').show();
+    PosnicPro.items.loadSelectCategory();
+    PosnicPro.items.loadSelectSupplier();
+    PosnicPro.items.loadSelectVariant();
+    PosnicPro.items.loadSelectTax();
+    PosnicPro.items.loadSelectUnit();
+    var defaultsupplierData = PosnicPro.local.get('defaultsupplier');
+    var defaultsupplier = defaultsupplierData ? JSON.parse(defaultsupplierData) : null;
+
+    if (PosnicPro.local.get('default_supplier_enable_disable') === 'false' || !defaultsupplier) {
+        $('#items_supplier_id').val('');
+        $('#items_supplier').val('');
+    } else {
+        $('#items_supplier_id').val(defaultsupplier.supplier_id);
+        $('#items_supplier').val(defaultsupplier.supplier_name);
+    }
+    $(".items_category").select2({
+        placeholder: "Choose a Category"
+    });
+    $(".items_category").val('').trigger('change.select2');
+    // Typing in either discount field marks the pair as the user's - a
+    // category pick then leaves them alone (applyCategoryDiscount).
+    $(document).on('change', '#item_is_service', function () {
+        PosnicPro.items.applyServiceMode();
+    });
+    $(document).on('input', '#items_name', function () {
+        PosnicPro.items.refreshTilePreview();
+        PosnicPro.items.suggestIcon();
+    });
+    PosnicPro.items.drawIconChoices();
+    $(document).on('click', '#item_icon_choices .icon-choice', function () {
+        var icon = $(this).text() || '';
+        /* Tap the picked one again to go back to the suggestion, the same way
+           the shape picker clears itself. */
+        if (($('#item_icon').val() || '') === icon) { icon = ''; }
+        PosnicPro.items.setIcon(icon);
+    });
+    $(document).on('click', '#item_icon_clear', function () {
+        PosnicPro.items.setIcon('');
+    });
+    $(document).on('input', '#items_gtin', function () {
+        PosnicPro.items.checkGtin();
+    });
+    $(document).on('click', '#item_tile_swatches .tile-swatch', function () {
+        PosnicPro.items.setTileColor($(this).data('color') || '');
+    });
+    $(document).on('click', '#item_tile_shapes .tile-shape', function () {
+        var shape = $(this).data('shape') || '';
+        // Tap the picked shape again to clear it back to the default square.
+        if (($('#item_tile_shape').val() || '') === shape) { shape = ''; }
+        PosnicPro.items.setTileShape(shape);
+    });
+    $('#items_discount_amount, #items_discount_percentage').on('input', function () {
+        PosnicPro.items._discountTouched = true;
+    });
+    // Ticking open-price re-judges the selling price immediately, so the
+    // "enter a price" error clears the moment the choice is made.
+    $('#item_open_price').on('change', function () {
+        if ($('#items_selling_price').closest('form').data('validator')) {
+            $('#items_selling_price').valid();
+        }
+    });
+    /* IC1: real pickers on the date fields - they were bare text inputs
+       validated as ISO dates, so MFG/expiry entry was guesswork. The
+       daterangepicker bundle already ships with the dashboard (reports).
+       autoUpdateInput stays off so an untouched field stays empty - both
+       dates are optional. */
+    if ($.fn.daterangepicker) {
+        $('#items_mfg_date, #items_expiry_date').daterangepicker({
+            singleDatePicker: true,
+            showDropdowns: true,
+            autoUpdateInput: false,
+            locale: { format: 'YYYY-MM-DD' }
+        }).on('apply.daterangepicker', function (ev, picker) {
+            $(this).val(picker.startDate.format('YYYY-MM-DD')).trigger('change');
+        });
+    }
+    // Stock adjustment: pick items via the receiving autocomplete (it
+    // carries current stock); edit quantities in place; remove rows.
+    $('#stock_adjust_search').autocomplete({
+        lookup: function (query, done) {
+            PosnicPro.get({
+                url: 'items/getReceivingItemsAjaxList',
+                data: 'query=' + encodeURIComponent(query) + '&type=normal'
+            }, function (response) {
+                done({
+                    suggestions: $.map(response.suggestions || [], function (d) {
+                        return { value: d.item_name, data: d };
+                    })
+                });
+            }, function () { done({ suggestions: [] }); });
+        },
+        onSelect: function (suggestion) {
+            var d = suggestion.data;
+            if (!d || !d.item_id) { return; }
+            if (!PosnicPro.items._adjRows[d.item_id]) {
+                PosnicPro.items._adjRows[d.item_id] = {
+                    name: d.item_name,
+                    stock: Number(d.available_quantity) || 0,
+                    qty: 0
+                };
+            }
+            PosnicPro.items.renderAdjRows();
+            var $box = $('#stock_adjust_search');
+            $box.val('');
+            if ($box.data('autocomplete')) { $box.autocomplete('clear'); }
+            setTimeout(function () { $box.focus(); }, 0);
+        },
+        autoSelectFirst: true,
+        triggerSelectOnValidInput: false
+    });
+    $(document).on('input', '.adj-qty', function () {
+        var id = $(this).data('id');
+        if (PosnicPro.items._adjRows[id]) {
+            PosnicPro.items._adjRows[id].qty = Number($(this).val()) || 0;
+            // Update only the computed cell, keep focus in the input.
+            var mode = PosnicPro.items._adjMode();
+            var r = PosnicPro.items._adjRows[id];
+            var after = mode === 'set' ? r.qty : mode === 'add' ? r.stock + r.qty : Math.max(0, r.stock - r.qty);
+            $(this).closest('tr').find('td').eq(3).text(after);
+        }
+    });
+    $(document).on('click', '.adj-remove', function () {
+        delete PosnicPro.items._adjRows[$(this).data('id')];
+        PosnicPro.items.renderAdjRows();
+    });
+    $("#items_variant").val(1).trigger('change.select2');
+    $("#items_variant").select2({
+        placeholder: "Choose a Variant"
+    });
+    $("#items_tax").select2({
+        placeholder: "Choose a Tax"
+    });
+    $("#load_price_fields").html('');
+});
+$('.click-tax-value').click(function () {
+    var hsnValue = $("input[name='hsntax_radio_value']:checked").val();
+    if (hsnValue === 'hsncode') {
+        $('#hsn_code_show').show();
+        $('#hsn_tax').show();
+        $('#default_tax').hide();
+    } else {
+        $('#hsn_code_show').hide();
+        $('#hsn_tax').hide();
+        $('#default_tax').show();
+    }
+});
+
+$('.item_image_setting').click(function () {
+    $('#image_popup').modal('show');
+});
+$('.itemimageview').click(function () {
+    $('#item_coverimg_popup').modal('show');
+});
+
+/* The second axis fills its own value list exactly as the first does.
+   Delegated rather than one-shot bound: this select is rebuilt by
+   loadSelectVariant on every page entry, and a handler bound to the old
+   element would be thrown away with it. */
+/*
+ * Choosing a photo for one variant. Clicking the chosen one again clears it.
+ *
+ * Delegated: these strips are rebuilt every time a photo is added or removed,
+ * and a handler bound to the old <img> would go with it.
+ */
+$(document).on('click', '.items-variant-photo', function () {
+    var stripId = $(this).closest('.items-variant-photos').attr('id') || '';
+    var key = stripId.replace('items_photo_strip_', '');
+    var $hidden = $('#items_photo_' + key);
+    if (!$hidden.length) { return; }
+    var name = $(this).attr('data-photo');
+    $hidden.val($hidden.val() === name ? '' : name);
+    PosnicPro.items.renderVariantPhotoPickers();
+});
+
+$(document).on('select2:select', '#items_variant_2', function () {
+    PosnicPro.items.loadVariantValues('#items_variant_2', '#item_variant_list_2');
+    PosnicPro.items.syncAxisExclusion();
+});
+
+/*
+ * Picking a variant fills its value list - for either axis.
+ *
+ * Delegated, and no longer wrapped in .one('change'). That wrapper bound the
+ * real handler only after some OTHER plain change had fired first, so whether
+ * picking a variant worked depended on whether something unrelated had already
+ * touched the select. It also rebound nothing when loadSelectVariant replaced
+ * the element on the next page entry.
+ */
+$(document).on('select2:select', '#items_variant', function () {
+    PosnicPro.items.loadVariantValues('#items_variant', '#item_variant_list');
+    PosnicPro.items.syncAxisExclusion();
+});
+$('.items_category').one('change', function () {
+    var categorySelect = $('.items_category');
+    categorySelect.on('select2:select', function (e) {
+        var data = e.params.data;
+        var hash = window.location.hash.slice(1);
+        if (hash === '/items/new') {
+            // Use the common function to apply discount
+            PosnicPro.items.applyCategoryDiscount(data.element);
+        }
+    });
+});
+$('#items_barcodeid').scannerDetection({
+    timeBeforeScanTest: 200, // wait for the next character for upto 200ms
+    avgTimeByChar: 40, // it's not a barcode if a character takes longer than 100ms
+    preventDefault: true,
+    endChar: [13],
+    onComplete: function (barcode, qty) {
+        validScan = true;
+        $('#items_barcodeid').val(barcode).focus();
+    },
+    onError: function (string, qty) {
+        $('#items_barcodeid').val($('#items_barcodeid').val() + string).focus();
+    }
+});
+/*end*/
+
+$(document).on('click', '#items_list_rows tr.items-row', function () {
+    PosnicPro.items.openDoc($(this).data('id'));
+});
+
+
+/*
+ * The channels an item can be kept off.
+ *
+ * Filled from the shop's own channel settings rather than a list in this file:
+ * a shop that does not use Swiggy should never be offered it, and a partner
+ * added last week has to appear here without a release.
+ *
+ * Loaded once and cached. The item form opens dozens of times in a session and
+ * the answer does not change between two of them.
+ */
+PosnicPro.itemChannels = {
+    _options: null,
+
+    /*
+     * Ids only, with the English kept beside each one rather than resolved.
+     *
+     * A t() call in a literal here runs when this file LOADS, which is before
+     * the language pack has arrived - so every shop would see English whatever
+     * it chose. The lookup happens in labelFor(), at render time.
+     */
+    CHANNELS: [
+        { id: 'pos', en: 'Point of sale' },
+        { id: 'online', en: 'Online and QR' },
+        { id: 'kiosk', en: 'Kiosk machine' },
+        { id: 'tableside', en: 'Captain app' },
+        { id: 'phone', en: 'Phone order' },
+        { id: 'whatsapp', en: 'WhatsApp' },
+        { id: 'marketplace', en: 'Delivery partners' },
+        { id: 'ecommerce', en: 'Webshop' }
+    ],
+
+    /*
+     * The key is spelled out per channel rather than built by concatenation.
+     *
+     * A key assembled at runtime is invisible to the translation sweep: the
+     * tooling reads the source looking for literals, finds 'lang_channel_' and
+     * has no idea what follows it, so none of these would ever appear on a
+     * translator's screen. Eight lines of literal beats eight untranslatable
+     * labels.
+     */
+    KEYS: {
+        pos: 'lang_channel_pos',
+        online: 'lang_channel_online',
+        kiosk: 'lang_channel_kiosk',
+        tableside: 'lang_channel_tableside',
+        phone: 'lang_channel_phone',
+        whatsapp: 'lang_channel_whatsapp',
+        marketplace: 'lang_channel_marketplace',
+        ecommerce: 'lang_channel_ecommerce'
+    },
+
+    labelFor: function (channel) {
+        var key = PosnicPro.itemChannels.KEYS[channel.id];
+        return key ? PosnicPro.i18n.t(key, channel.en) : channel.en;
+    },
+
+    /*
+     * WHICH CHANNELS THIS SHOP ACTUALLY RUNS, from the features it switched on.
+     *
+     * This used to read `sales_channels_enabled` - a checkbox list on the old
+     * combined settings page. That page is gone and so are the checkboxes: a
+     * shop chooses its channels on the Features page now, one card each. Left
+     * alone this offered every channel in the vocabulary to every shop,
+     * including three it had switched off, which is not a list anybody can
+     * choose from sensibly.
+     *
+     * pos, phone and whatsapp have no feature switch because they need no
+     * setting up - somebody rings, somebody messages, somebody walks in - so
+     * they are always offered.
+     */
+    liveChannels: function () {
+        var s = {};
+        try { s = JSON.parse(PosnicPro.local.get('general_settings') || '{}'); } catch (e) { /* defaults */ }
+        /* Absent means on, the same rule the sidebar and the pills use: a key
+           a shop has never touched must not read as a channel it switched off. */
+        var on = function (k) { return s[k] !== false; };
+
+        var live = ['pos', 'phone', 'whatsapp'];
+        if (on('module_kiosk_enable')) { live.push('kiosk'); }
+        if (on('module_captain_enable')) { live.push('tableside'); }
+        if (on('module_online_ordering_enable')) { live.push('online'); }
+        if (on('module_delivery_partners_enable')) { live.push('marketplace'); }
+        if (on('module_webshop_enable')) { live.push('ecommerce'); }
+        return live;
+    },
+
+    load: function (done) {
+        var self = PosnicPro.itemChannels;
+        if (self._options) { self.fill(); if (done) { done(); } return; }
+
+        PosnicPro.get({ url: 'settings/group/channels', data: {} }, function (response) {
+            var values = (response && response.data && response.data.values) || {};
+            var live = self.liveChannels();
+            var partners = values.sales_channel_partners || [];
+
+            var options = self.CHANNELS
+                .filter(function (c) { return live.indexOf(c.id) !== -1; })
+                .map(function (c) {
+                    return { id: c.id, label: self.labelFor(c) };
+                });
+
+            /* Each partner by name, so "not on Swiggy" is one tick rather than
+               taking the item off every aggregator at once - but only while the
+               feature that owns its kind is on. Offering Swiggy to a shop with
+               delivery partners switched off is the same noise as offering the
+               channel itself. */
+            partners.forEach(function (p) {
+                if (!p || !p.id || p.enabled === false) { return; }
+                var kind = String(p.channel || 'marketplace');
+                if (live.indexOf(kind) === -1) { return; }
+                options.push({ id: p.id, label: p.label || p.id });
+            });
+
+            self._options = options;
+            /* The serving periods live in the same group. One request fills
+               both boxes; the periods box had never been filled at all. */
+            PosnicPro.itemDayparts.take(values.menu_dayparts);
+            self.fill();
+            if (done) { done(); }
+        }, function () {
+            /*
+             * The settings call failed, which is not the same as "this shop has
+             * no channels". Falling back to an empty list used to make the box
+             * look like a shop that sells nowhere; the features are in local
+             * storage and do not need the server, so answer from those and lose
+             * only the partners.
+             */
+            var live = self.liveChannels();
+            self._options = self.CHANNELS
+                .filter(function (c) { return live.indexOf(c.id) !== -1; })
+                .map(function (c) { return { id: c.id, label: self.labelFor(c) }; });
+            self.fill();
+            if (done) { done(); }
+        });
+    },
+
+    fill: function () {
+        var $sel = $('#item_channel_off');
+        if (!$sel.length) { return; }
+        var chosen = $sel.val() || [];
+        var esc = function (v) { return $('<div>').text(v == null ? '' : v).html(); };
+        $sel.html((PosnicPro.itemChannels._options || []).map(function (o) {
+            return '<option value="' + esc(o.id) + '">' + esc(o.label) + '</option>';
+        }).join(''));
+        $sel.val(chosen).trigger('change');
+    },
+
+    /*
+     * Setting the value has to WAIT for the options to exist.
+     *
+     * select2 silently drops any id it has no option for, so setting before
+     * the list loads leaves the box empty - and the next save writes that
+     * empty box back, quietly putting the item on sale everywhere the shop
+     * had switched it off.
+     */
+    set: function (values) {
+        PosnicPro.itemChannels.load(function () {
+            $('#item_channel_off').val(values || []).trigger('change');
+        });
+    }
+};
+
+/*
+ * WHAT GOES WITH THIS DISH, chosen from the shop's own menu.
+ *
+ * Owner: "for checken briyani its suggessting french fries. not good
+ * combination. ask would like to add cock. only related prducts good. we need
+ * to provide relations or some indication about related products with product
+ * information."
+ *
+ * The ordering pages already offer something alongside a placed order, and
+ * without this they work it out from what has sold on the same bill over the
+ * last month. That is a reasonable guess and it is only a guess: it offered
+ * chips with biryani because chips and biryani had happened to share bills.
+ * This is the shop saying it outright, and what is said here comes first -
+ * most often to STOP a pairing the numbers keep producing.
+ *
+ * SAME SHAPE AS itemDayparts ABOVE, including the part that matters: set()
+ * waits for the options to exist before choosing, because select2 silently
+ * drops an id it has no option for, and the next save would then write the
+ * empty box back and quietly unpair the dish.
+ *
+ * The list is fetched ONCE per page and kept, because it is the same menu for
+ * every dish opened in that visit, and asking again per dish would make
+ * opening an item wait on a second request for nothing.
+ */
+PosnicPro.itemGoesWith = {
+    _options: null,
+    _asking: false,
+    _waiting: [],
+
+    load: function (done) {
+        var self = PosnicPro.itemGoesWith;
+        if (self._options) { if (done) { done(); } return; }
+        if (done) { self._waiting.push(done); }
+        if (self._asking) { return; }
+        self._asking = true;
+        PosnicPro.get({
+            /* Enough of the menu to pair from. A shop with more dishes than
+               this is choosing from a list nobody reads to the bottom anyway,
+               and the field takes at most a handful. */
+            url: 'items',
+            data: { page: 1, limit: 500 }
+        }, function (response) {
+            var rows = ((response && response.data) || {}).list || [];
+            self._options = rows
+                .filter(function (r) { return r && (r._id || r.id) && r.name; })
+                .map(function (r) { return { id: String(r._id || r.id), name: String(r.name) }; });
+            self._asking = false;
+            self.fill();
+            var waiting = self._waiting;
+            self._waiting = [];
+            waiting.forEach(function (fn) { fn(); });
+        }, function () {
+            /* A menu that cannot be listed still saves the dish; the field is
+               simply empty, which reads as "work it out from the bills". */
+            self._options = [];
+            self._asking = false;
+            var waiting = self._waiting;
+            self._waiting = [];
+            waiting.forEach(function (fn) { fn(); });
+        });
+    },
+
+    fill: function () {
+        var $sel = $('#item_goes_with');
+        if (!$sel.length) { return; }
+        var chosen = $sel.val() || [];
+        /* Never itself: a dish that goes with itself is a suggestion the
+           customer has already taken. */
+        var mine = String($('#itemid').val() || '');
+        var esc = function (v) { return $('<div>').text(v == null ? '' : v).html(); };
+        $sel.html((PosnicPro.itemGoesWith._options || [])
+            .filter(function (o) { return o.id !== mine; })
+            .map(function (o) {
+                return '<option value="' + esc(o.id) + '">' + esc(o.name) + '</option>';
+            }).join(''));
+        $sel.val(chosen).trigger('change');
+    },
+
+    set: function (values) {
+        PosnicPro.itemGoesWith.load(function () {
+            PosnicPro.itemGoesWith.fill();
+            $('#item_goes_with').val(values || []).trigger('change');
+        });
+    }
+};
+
+/*
+ * WHAT IS ON THE PLATE: the nutrition numbers, what is in the dish, and the
+ * badges those numbers earn.
+ *
+ * Owner asked for nutrition, diet types, food preference tags and marketing
+ * tags on an item, and then set the rule that shapes the screen: tags such as
+ * "diabetic friendly", "heart healthy", "keto" or exact calorie numbers
+ * should only be shown when the recipe or nutrition actually supports the
+ * claim.
+ *
+ * So this module reads and writes FACTS only. There is no control anywhere on
+ * the card for a health badge, and `earned` below is the only thing that
+ * produces one - from core/dish-facts.js, which is the same file the server
+ * derives with, so the strip on this screen and the badge on the menu cannot
+ * disagree.
+ *
+ * The live redraw is the point. A cook types a protein figure and watches
+ * "High protein" appear, which teaches the rule in one keystroke; and when a
+ * shop asks why a dish does not say it, the answer is the empty box in the
+ * same glance.
+ */
+PosnicPro.itemPlate = {
+
+    /*
+     * The claim keys dish-facts can produce, in the words a shop reads.
+     *
+     * A function rather than a table, and every key spelled out in full,
+     * because the translation scanner reads LITERAL t() calls out of this
+     * file: built keys like t('lang_claim_' + key) are invisible to it, so
+     * the strings never reach a language pack and every shop outside English
+     * reads these badges in English. That is a silent failure and the test
+     * that catches it is the only reason anybody would notice.
+     *
+     * The menu shows the same claims in the customer's language from its own
+     * dictionary; these are the shop's side of the same list.
+     */
+    words: function () {
+        /* Spelled out in full on every line rather than aliased to a local
+           `t`: the scanner matches the whole call, so `var t = ...` hides
+           every one of these from it just as surely as building the key did. */
+        return {
+            high_protein: PosnicPro.i18n.t('lang_claim_high_protein', 'High protein'),
+            protein_source: PosnicPro.i18n.t('lang_claim_protein_source', 'Source of protein'),
+            low_fat: PosnicPro.i18n.t('lang_claim_low_fat', 'Low fat'),
+            high_fibre: PosnicPro.i18n.t('lang_claim_high_fibre', 'High fibre'),
+            keto_friendly: PosnicPro.i18n.t('lang_claim_keto_friendly', 'Keto friendly'),
+            low_carb: PosnicPro.i18n.t('lang_claim_low_carb', 'Low carb'),
+            diabetic_friendly: PosnicPro.i18n.t('lang_claim_diabetic_friendly', 'Diabetic friendly'),
+            heart_healthy: PosnicPro.i18n.t('lang_claim_heart_healthy', 'Heart healthy'),
+            under_300: PosnicPro.i18n.t('lang_claim_under_300', 'Under 300 kcal'),
+            under_500: PosnicPro.i18n.t('lang_claim_under_500', 'Under 500 kcal'),
+            no_added_sugar: PosnicPro.i18n.t('lang_claim_no_added_sugar', 'No added sugar')
+        };
+    },
+
+    /* The numbers as typed. An empty box stays ABSENT rather than becoming a
+       zero, because zero is a claim - "no sugar" - and an empty box is not. */
+    nutrition: function () {
+        var out = {};
+        $('#item_plate_card [data-nutrient]').each(function () {
+            var raw = String($(this).val() || '').trim();
+            if (raw === '') { return; }
+            var n = Number(raw);
+            if (!isFinite(n) || n < 0) { return; }
+            out[$(this).data('nutrient')] = n;
+        });
+        return out;
+    },
+
+    tags: function () {
+        return $('#item_plate_card .item-food-tag:checked').map(function () {
+            return String(this.value);
+        }).get();
+    },
+
+    marks: function () {
+        return $('#item_plate_card .item-menu-mark:checked').map(function () {
+            return String(this.value);
+        }).get();
+    },
+
+    /*
+     * Whether this dish lets a customer say how hot it is made.
+     *
+     * One tick, and off by default, because the kitchen is the only side that
+     * knows which dishes it can really vary. See api/src/utils/spice-level.js.
+     */
+    spice: function () {
+        return $('#item_spice_choice').is(':checked');
+    },
+
+    /* Everything the save payload needs, in one call, so the two save paths
+       cannot drift apart the way they have before. */
+    payload: function () {
+        return {
+            nutrition: PosnicPro.itemPlate.nutrition(),
+            food_tags: PosnicPro.itemPlate.tags(),
+            menu_marks: PosnicPro.itemPlate.marks(),
+            spice_choice: PosnicPro.itemPlate.spice()
+        };
+    },
+
+    set: function (data) {
+        var plate = data || {};
+        var n = plate.nutrition || {};
+        $('#item_plate_card [data-nutrient]').each(function () {
+            var key = $(this).data('nutrient');
+            /* Absent reads as an empty box, never as 0 - see above. */
+            $(this).val(n[key] === undefined || n[key] === null ? '' : n[key]);
+        });
+
+        var tags = plate.food_tags || [];
+        $('#item_plate_card .item-food-tag').each(function () {
+            this.checked = tags.indexOf(String(this.value)) !== -1;
+        });
+
+        var marks = plate.menu_marks || [];
+        $('#item_plate_card .item-menu-mark').each(function () {
+            this.checked = marks.indexOf(String(this.value)) !== -1;
+        });
+
+        $('#item_spice_choice').prop('checked', plate.spice_choice === true);
+
+        /* A saved dish is the shop's own record, whatever filled it in first.
+           The estimate warning belongs to an unsaved draft only. */
+        PosnicPro.itemPlate.estimated(false);
+        PosnicPro.itemPlate.earned();
+    },
+
+    clear: function () {
+        PosnicPro.itemPlate.set({});
+    },
+
+    estimated: function (on) {
+        $('#item_plate_estimated').toggle(!!on);
+    },
+
+    /*
+     * Redraw the badges this dish currently earns.
+     *
+     * Reads core/dish-facts.js - the same file, byte for byte, that the
+     * server derives with; tests/dish-facts-copy-matches.test.js fails if
+     * they drift. Guarded because a bundle that somehow shipped without it
+     * should leave the card working and the strip quiet, rather than throwing
+     * on every keystroke in a number box.
+     */
+    earned: function () {
+        var $list = $('#item_plate_earned_list');
+        if (!$list.length) { return; }
+
+        var engine = window.PosnicDishFacts;
+        if (!engine || typeof engine.claimsFor !== 'function') { $list.empty(); return; }
+
+        var claims = engine.claimsFor(
+            PosnicPro.itemPlate.nutrition(),
+            PosnicPro.itemPlate.tags()
+        );
+
+        if (!claims.length) {
+            /* Not an error, and the normal state of a dish nobody has
+               measured. Said in words so an empty strip does not read as
+               something that failed to load. */
+            $list.html('<span class="plate-earned-none">' +
+                PosnicPro.i18n.t('lang_plate_earned_empty', 'Nothing yet. Fill in the numbers above and the badges appear here.') +
+                '</span>');
+            return;
+        }
+
+        var esc = function (v) { return $('<div>').text(v == null ? '' : v).html(); };
+        var words = PosnicPro.itemPlate.words();
+        $list.html(claims.map(function (key) {
+            return '<span class="plate-claim">' + esc(words[key] || key) + '</span>';
+        }).join(''));
+    },
+
+    /*
+     * Ask the assistant to estimate the numbers.
+     *
+     * Owner: "we have ai assistand also to auto fill if user lazy to do."
+     * Eight numbers times three hundred dishes is data entry nobody does, and
+     * a panel that is empty everywhere may as well not exist.
+     *
+     * It writes nothing. The numbers land in the boxes, the warning goes up,
+     * and a person looks at them and presses Save - the same contract the
+     * description button has. The warning matters more here because these
+     * numbers become public badges about food.
+     */
+    ask: function () {
+        var name = $.trim($('#items_name').val() || '');
+        if (!name) {
+            PosnicPro.alert('warning', PosnicPro.i18n.t('lang_plate_ai_no_name', 'Enter the dish name first'));
+            return;
+        }
+
+        var $btn = $('#item_plate_ai');
+        var original = $btn.html();
+        $btn.html('<i class="fa fa-spinner fa-spin mr-1"></i>' + PosnicPro.i18n.t('lang_plate_ai_working', 'Estimating...'))
+            .css('pointer-events', 'none');
+
+        PosnicPro.post({
+            url: 'items/aiDishFacts',
+            data: JSON.stringify({
+                name: name,
+                category_name: $.trim($('#items_category option:selected').text() || ''),
+                description: $.trim($('#items_description').val() || ''),
+                diet: $.trim($('#item_diet').val() || '')
+            })
+        }, function (response) {
+            $btn.html(original).css('pointer-events', '');
+            if (!response || response.type !== 'success' || !response.data) {
+                PosnicPro.alert('warning', (response && response.message)
+                    || PosnicPro.i18n.t('lang_plate_ai_failed', 'Could not estimate this dish'));
+                return;
+            }
+
+            {
+                var got = response.data;
+                var n = got.nutrition || {};
+                /* Only over a box the shop has NOT filled in. Somebody who
+                   typed their own figure meant it, and an estimate that
+                   overwrites a measured number is the one outcome here that
+                   would be worse than no button at all. */
+                var filled = 0;
+                $('#item_plate_card [data-nutrient]').each(function () {
+                    var key = $(this).data('nutrient');
+                    if (String($(this).val() || '').trim() !== '') { return; }
+                    if (n[key] === undefined || n[key] === null) { return; }
+                    $(this).val(n[key]);
+                    filled++;
+                });
+
+                (got.food_tags || []).forEach(function (tag) {
+                    var $box = $('#item_plate_card .item-food-tag[value="' + tag + '"]');
+                    if ($box.length && !$box.prop('checked')) { $box.prop('checked', true); filled++; }
+                });
+
+                /* The veg dot, only if the shop has not marked it. It is the
+                   one thing on a menu people look for before the name. */
+                if (got.diet && !String($('#item_diet').val() || '')) {
+                    $('#item_diet').val(got.diet).trigger('change');
+                    filled++;
+                }
+
+                if (!filled) {
+                    PosnicPro.alert('warning', PosnicPro.i18n.t('lang_plate_ai_nothing_new', 'Nothing to add: these are already filled in'));
+                    return;
+                }
+
+                PosnicPro.itemPlate.estimated(true);
+                PosnicPro.itemPlate.earned();
+            }
+        }, function (xhr) {
+            $btn.html(original).css('pointer-events', '');
+            var message = PosnicPro.i18n.t('lang_plate_ai_failed', 'Could not estimate this dish');
+            try {
+                var body = JSON.parse((xhr && xhr.responseText) || '{}');
+                if (body && body.message) { message = body.message; }
+            } catch (e) { /* the default sentence is the fallback */ }
+            PosnicPro.alert('warning', message);
+            /* Same rule as the description button: a refusal - no key, AI
+               switched off, over the cap - hides it now and is asked again
+               next time the form opens, because the fix is a walk to
+               settings and a walk straight back here. */
+            if (xhr && xhr.status === 400) {
+                PosnicPro.items._aiAvailable = null;
+                $('#item_plate_ai').hide();
+            }
+        });
+    },
+
+    /*
+     * Whether to offer the estimate button at all.
+     *
+     * Same gate and same rule as the description button: the shop pays its
+     * own AI provider, so a shop with no key must never see a control that
+     * fails when pressed. Only a yes is remembered - the thing that turns a
+     * no into a yes is somebody pasting a key into settings and coming
+     * straight back to this screen.
+     */
+    aiRefresh: function () {
+        var $btn = $('#item_plate_ai');
+        if (!$btn.length) { return; }
+
+        if (PosnicPro.items._aiAvailable === true) { $btn.show(); return; }
+
+        PosnicPro.get('items/aiAvailability', {}, function (r) {
+            var ok = !!(r && r.data && r.data.available);
+            PosnicPro.items._aiAvailable = ok ? true : null;
+            $btn.toggle(ok);
+        }, function () {
+            PosnicPro.items._aiAvailable = null;
+            $btn.hide();
+        });
+    },
+
+    wire: function () {
+        if (PosnicPro.itemPlate._wired) { return; }
+        PosnicPro.itemPlate._wired = true;
+
+        /* Delegated from the document: the card is inside a page template
+           that is torn down and rebuilt on every navigation, so a direct
+           binding would survive exactly one visit. */
+        $(document)
+            .on('input change', '#item_plate_card [data-nutrient]', function () {
+                /* A person editing a number owns it from that moment, so the
+                   estimate warning comes down. */
+                PosnicPro.itemPlate.estimated(false);
+                PosnicPro.itemPlate.earned();
+            })
+            .on('change', '#item_plate_card .item-food-tag', function () {
+                PosnicPro.itemPlate.earned();
+            })
+            .on('click', '#item_plate_ai', function (e) {
+                e.preventDefault();
+                PosnicPro.itemPlate.ask();
+            });
+    }
+};
+
+
+/*
+ * Which serving periods a dish is on.
+ *
+ * WHY THIS EXISTS. Settings said "set the times once here, then mark each
+ * dish on the item page", and the item page had the box - a select2 called
+ * Served at - and nothing ever put an option in it. The owner set up
+ * Breakfast, opened a dish, and found an empty list with "All day" as the
+ * placeholder. The field saved fine, read back fine, and could never be set.
+ *
+ * Same shape as itemChannels above, and fed by the same request: the periods
+ * and the channel exceptions are in one settings group, so the channel loader
+ * hands the periods over (take) rather than asking twice.
+ *
+ * Setting the value has to WAIT for the options to exist, for the same reason
+ * as the channels: select2 drops any id it has no option for, and the next
+ * save would write the empty box back, quietly putting a breakfast dish on
+ * all day.
+ */
+PosnicPro.itemDayparts = {
+    _options: null,
+
+    /* From the settings group: [{ id, name, hours }]. Only id and name are
+       needed here; the hours are the kitchen's business. */
+    take: function (rows) {
+        PosnicPro.itemDayparts._options = (Array.isArray(rows) ? rows : [])
+            .filter(function (r) { return r && r.id && r.name; })
+            .map(function (r) { return { id: String(r.id), name: String(r.name) }; });
+        PosnicPro.itemDayparts.fill();
+    },
+
+    load: function (done) {
+        /* The channel loader is the one that fetches; it calls take(). */
+        PosnicPro.itemChannels.load(function () {
+            PosnicPro.itemDayparts.fill();
+            if (done) { done(); }
+        });
+    },
+
+    fill: function () {
+        var $sel = $('#item_dayparts');
+        if (!$sel.length) { return; }
+        var chosen = $sel.val() || [];
+        var esc = function (v) { return $('<div>').text(v == null ? '' : v).html(); };
+        var options = PosnicPro.itemDayparts._options || [];
+        $sel.html(options.map(function (o) {
+            return '<option value="' + esc(o.id) + '">' + esc(o.name) + '</option>';
+        }).join(''));
+        $sel.val(chosen).trigger('change');
+
+        /*
+         * A SHOP WITH NO SERVING PERIODS SHOULD BE TOLD SO.
+         *
+         * Owner, typing into this box and getting nowhere: "served at not able
+         * to fill anythnig what supposed be there ?"
+         *
+         * The list comes from the shop's own serving periods, set once in
+         * Settings, and a shop that has not set any gets an empty select2 -
+         * which answers "No results found". That is true and useless: it
+         * reads as a search that failed rather than as a list that was never
+         * made, and there is nothing on the screen saying where the list
+         * comes from. He could not have worked it out from here.
+         *
+         * So the box stands down and says what it is for. Disabled on
+         * purpose: typing into it can never produce anything, and a field
+         * that accepts input and discards it is worse than one that does not
+         * accept it.
+         */
+        PosnicPro.itemDayparts.sayIfEmpty($sel, options.length);
+    },
+
+    sayIfEmpty: function ($sel, count) {
+        var id = 'item_dayparts_none';
+        $('#' + id).remove();
+        $sel.prop('disabled', !count).trigger('change.select2');
+        if (count) { return; }
+        $('<small>')
+            .attr('id', id)
+            .addClass('form-text text-muted')
+            .text(PosnicPro.i18n.t(
+                'lang_no_dayparts_yet',
+                'No serving periods yet. Add breakfast, lunch or dinner in Settings, Restaurant, and they will appear here.'
+            ))
+            .insertAfter($sel.next('.select2').length ? $sel.next('.select2') : $sel);
+    },
+
+    set: function (values) {
+        PosnicPro.itemDayparts.load(function () {
+            $('#item_dayparts').val(values || []).trigger('change');
+        });
+    }
+};

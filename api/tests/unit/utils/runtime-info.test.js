@@ -1,0 +1,118 @@
+'use strict';
+
+/**
+ * Unit tests for src/utils/runtime-info.js — the edition/mode/version contract
+ * (SEAMLESS_UPDATE_ROADMAP U1). Pure function; env and root are injected.
+ */
+
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const {
+  buildRuntimeInfo,
+  resolveMode,
+  resolveAppVersion,
+} = require('../../../src/utils/runtime-info');
+const {
+  API_SCHEMA_VERSION,
+  SYNC_PROTOCOL_VERSION,
+} = require('../../../src/constants/runtime.constants');
+
+describe('resolveMode', () => {
+  test('desktop when the Electron shell says so', () => {
+    expect(resolveMode({ POSNIC_DESKTOP: '1' })).toBe('desktop');
+  });
+  test('cloud on the provisioner env (POSNIC_KEY) or explicit override', () => {
+    expect(resolveMode({ POSNIC_KEY: 'k' })).toBe('cloud');
+    expect(resolveMode({ POSNIC_CLOUD: '1' })).toBe('cloud');
+  });
+  test('local otherwise (community self-hosted server)', () => {
+    expect(resolveMode({})).toBe('local');
+  });
+  test('desktop wins over cloud signals (a till with cloud sync is a till)', () => {
+    expect(resolveMode({ POSNIC_DESKTOP: '1', POSNIC_KEY: 'k' })).toBe('desktop');
+  });
+});
+
+describe('resolveAppVersion', () => {
+  test('env wins and must look like a semver', () => {
+    expect(resolveAppVersion({ POSNIC_APP_VERSION: '1.4.0' }, '/nowhere')).toBe('1.4.0');
+    expect(resolveAppVersion({ POSNIC_APP_VERSION: 'not-a-version' }, '/nowhere')).toBeNull();
+  });
+  test('falls back to the package.json ABOVE the api directory', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rtinfo-'));
+    const apiRoot = path.join(root, 'api');
+    fs.mkdirSync(apiRoot);
+    fs.writeFileSync(
+      path.join(root, 'package.json'),
+      JSON.stringify({ name: 'posnic', version: '9.9.9' })
+    );
+    expect(resolveAppVersion({}, apiRoot)).toBe('9.9.9');
+  });
+  test("never reports the api package's own version as the app version", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rtinfo-'));
+    const apiRoot = path.join(root, 'api');
+    fs.mkdirSync(apiRoot);
+    fs.writeFileSync(
+      path.join(root, 'package.json'),
+      JSON.stringify({ name: 'posnic-api', version: '2.0.0' })
+    );
+    expect(resolveAppVersion({}, apiRoot)).toBeNull();
+  });
+  test('null when nothing trustworthy exists (honest unknown beats a lie)', () => {
+    expect(resolveAppVersion({}, '/definitely/not/here')).toBeNull();
+  });
+});
+
+describe('buildRuntimeInfo', () => {
+  test('cloud mode is the branded edition; everything else is community', () => {
+    expect(buildRuntimeInfo({ POSNIC_KEY: 'k' }, '/nowhere').edition).toBe('cloud');
+    expect(buildRuntimeInfo({ POSNIC_DESKTOP: '1' }, '/nowhere').edition).toBe('community');
+    expect(buildRuntimeInfo({}, '/nowhere').edition).toBe('community');
+  });
+  test('carries the schema and sync-protocol coordination numbers', () => {
+    const info = buildRuntimeInfo({}, '/nowhere');
+    expect(info.apiSchema).toBe(API_SCHEMA_VERSION);
+    expect(info.syncProtocol).toBe(SYNC_PROTOCOL_VERSION);
+  });
+  test('channel is null unless configured; features is always an object', () => {
+    expect(buildRuntimeInfo({}, '/nowhere').channel).toBeNull();
+    expect(buildRuntimeInfo({ POSNIC_UPDATE_CHANNEL: 'beta' }, '/nowhere').channel).toBe('beta');
+    /*
+     * features carries flags now, so this asserts the CONTRACT rather than
+     * emptiness: it is always an object clients can read unconditionally.
+     * Pinning {} made adding the first flag look like a regression.
+     *
+     * Two kinds of flag live here and they default oppositely, which is why
+     * each one is named rather than swept up by a loop:
+     *
+     *   a GRANT depends on how this installation is set up - an account, a
+     *   licence - so a bare environment grants nothing and it is false;
+     *
+     *   a CAPABILITY is something this build can do at all, true wherever
+     *   this code runs. It cannot default false without every server lying
+     *   about itself, and a client reading it would hold back behaviour the
+     *   server supports.
+     *
+     * A new flag has to be added to one of these lists, which is the point:
+     * classifying it is a decision, not a detail.
+     */
+    const GRANTS = ['account'];
+    const CAPABILITIES = ['idempotentOrders', 'mobilePosV1'];
+
+    const features = buildRuntimeInfo({}, '/nowhere').features;
+    expect(typeof features).toBe('object');
+    expect(features).not.toBeNull();
+    for (const [, value] of Object.entries(features)) {
+      expect(typeof value).toBe('boolean');
+    }
+    expect(Object.keys(features).sort()).toEqual([...GRANTS, ...CAPABILITIES].sort());
+
+    for (const name of GRANTS) {
+      expect(features[name]).toBe(false); // a bare environment grants nothing
+    }
+    for (const name of CAPABILITIES) {
+      expect(features[name]).toBe(true); // the build either can do it or it cannot
+    }
+  });
+});

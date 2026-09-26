@@ -1,0 +1,89 @@
+PosnicPro.device_setup = {
+
+    // The auto-focus switches live inside Core Settings now (Sale and
+    // Receivings tabs); the old #/device_setup route lands on Config.
+    showDataTablePage: function () {
+        hasher.setHash('settings');
+        setTimeout(function () {
+            PosnicPro.device_setup.setToggleStatesFromIndexedDB();
+        }, 300);
+    },
+    autoFocus: function () {
+        var branchid = PosnicPro.local.get('branch_id_set');
+        db.saleAutoFocus.put({id: '1', branch_id: branchid, addSale: $("#toggleSwitchAddSale").is(":checked"), editSale: $('#toggleSwitchEditSale').is(":checked"), holdSale: $('#toggleSwitchHoldSale').is(":checked")});
+        db.recevingAutoFocus.put({id: '1', branch_id: branchid, addReceiving: $("#toggleSwitchReceivingAdd").is(":checked"), editReceiving: $('#toggleSwitchReceivingEdit').is(":checked")});
+    },
+    setToggleStatesFromIndexedDB: function () {
+        db.saleAutoFocus.get('1', function (result) {
+            if (result) {
+                $("#toggleSwitchAddSale").prop("checked", result.addSale);
+                $("#toggleSwitchEditSale").prop("checked", result.editSale);
+                $("#toggleSwitchHoldSale").prop("checked", result.holdSale);
+            }
+        });
+        db.recevingAutoFocus.get('1', function (result) {
+            if (result) {
+                $("#toggleSwitchReceivingAdd").prop("checked", result.addReceiving);
+                $("#toggleSwitchReceivingEdit").prop("checked", result.editReceiving);
+            }
+        });
+    }
+};
+
+$('#saveButton').click(function () {
+    if('plan' in PosnicPro['userACL'] == true) {
+        if(PosnicPro['userACL'].plan.read == true) {
+            PosnicPro.alert('Success', 'Device AutoFocus Saved Successfully..');
+            PosnicPro.device_setup.autoFocus();
+        }
+        else {
+            PosnicPro.alert('error', PosnicPro.i18n.t('lang_you_are_not_authorized_to_do_this', 'You are not authorized to do this.'));
+        }
+    }
+    else {
+        PosnicPro.alert('error', PosnicPro.i18n.t('lang_you_are_not_authorized_to_do_this', 'You are not authorized to do this.'));
+    }
+});
+$('#device_edit_reset').click(function () {
+    if('plan' in PosnicPro['userACL'] == true) {
+        if(PosnicPro['userACL'].plan.read == true) {
+    var branchid = PosnicPro.local.get('branch_id_set');
+    PosnicPro.device_setup.setToggleStatesFromIndexedDB();
+
+    db.saleAutoFocus.put({id: '1', branch_id: branchid, addSale: true, editSale: true, holdSale: true});
+    db.recevingAutoFocus.put({id: '1', branch_id: branchid, addReceiving: true, editReceiving: true});
+    PosnicPro.alert('Success', 'Device AutoFocus Reset Successfully..');
+        }
+        else {
+            PosnicPro.alert('error', PosnicPro.i18n.t('lang_you_are_not_authorized_to_do_this', 'You are not authorized to do this.'));
+        }
+    }
+    else {
+        PosnicPro.alert('error', PosnicPro.i18n.t('lang_you_are_not_authorized_to_do_this', 'You are not authorized to do this.'));
+    }
+});
+
+$(document).ready(function () {
+   PosnicPro.device_setup.setToggleStatesFromIndexedDB();
+});
+
+// The switches sit inside Core Settings now and save IMMEDIATELY on change -
+// they are device-local (IndexedDB), so there is nothing to batch behind a
+// Save button.
+$(document).on('change', '.autofocus-switch', function () {
+    PosnicPro.device_setup.autoFocus();
+});
+
+/*
+ * THE KITCHEN'S SPEAKER IS NOT WIRED HERE ANY MORE.
+ *
+ * It was, twice: once under the Sale tab beside the auto-focus switches
+ * because those are device-local too, and once under Print. Both were wrong.
+ * Owner: "this is about kitchen play right? not restaurant module?"
+ *
+ * A speaker is a device on one computer, like the cash drawer, the weighing
+ * scale and the kitchen screen, so it belongs in Hardware Manager beside them
+ * - the window somebody setting up the machine at the pass is already in.
+ * src/hardware-manager.html, the Kitchen Sound tab, holds the controls and
+ * their wiring.
+ */

@@ -1,0 +1,50 @@
+<div class="vertical-layout page_loader" id="lowstockitems" style="display: none">
+    <!-- Low Stock, built to LIST_PAGE_UX_STANDARD.md: a read-only watchlist.
+         A row click opens the ITEM's dossier (#/items/<id>); the Restock
+         button jumps straight into a new purchase with the item and its
+         supplier already on the form. -->
+    <div id="containerbar">
+        <div class="breadcrumbbar crumbbar_padding">
+            <div class="row align-items-center row_filter">
+                <div class="col-auto">
+                    <h4 class="page-title break_title mb-0"><lang class="lang_lowstockdetail_title">Low Stock</lang></h4>
+                </div>
+                <div class="col">
+                    <div class="lf-panel" id="lowstockitems_filter_panel" style="display:none;"></div>
+                </div>
+                <div class="col-auto text-right">
+                    <div class="widgetbar" id="lowstockitems_controls">
+                        <div class="btn-group">
+                        <button type="button" class="btn btn-primary-rgba dropdown-toggle" data-toggle="dropdown"
+                            aria-haspopup="true" aria-expanded="false" title="Export CSV" data-t-title="lang_export_csv" aria-label="Export CSV" data-t-aria-label="lang_export_csv">
+                            <i class="feather icon-share"></i>
+                        </button>
+                        <div class="dropdown-menu dropdown-menu-right">
+                            <a class="dropdown-item" href="javascript:void(0)" onclick="PosnicPro.lowstockitems.exportCsv(); return false;"><lang class="lang_this_page_what_is_shown">This page (what is shown)</lang></a>
+                            <a class="dropdown-item" href="javascript:void(0)" onclick="PosnicPro.lowstockitems.exportAllCsv(); return false;"><lang class="lang_everything_matching_the_filter">Everything matching the filter</lang></a>
+                        </div>
+                        </div>
+                        <button type="button" class="btn btn-primary-rgba lf-btn" id="lowstockitems_filter_btn"
+                            data-toggle="tooltip" title="Filter low stock" data-t-title="lang_filter_low_stock">
+                            <i class="feather icon-filter mr-2"></i><lang class="lang_filter">Filter</lang>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="contentbar">
+        <div id="lowstockitems_split">
+        <div class="card m-b-30 md-rail" id="lowstockitems_list_card">
+            <div class="card-body">
+                <div id="lowstockitems_list_rows" class="md-rail-rows text-muted"><lang class="lang_loading_low_stock">Loading low stock ...</lang></div>
+                <div class="q-pager" id="lowstockitems_list_paging"></div>
+            </div>
+        </div>
+            <div class="card m-b-30 md-detail" id="lowstockitems_detail_card" style="display:none;">
+                <div id="lowstockitems_doc"></div>
+            </div>
+        </div>
+    </div>
+</div>

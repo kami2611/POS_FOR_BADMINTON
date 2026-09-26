@@ -1,0 +1,6098 @@
+/*
+ * The ordering pages, as one design.
+ *
+ * One stylesheet for every page a customer walks through - the menu they order
+ * from, their order, paying, the token - so that walking through them feels
+ * like one place. Before this, each page carried its own file with its own
+ * idea of a button: three shades of orange gradient, four corner radii, Arial
+ * on one page and the system face on the next, and Bootstrap plus a Font
+ * Awesome CDN request loaded for a shopping-cart glyph.
+ *
+ * THE LOOK IS THE MENU'S. /menu already had a restrained, ink-on-paper page
+ * that the owner approved; a customer who read it and then tapped "Order now"
+ * should not land somewhere that looks like a different company. Same tokens,
+ * same type scale, same card anatomy, same sheet.
+ *
+ * WHAT "CORPORATE" MEANS HERE, since that was the brief: no colour spent on
+ * chrome. Ink for the one primary action on each screen, grey lines for
+ * structure, colour only where it carries meaning - the veg mark, a refusal,
+ * a warning. Every control is at least 44px on its shortest side, keyboard
+ * focus is visible on everything, motion respects the phone's own setting,
+ * and the fixed bars clear the notch and the home indicator.
+ *
+ * Light only, and deliberately. The menu follows the phone's theme; a payment
+ * screen with a third party's checkout on top of it is one look, so that
+ * nothing about it can read as "different from the last time". The tokens are
+ * here so a dark set can be added later without touching a component.
+ */
+
+:root {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --raised: #f9fafb;
+  --ink: #111827;
+  --ink-soft: #6b7280;
+  --line: #e5e7eb;
+  --line-strong: #d1d5db;
+  --accent: #111827;
+  --on-accent: #ffffff;
+
+  /*
+   * WCAG AA, MEASURED RATHER THAN EYEballed.
+   *
+   * These two were #0f8a3d, which is 4.45:1 on white - just under the 4.5:1
+   * that AA asks for body text, and `--ok` is used as a text colour in three
+   * places. A ratio that close is not a judgement call: it either clears the
+   * line or it does not, and a customer reading a menu in daylight on a cheap
+   * screen is exactly who the line is drawn for.
+   *
+   * #0e8038 is 5.04:1 and is the same green to look at. The veg marker moves
+   * with it so the two do not drift into different greens.
+   */
+  --veg: #0e8038;
+  --non-veg: #b91c1c;
+  --egg: #b45309;
+  --ok: #0e8038;
+  --warn: #b45309;
+  --danger: #b91c1c;
+  --danger-bg: #fef2f2;
+  --warn-bg: #fffbeb;
+
+  /*
+   * TWO NAMES THAT WERE NEVER DECLARED.
+   *
+   * Nine rules ask for `var(--paper, #fff)` or `var(--paper-2, #faf8f3)`, and
+   * neither token existed - so every one of them has been using its fallback,
+   * silently and correctly, for as long as they have been there.
+   *
+   * It stopped being harmless the moment this page got a dark theme: a
+   * fallback is a literal, a literal cannot follow a theme, and those nine
+   * rules would have stayed white on a black page. Declared here so they
+   * follow the rest.
+   */
+  --paper: #ffffff;
+  --paper-2: #faf8f3;
+
+  --radius: 12px;
+  --radius-sm: 8px;
+  --pad: 16px;
+  --tap: 44px;
+  --bar: 76px;
+
+  /* ------------------------------------------------------------- motion
+   *
+   * FOUR DURATIONS AND THREE CURVES, and nothing else on these pages.
+   *
+   * There were thirteen durations here - 70ms, 90ms, 0.12s, 0.15s, 0.2s,
+   * 0.22s, 0.25s, 0.28s, 0.3s, 0.32s, 0.4s, 0.5s, 0.9s - written in two
+   * notations, and `ease` twenty-five times. Nothing was wrong with any one
+   * of them; together they are why the page feels assembled rather than
+   * made. An app feels native when everything that moves agrees about how
+   * long a movement takes.
+   *
+   * The scale is by DISTANCE, not by importance: a thing that travels
+   * further takes longer, which is the only rule the eye actually reads.
+   *
+   * `ease` is the browser's default and is symmetrical - it accelerates and
+   * decelerates equally, which nothing physical does. It is the single
+   * biggest reason web motion reads as web motion, and it does not appear
+   * below.
+   */
+  --t-press: 90ms;
+  --t-quick: 160ms;
+  --t-move: 240ms;
+  --t-sheet: 320ms;
+
+  /* Arriving: quick off the mark, settling at the end. Things that enter the
+     screen are decelerating onto it. */
+  --ease-enter: cubic-bezier(0.05, 0.7, 0.1, 1);
+  /* Leaving: slow to release, then gone. Nothing should dawdle on its way
+     out - an exit the eye can follow is an exit that wasted its time. */
+  --ease-exit: cubic-bezier(0.3, 0, 0.8, 0.15);
+  /* Moving between two states it holds at either end. */
+  --ease-move: cubic-bezier(0.2, 0, 0, 1);
+  /* Emphasis, with a little overshoot in the curve. Already the one
+     considered curve on this page; now it has a name. */
+  --ease-spring: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  --shadow-1: 0 1px 2px rgba(17, 24, 39, 0.06), 0 1px 3px rgba(17, 24, 39, 0.08);
+  --shadow-2: 0 8px 24px rgba(17, 24, 39, 0.14);
+
+  --font:
+    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+}
+
+/*
+ * THE SAME PAGE AFTER DARK.
+ *
+ * The menu page has had this since it was built - "a menu read across a
+ * dinner table in the evening is the common case, and a white page at full
+ * brightness is the thing people put face down" - and the ordering page,
+ * which is the one somebody spends longer on, did not. The two halves of one
+ * product disagreed about whether it was night.
+ *
+ * TOKENS ONLY. Every colour on this page already comes from the block above,
+ * so the whole theme is that block said again. Nothing below this point in
+ * the file needs to know, and a rule that reaches for a literal colour will
+ * quietly stay light - which is what the contrast test is for.
+ *
+ * MEASURED, NOT CHOSEN BY EYE. Every one of these clears 4.5:1 against the
+ * darkest surface it can sit on, checked by
+ * tests/the-menu-can-be-read.test.js rather than by looking. The greens and
+ * reds are lifted rather than reused: #0e8038 is a fine green on white and
+ * 2.2:1 on this background, which is unreadable.
+ *
+ * The accent inverts, so the primary button becomes a pale block with dark
+ * text rather than a black block that vanishes into the page.
+ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0f19;
+    --surface: #111827;
+    --raised: #1a2234;
+    --ink: #f3f4f6;
+    --ink-soft: #9ca3af;
+    --line: #263041;
+    --line-strong: #364155;
+    --accent: #f3f4f6;
+    --on-accent: #111827;
+
+    --veg: #34d27b;
+    --non-veg: #f87171;
+    --egg: #fbbf24;
+    --ok: #34d27b;
+    --warn: #fbbf24;
+    --danger: #f87171;
+    /* Tints, not washes: a light-mode #fef2f2 becomes a dark red-tinted
+       surface rather than a pale panel burning a hole in the page. */
+    /* The two that were living on their fallbacks; see the light block. */
+    --paper: #111827;
+    --paper-2: #1a2234;
+
+    --danger-bg: #2a1416;
+    --warn-bg: #2a2110;
+
+    /*
+     * Deeper and softer. A shadow on a dark ground is nearly invisible, so
+     * the lift comes from --surface and --raised being lighter than --bg;
+     * these stay only to keep an edge under a sheet.
+     */
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.6);
+  }
+}
+
+/* ------------------------------------------------------------------ base */
+
+* {
+  box-sizing: border-box;
+}
+
+/* `hidden` is only a default of display:none, so ANY display rule beats it.
+   Said once, here, rather than remembered at every element. */
+[hidden] {
+  display: none !important;
+}
+
+/*
+ * WHAT MAKES A PAGE FEEL LIKE A PAGE, and it is mostly these two lines.
+ *
+ * A mobile browser draws a grey box over whatever a finger lands on, and
+ * waits about 300ms before it believes a tap was not the start of a
+ * double-tap-to-zoom. Both are correct for a document and wrong for a thing
+ * somebody is operating: the flash belongs to no design, and the wait is felt
+ * as the app being slow rather than the browser being careful.
+ *
+ * The press response below is what replaces the flash, and it is the same one
+ * everywhere - so a chip, a dish and a checkout button all answer a finger the
+ * same way. That consistency is most of what "native" means; the rest is the
+ * timing scale in :root.
+ *
+ * `manipulation` keeps pinch-to-zoom, which is an accessibility feature and
+ * not ours to remove. It only gives up double-tap zoom.
+ */
+html {
+  -webkit-text-size-adjust: 100%;
+  height: 100%;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 16px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+img {
+  max-width: 100%;
+}
+
+/*
+ * ONE PRESS, EVERYWHERE.
+ *
+ * Fourteen `:active` rules had grown up separately, so a chip sank and a
+ * card did not, and the two that both sank did it by different amounts over
+ * different times. A finger learns one language on a screen; this is it.
+ *
+ * `scale` on the compositor, so it holds 60fps on the phone this is actually
+ * used on, and 0.97 rather than something more dramatic because the response
+ * has to read as CONTACT rather than as an animation - the eye should barely
+ * notice it and the thumb should feel answered.
+ *
+ * Only on the way down. Coming back up is instant, because a release that
+ * eases is a button that is still busy after the finger has gone.
+ */
+.product-card,
+.category-item,
+.filters-pill,
+.icon-btn,
+.btn-primary,
+.btn-secondary,
+.btn-text,
+.btn-block,
+.checkout-btn,
+.history-again,
+.history-row,
+.option-row,
+.assistant-chip,
+.lang-toggle,
+.call-waiter,
+.sheet-more,
+.sheet-less {
+  transition: transform var(--t-press) var(--ease-move);
+}
+
+.product-card:active,
+.category-item:active,
+.filters-pill:active,
+.icon-btn:active,
+.btn-primary:active,
+.btn-secondary:active,
+.btn-text:active,
+.btn-block:active,
+.checkout-btn:active,
+.history-again:active,
+.history-row:active,
+.option-row:active,
+.assistant-chip:active,
+.lang-toggle:active,
+.call-waiter:active,
+.sheet-more:active,
+.sheet-less:active {
+  transform: scale(0.97);
+  transition-duration: 0s;
+}
+
+/* A disabled control does not answer, because answering is a promise. */
+.btn-primary:disabled:active,
+.btn-secondary:disabled:active,
+.btn-block:disabled:active,
+.checkout-btn:disabled:active,
+.sheet-more:disabled:active,
+.sheet-less:disabled:active,
+.history-again:disabled:active {
+  transform: none;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+/* Keyboard focus is visible on everything that can take it, in ink. */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.wrap {
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 0 var(--pad);
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* --------------------------------------------------------------- buttons */
+
+/*
+ * Three buttons, and only three.
+ *
+ * Primary is ink, one per screen, and it says what happens: "View order",
+ * "Continue", "Pay ₹340". Secondary is a line. A text button is for the thing
+ * somebody must be able to do but should not be invited to - clearing the
+ * order.
+ */
+.btn-primary,
+.btn-secondary,
+.btn-text {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 0 20px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  font-weight: 600;
+  font-size: 16px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.btn-primary:disabled {
+  background: var(--line);
+  border-color: var(--line);
+  color: var(--ink-soft);
+}
+
+.btn-secondary {
+  background: var(--surface);
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+
+.btn-text {
+  min-height: var(--tap);
+  padding: 0 8px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-weight: 500;
+}
+
+.btn-text.is-danger {
+  color: var(--danger);
+}
+
+.btn-block {
+  width: 100%;
+}
+
+/* A square button holding one glyph: back arrows, the order icon. */
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: var(--tap);
+  height: var(--tap);
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink);
+}
+
+.icon-btn svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ------------------------------------------------------------- page head */
+
+/*
+ * The bar at the top of the order and the payment page: a way back, the
+ * page's name, and nothing else. Sticky, so the way back is always there.
+ */
+.page-head {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 56px;
+  padding: 0 8px;
+  padding-top: env(safe-area-inset-top);
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+
+.page-head h1 {
+  flex: 1 1 auto;
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: -0.01em;
+}
+
+/* Balances the back button so the title is truly centred. */
+.page-head-spacer {
+  width: var(--tap);
+  flex: 0 0 auto;
+}
+
+/* ------------------------------------------------------------ the shop */
+
+.top {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  /* Never flush with the top of the screen: with the shop's name gone in
+     search mode the field was first, and its top border sat under the
+     browser's address bar. */
+  padding-top: max(8px, env(safe-area-inset-top));
+}
+
+body.searching .top {
+  padding-top: max(12px, env(safe-area-inset-top));
+}
+
+.top-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 60px;
+  padding: 8px 0;
+}
+
+.shop {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.shop-logo {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--raised);
+}
+
+.shop-name {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shop-sub {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* "Table 5", beside the count, from the code that was scanned. */
+.shop-place {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.shop-place[hidden] {
+  display: none;
+}
+
+/* The order, at the top right: a glyph with the count on it. */
+.top-cart {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.badge {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.badge:empty,
+.badge[data-zero="true"] {
+  display: none;
+}
+
+/* ----------------------------------------------------------------- search */
+
+/*
+ * The same search as the menu: a row of back-arrow, field, and the field's
+ * own buttons. Searching is a place you go - the shop name and the section
+ * chips stand down while the keyboard has half the screen.
+ */
+.order-search {
+  padding-bottom: 8px;
+}
+
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.search-back {
+  flex: 0 0 auto;
+  margin-left: -8px;
+  color: var(--ink-soft);
+  font-size: 19px;
+}
+
+.search-field {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.search-input {
+  width: 100%;
+  min-height: var(--tap);
+  padding: 10px 44px 10px 40px;
+  /* 16px or iOS zooms the whole page the moment it gains focus. */
+  font-size: 16px;
+  color: var(--ink);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  outline-offset: 2px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.search-input::placeholder {
+  color: var(--ink-soft);
+}
+
+.search-input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.search-icon,
+.search-clear,
+.search-mic {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--ink-soft);
+  line-height: 1;
+}
+
+.search-icon {
+  left: 14px;
+  pointer-events: none;
+}
+
+.search-clear,
+.search-mic {
+  right: 2px;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.search-clear {
+  font-size: 22px;
+}
+
+.search-mic svg {
+  width: 19px;
+  height: 19px;
+  fill: currentColor;
+}
+
+.search-mic[data-listening="true"] {
+  color: #fff;
+  background: var(--danger);
+}
+
+body.searching .top-row,
+body.searching .fixed-categories,
+body.searching .order-tools,
+body.searching .fixed-heading {
+  display: none;
+}
+
+/* Filters and order, on one scrolling row. */
+.order-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.order-tools::-webkit-scrollbar {
+  display: none;
+}
+
+.order-tool,
+.order-sort {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+.order-sort {
+  color: var(--ink);
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2.5' stroke-linecap='round'><path d='M6 9l6 6 6-6'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+
+/* A pressed filter is a STATE, not a hover: the risk of a filter is
+   forgetting it is on and deciding the kitchen has run out of food. */
+.order-tool[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--on-accent);
+  border-color: var(--ink);
+}
+
+.order-tool[aria-pressed="true"] .order-diet,
+.order-tool[aria-pressed="true"] .order-diet::after {
+  border-color: var(--on-accent);
+  background: var(--on-accent);
+}
+
+.order-result-count {
+  margin: 0;
+  padding: 8px 4px 2px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  text-align: right;
+}
+
+body.searching .order-search {
+  padding-bottom: 8px;
+}
+
+/* ------------------------------------------------------------- categories */
+
+.fixed-categories {
+  padding: 2px 0 8px;
+}
+
+.category-scroll-container {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.category-scroll-container::-webkit-scrollbar {
+  display: none;
+}
+
+.category-item {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.category-item.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+/* A count on a section that has something in the order: a small ink
+   bubble, white on the active chip. Drawn from the attribute the bill
+   update writes, so a chip never has to be rebuilt. */
+.category-item {
+  position: relative;
+}
+
+.category-item.has-items::after {
+  content: attr(data-count);
+  position: absolute;
+  top: -6px;
+  right: -4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--on-accent);
+  border: 2px solid var(--bg);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  animation: qty-pop var(--t-move) var(--ease-spring);
+}
+
+.category-item.active.has-items::after {
+  background: var(--on-accent);
+  color: var(--accent);
+}
+
+/* Room for the bubble, so it sits beside the last letter and not on it. */
+.category-item.has-items {
+  padding-right: 24px;
+}
+
+.category-rail .category-item.has-items::after {
+  position: static;
+  margin-left: auto;
+  border: 0;
+}
+
+.category-rail .category-item.has-items {
+  padding-right: 14px;
+}
+
+/*
+ * ONE BASKET COUNTER, NOT THREE.
+ *
+ * Adding a single item produced a badge on the bag, a badge on the category
+ * chip, and "1 item" in the bar along the bottom: three counters for one
+ * fact, and the chip badge was clipped by the chip's own rounded corner into
+ * the bargain. Every ordering app worth copying keeps exactly ONE persistent
+ * basket summary, and here that is the bar - it carries the count, the money
+ * and the way forward. The bag keeps its badge because it is the way BACK to
+ * the basket from pages that have no bar.
+ *
+ * The chip keeps `has-items`, which tints it, because "there is something of
+ * mine in this section" is a different fact from "how many", and is the one
+ * worth having while browsing. The rail on a wide screen keeps its count:
+ * there is room for it there, and it is the only summary that side.
+ */
+.fixed-categories .category-item.has-items::after {
+  content: none;
+}
+
+.fixed-categories .category-item.has-items {
+  padding-right: 14px;
+}
+
+/* --------------------------------------------------------------- sections */
+
+/*
+ * THE SECTIONS AND THE TOOLS SHARE ONE ROW.
+ *
+ * Sorting had a row of its own - 70px above the food, for the least-used
+ * control on the page. The chips take the room they need and scroll; the
+ * tools sit at the end and stay put, which is where a menu keeps its filters.
+ */
+.section-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.section-row .fixed-categories {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.section-row .order-tools {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+}
+
+/*
+ * NARROW, BECAUSE THE SECTIONS COME FIRST.
+ *
+ * A full-width "Price: low to high" select ate most of the row and squeezed
+ * the chips into a sliver - which swapped one bad row for another. The
+ * sections are what a customer is steering with; sorting is what they reach
+ * for once. The native picker shows the full wording when it opens, so the
+ * closed control only has to be recognisable.
+ */
+.section-row .order-sort {
+  max-width: 116px;
+  text-overflow: ellipsis;
+}
+
+.section-row .order-tool {
+  white-space: nowrap;
+}
+
+/*
+ * THE STRIP NOW ENDS SOMEWHERE.
+ *
+ * The last chip used to bleed off the right edge of the screen mid-word -
+ * "Kitchen & Plasticwar" - which reads as a layout fault rather than as
+ * "there is more this way". A fade would say it, but this bundle does not use
+ * gradients (tests/ pins that), and it does not need one: the tools now sit at
+ * the end of the row, so the chips scroll up to a visible edge instead of off
+ * the screen. A small inset keeps the last one clear of them.
+ */
+.fixed-categories {
+  position: relative;
+}
+
+.section-row .fixed-categories .category-scroll-container {
+  padding-right: 4px;
+}
+
+/*
+ * THE CHIP ALREADY NAMES THE SECTION.
+ *
+ * With one category chosen, this heading repeated the selected chip word for
+ * word two rows below it, and cost 60px at the top of the busiest screen in
+ * the product. It stays for the whole menu, where it genuinely separates
+ * sections, and stands down when a single section is showing.
+ */
+.fixed-heading {
+  padding: 18px 0 8px;
+}
+
+body.one-section .fixed-heading {
+  display: none;
+}
+
+.section-heading {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.section-count {
+  margin: 2px 0 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+/* ---------------------------------------------------------------- dishes */
+
+/*
+ * A dish is a row: what it is on the left, what it looks like on the right,
+ * and the way to add it sitting on the picture where the thumb already is.
+ * The shape every ordering app in the country has taught people, and the
+ * same anatomy as the menu's card with one control added.
+ */
+/*
+ * minmax(0, 1fr), never a bare 1fr.
+ *
+ * A bare 1fr track is minmax(auto, 1fr): it cannot shrink below the widest
+ * thing in it, and a dish name is set on one line with an ellipsis - so the
+ * NAME decides the track, the two tracks grow past the column, and the
+ * second card slides under the order panel. Seen on a laptop with "White
+ * Envelopes 25 envelope pack". Zero as the floor lets the ellipsis do its
+ * job.
+ */
+/*
+ * COLUMNS THE CARD CAN ACTUALLY LIVE IN.
+ *
+ * This counted columns off the VIEWPORT - two at 720px, three at 1100px -
+ * which is only right when the grid is as wide as the window. It is not: on
+ * a wide screen the page is a 220px rail, the menu, and a 340px order panel,
+ * so three viewport-counted columns inside the middle one came out about
+ * 200px each. A card is a row (text beside a 96px photo), and at 200px the
+ * text had 68px, so the photo sat on top of the name and the price.
+ *
+ * auto-fit with a floor asks the question the right way round: fit as many
+ * columns as will hold a card, in whatever width this grid actually has. It
+ * gives the same answer as before at full width and the right one inside a
+ * column, and it cannot be broken again by nesting or by a new sidebar.
+ */
+.product-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 264px), 1fr));
+  gap: 10px;
+  padding: 0 0 12px;
+}
+
+.product-card {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 12px 18px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.product-card.active {
+  border-color: var(--line-strong);
+  background: var(--raised);
+}
+
+.product-card[data-available="false"] {
+  cursor: default;
+}
+
+.product-card[data-available="false"] .product-body,
+.product-card[data-available="false"] .product-media img,
+.product-card[data-available="false"] .product-icon {
+  opacity: 0.55;
+}
+
+.product-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.product-title {
+  display: flex;
+  /* Top, not centre: a two-line name would otherwise drag the diet mark
+     beside it down level with the second line. */
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+/*
+ * THE NAME IS THE PRODUCT, AND IT GETS THE ROOM.
+ *
+ * One line with an ellipsis turned "Chicken Biryani 1 handi" into "Chicken
+ * Biryani 1 han..." while the description underneath was given TWO lines in
+ * which to truncate a sentence nobody needed. The card was spending more room
+ * on filler than on the name of the thing being sold.
+ *
+ * Two lines for the name and one for the description is the shape of every
+ * menu worth copying, because a customer scanning a menu is reading NAMES and
+ * reads a description only once a name has caught them.
+ */
+.product-name {
+  flex: 1 1 auto;
+  /* A flex item's floor is its content; a name must be allowed to be
+     narrower than its words or nothing above it can shrink either. */
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.product-desc {
+  margin: 3px 0 0;
+  color: var(--ink-soft);
+  font-size: 14px;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.product-price {
+  margin: 6px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * WHERE THE ADD BUTTON WOULD HAVE BEEN, on a dish the shop has not priced yet.
+ *
+ * Owner: "dont let customer add or menu see the price. ask for pricing."
+ * Whole fish and crab are priced from the morning's market, so until the shop
+ * opens and enters today's rate there is no number to charge and no button to
+ * offer. The line stands in for both, and reads as an instruction rather than
+ * as a fault.
+ */
+.product-ask {
+  margin: 0;
+  max-width: 120px;
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 600;
+  text-align: center;
+  color: var(--ink-soft, #64748b);
+}
+
+.product-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.product-meta span {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.product-media {
+  position: relative;
+  flex: 0 0 auto;
+  width: 96px;
+  margin-bottom: 8px;
+}
+
+.product-media img,
+.product-icon {
+  display: block;
+  width: 96px;
+  height: 96px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: var(--raised);
+}
+
+.product-icon {
+  display: grid;
+  place-items: center;
+  font-size: 44px;
+  line-height: 1;
+  user-select: none;
+}
+
+/* The veg mark: a square outline with a filled circle, the shape people
+   already look for before they read the name. */
+.product-diet,
+.order-diet {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid currentColor;
+  border-radius: 3px;
+  vertical-align: -2px;
+}
+
+.product-diet::after,
+.order-diet::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.order-diet {
+  color: var(--veg);
+}
+
+.diet-veg {
+  color: var(--veg);
+}
+.diet-non_veg {
+  color: var(--non-veg);
+}
+.diet-egg {
+  color: var(--egg);
+}
+.diet-vegan {
+  color: var(--veg);
+  border-radius: 50%;
+}
+
+/*
+ * ADD, and then the stepper, on the bottom edge of the picture.
+ *
+ * One pill. With nothing in the order it reads "Add"; with something it is
+ * "- 2 +". The buttons are 40px squares, the pill carries its own ground so
+ * it reads on a photograph of anything, and it does not move when it changes
+ * state, because a control that jumps under a thumb gets tapped twice.
+ */
+.cart-controls {
+  position: absolute;
+  left: 50%;
+  bottom: -14px;
+  max-width: 100%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  height: 40px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
+}
+
+.cart-controls button {
+  width: 40px;
+  height: 38px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.cart-controls button:disabled {
+  color: var(--line-strong);
+}
+
+.product-qty {
+  min-width: 24px;
+  text-align: center;
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Nothing in the order yet: the pill is one word. */
+.product-card[data-qty="0"] .btn-decrease,
+.product-card[data-qty="0"] .product-qty,
+.product-card[data-qty="0"] .add-plus {
+  display: none;
+}
+
+/*
+ * "Add", not "ADD".
+ *
+ * Uppercase with letter-spacing on an 84px minimum made this the widest thing
+ * in the row - wider than the photograph it sits on, and louder than the dish
+ * it belongs to. The floating pill is the right pattern and stays; it stops
+ * shouting, and is capped so it can never outgrow the image beneath it.
+ */
+.product-card[data-qty="0"] .btn-increase {
+  width: auto;
+  min-width: 68px;
+  max-width: 100%;
+  padding: 0 14px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.product-card:not([data-qty="0"]) .add-word {
+  display: none;
+}
+
+/* Off its hours: no pill, and the badge says when. */
+.product-card[data-available="false"] .cart-controls {
+  display: none;
+}
+
+/* Ink where it can be added; the pill is the one accent on the row. */
+.product-card:not([data-qty="0"]) .cart-controls {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.product-card:not([data-qty="0"]) .cart-controls button,
+.product-card:not([data-qty="0"]) .product-qty {
+  color: var(--on-accent);
+}
+
+/* ---------------------------------------------------------------- states */
+
+.state {
+  padding: 48px 20px;
+  text-align: center;
+  color: var(--ink-soft);
+}
+
+.state strong {
+  display: block;
+  color: var(--ink);
+  font-size: 17px;
+  margin-bottom: 4px;
+}
+
+/* ---------------------------------------------------------- the bill bar */
+
+/*
+ * What has been ordered so far, and the one way forward. Fixed to the
+ * bottom, clear of the home indicator, gone entirely while the order is
+ * empty - a bar that says "0 items ₹0" is furniture.
+ */
+.cart-footer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  padding: 10px var(--pad) max(10px, env(safe-area-inset-bottom));
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+  transition: transform var(--t-quick) var(--ease-move);
+}
+
+.cart-footer.is-empty {
+  transform: translateY(110%);
+  pointer-events: none;
+}
+
+.cart-footer-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.floating-cart {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+}
+
+.floating-cart-count {
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.floating-cart-total {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.checkout-btn {
+  flex: 0 0 auto;
+}
+
+/* The bar nudges when something is added, so the eye is told where it went
+   without a picture flying across the screen. */
+@keyframes order-bump {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.04);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.cart-footer.bump .floating-cart-total {
+  animation: order-bump var(--t-move) var(--ease-spring);
+}
+
+/* Room for the bar under the last row. */
+.content-wrapper {
+  padding-bottom: calc(var(--bar) + env(safe-area-inset-bottom));
+}
+
+/* ------------------------------------------------------------- the sheet */
+
+/*
+ * The dish, opened. Same sheet as the menu: the photos in a strip, the
+ * name, the whole description, what the shop has said about it, the price,
+ * and here - because this page can - the way to add it.
+ */
+dialog.sheet {
+  width: min(520px, 100%);
+  /*
+   * dvh, not vh. On a phone 100vh is the LARGE viewport - the height the page
+   * would have if the browser's own bars were hidden - so a sheet sized in vh
+   * is taller than what you can actually see, and the bottom of it sits under
+   * the address bar with no way to reach it. Owner: "not able to scroll."
+   * vh stays first as the fallback for anything that has no dvh.
+   */
+  max-height: calc(100vh - 24px);
+  max-height: calc(100dvh - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: auto auto 0;
+  padding: 0;
+  border: 0;
+  background: var(--surface);
+  color: var(--ink);
+  border-radius: 16px 16px 0 0;
+}
+
+@media (min-width: 720px) {
+  dialog.sheet {
+    margin: auto;
+    border-radius: 16px;
+  }
+}
+
+dialog.sheet::backdrop {
+  background: rgba(17, 24, 39, 0.5);
+}
+
+/* The pull bar floats, so the photo can start at the very top; over a
+   photo it turns white to stay visible. */
+.sheet-handle {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  z-index: 1;
+  width: 36px;
+  height: 4px;
+  margin: 0;
+  border-radius: 2px;
+  background: var(--line);
+  transform: translateX(-50%);
+}
+
+dialog.sheet:has(.sheet-gallery:not([hidden])) .sheet-handle {
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+/* The photo is the top of the sheet: edge to edge, the sheet's own rounded
+   corners cutting it, nothing white around it. */
+.sheet-gallery {
+  margin: 0 0 12px;
+}
+
+.sheet-strip {
+  display: flex;
+  gap: 0;
+  padding: 0;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.sheet-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.sheet-strip img {
+  flex: 0 0 100%;
+  width: 100%;
+  height: 220px;
+  scroll-snap-align: start;
+  object-fit: cover;
+  background: var(--raised);
+}
+
+.sheet-dots {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.sheet-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--line);
+}
+
+.sheet-dots span[data-on="true"] {
+  background: var(--ink-soft);
+}
+
+.sheet-icon {
+  display: block;
+  margin: 20px auto 0;
+  font-size: 64px;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.sheet-body {
+  padding: 20px 20px max(24px, env(safe-area-inset-bottom));
+}
+
+.sheet-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.sheet-desc {
+  margin: 10px 0 0;
+  color: var(--ink-soft);
+  font-size: 15px;
+  white-space: pre-line;
+}
+
+.sheet-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  margin: 12px 0 0;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--line);
+  font-size: 14px;
+}
+
+.sheet-facts dt {
+  color: var(--ink-soft);
+}
+
+.sheet-facts dd {
+  margin: 0;
+}
+
+/* The price and the way to add it, on one line at the foot of the sheet. */
+.sheet-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.sheet-price {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.sheet-add {
+  display: inline-flex;
+  align-items: center;
+  height: 44px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  overflow: hidden;
+}
+
+.sheet-add button {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.sheet-add .sheet-qty {
+  min-width: 28px;
+  text-align: center;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.sheet-add[data-qty="0"] .sheet-less,
+.sheet-add[data-qty="0"] .sheet-qty {
+  display: none;
+}
+
+.sheet-add[data-qty="0"] .sheet-more {
+  width: auto;
+  padding: 0 22px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.sheet-add[data-qty="0"] .add-plus,
+.sheet-add:not([data-qty="0"]) .add-word {
+  display: none;
+}
+
+.sheet-off {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+/*
+ * WHAT THE SHOP OFFERS ON TOP.
+ *
+ * Rows big enough for a thumb, the price hard right so the eye can run down
+ * the column and add up, and the group's name doing the work of a heading
+ * without being one - it is a label for the rows under it, not a section of
+ * the page.
+ */
+.sheet-options {
+  margin: 16px 0 4px;
+}
+
+.option-group + .option-group {
+  margin-top: 16px;
+}
+
+.option-head {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.option-must {
+  margin-left: 8px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.option-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 2px;
+  cursor: pointer;
+}
+
+.option-row + .option-row {
+  border-top: 1px solid var(--line);
+}
+
+.option-pick {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+}
+
+.option-name {
+  flex: 1 1 auto;
+  font-size: 15px;
+}
+
+.option-cost {
+  flex: 0 0 auto;
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.sheet-note {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.sheet-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.96);
+  color: var(--ink);
+  box-shadow: var(--shadow-1);
+}
+
+.sheet-close svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 2.2;
+}
+
+/* ----------------------------------------------------------- your order */
+
+.lines {
+  padding: 4px 0;
+}
+
+.cart-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.cart-item:last-child {
+  border-bottom: 0;
+}
+
+.item-image,
+.item-icon {
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: var(--raised);
+}
+
+.item-icon {
+  display: grid;
+  place-items: center;
+  font-size: 28px;
+  line-height: 1;
+}
+
+.item-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.item-details {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/*
+ * THE NAME ELLIPSISES INSTEAD OF BEING GUILLOTINED.
+ *
+ * text-overflow acts on the box that holds the TEXT, and here the text is in
+ * a span inside a flex row - so the row clipped its child mid-character and
+ * no ellipsis was ever drawn: "A5 Ruled Notebook 1 not". That reads as a
+ * rendering fault, which is worse than a truncation; a truncation at least
+ * looks deliberate. The rules move onto the span, and both boxes are allowed
+ * to be narrower than their words.
+ */
+.item-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.item-name > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item-prices {
+  display: flex;
+  gap: 10px;
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.total-price {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.quantity-control {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  height: 40px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.qty-btn {
+  width: 40px;
+  height: 38px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.qty-value {
+  min-width: 24px;
+  text-align: center;
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.empty-order {
+  padding: 56px 20px;
+  text-align: center;
+  color: var(--ink-soft);
+}
+
+.empty-order strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ink);
+  font-size: 17px;
+}
+
+/* The sums. Total is the one large number on the page. */
+.bill {
+  margin: 8px 0 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raised);
+}
+
+.bill-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  font-size: 14px;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.bill-row.bill-total {
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 700;
+}
+
+/* With no tax there is nothing above the total, so no line above it. */
+.bill.bill-plain .bill-total {
+  margin-top: 0;
+  padding-top: 4px;
+  border-top: 0;
+}
+
+.bill-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+/*
+ * BACK TO THE MENU, FROM THE BASKET.
+ *
+ * Every cart worth copying has this and this one did not: the only ways out
+ * were the back arrow and Continue. It matters most in a restaurant, where
+ * people order in rounds - somebody who has just added a biryani and wants a
+ * lassi should not have to work out that the arrow at the top is how.
+ */
+.add-more {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 4px 0 14px;
+  padding: 9px 2px;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.add-more span {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+/* Where the food is going, said once, right where it is committed to. */
+.going-to {
+  margin: 0 0 10px;
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+.going-to b {
+  color: var(--ink);
+}
+
+/*
+ * CLEARING THE ORDER IS POSSIBLE, NOT INVITED.
+ *
+ * Centred in the empty half of the screen it was the second most prominent
+ * thing on the page - and it is the destructive one. It belongs at the foot,
+ * small and quiet, where somebody looking for it will find it and nobody
+ * else will reach for it by accident.
+ */
+.order-clear {
+  display: flex;
+  justify-content: flex-start;
+  padding: 18px 0 8px;
+}
+
+/*
+ * The button itself, not just the row around it: .btn-text sets its own size
+ * and .is-danger its own colour, so quieting the wrapper did nothing and it
+ * stayed the loudest thing on a half-empty screen.
+ */
+.order-clear .btn-text {
+  min-height: 36px;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-soft);
+  text-decoration: underline;
+}
+
+/* Where the food is going, for a hotel room or another partner venue. */
+.destination {
+  margin: 12px 0 0;
+  padding: 14px 16px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--raised);
+}
+
+.destination-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.destination-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.destination-field span {
+  min-width: 64px;
+  font-size: 14px;
+  color: var(--ink-soft);
+}
+
+.destination-field input {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--tap);
+  padding: 10px 12px;
+  font-size: 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.destination-note {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+/* The bar on the order page: the sum on the left, the way on on the right. */
+.cart-actions {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px var(--pad) max(10px, env(safe-area-inset-bottom));
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+}
+
+.summary-display {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ----------------------------------------------------------------- modal */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(17, 24, 39, 0.5);
+}
+
+.modal-content {
+  width: min(360px, 100%);
+  padding: 22px 20px 16px;
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  text-align: center;
+}
+
+.modal-title {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.modal-message {
+  margin: 0 0 18px;
+  color: var(--ink-soft);
+  font-size: 15px;
+}
+
+.modal-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.modal-btn {
+  min-height: 48px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  font-weight: 600;
+}
+
+.modal-btn.confirm {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+/* --------------------------------------------------------------- paying */
+
+.pay {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 8px var(--pad) 32px;
+}
+
+.pay-section {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.pay-section:last-of-type {
+  border-bottom: 0;
+}
+
+.field-label {
+  display: block;
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.field-help {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+/* How you are eating: two plain buttons, one of them pressed. */
+.eating-how-choices {
+  display: flex;
+  gap: 8px;
+}
+
+.eating-how-btn {
+  flex: 1;
+  min-height: 48px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.eating-how-btn[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.eating-how[data-missing="true"] .eating-how-btn {
+  border-color: var(--warn);
+}
+
+/* The table the code named, stated in one line with a way to change it. */
+.eating-how-known {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 52px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--raised);
+}
+
+.eating-how-known-text {
+  font-weight: 600;
+}
+
+.eating-how-change {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.eating-how-missing {
+  margin: 8px 0 0;
+  color: var(--warn);
+  font-size: 13px;
+}
+
+/* More than two ways stack; two sit side by side. */
+.eating-how-choices {
+  flex-wrap: wrap;
+}
+
+.eating-how-choices .eating-how-btn {
+  flex: 1 1 calc(50% - 4px);
+  min-width: 140px;
+  padding: 0 12px;
+  white-space: normal;
+  line-height: 1.25;
+}
+
+/* A field that appears under a choice: the table, the address. */
+.sub-field {
+  margin-top: 12px;
+}
+
+.sub-field .field-label {
+  margin-top: 8px;
+}
+
+.text-field,
+.note-field {
+  width: 100%;
+  min-height: var(--tap);
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 16px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  resize: vertical;
+}
+
+.text-field::placeholder,
+.note-field::placeholder {
+  color: var(--ink-soft);
+}
+
+/*
+ * HOW HOT: three buttons, one chilli more on each.
+ *
+ * A radio group rather than a slider. A slider has no resting "I did not
+ * choose" and lands on whatever pixel a thumb hits; these are three targets
+ * a thumb cannot miss and a state that is plainly on or plainly off.
+ *
+ * The chosen one fills with the accent rather than growing a tick: at arm's
+ * length on a phone, a filled box reads before a glyph does. No gradient -
+ * the ordering pages have none.
+ */
+.sheet-spice {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.spice-picker {
+  display: flex;
+  gap: 8px;
+}
+
+.spice-step {
+  flex: 1 1 0;
+  min-height: var(--tap);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 8px 4px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.spice-step.on {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* The chillies shrink as they multiply, so three of them sit on the same
+   line as one at the narrowest phone width. */
+.spice-chillies {
+  font-size: 15px;
+  line-height: 1;
+  letter-spacing: -1px;
+}
+
+.spice-word {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* The way back out. Only shown once a level is set, because an undo for
+   something nobody has done is just a fourth option in disguise. */
+.spice-clear {
+  display: block;
+  margin: 8px 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+/*
+ * When the kitchen usually has it ready.
+ *
+ * Above the dishes and in ink rather than a colour: it is the answer somebody
+ * opened this page for, not a warning. Hidden entirely when the shop has
+ * stated no prep times, so the row simply looks the way it always has.
+ */
+.history-ready {
+  margin: 2px 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/*
+ * "COME TO TABLE SEVEN."
+ *
+ * On the first page, where somebody looks when they want something - not
+ * behind a menu, because the whole point is that they are already trying to
+ * catch an eye and failing. Full width and quiet: it is not the thing they
+ * came to do, but it must be findable without hunting.
+ */
+.call-waiter {
+  display: block;
+  width: 100%;
+  min-height: var(--tap);
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+/* Once it has gone, it says so and stays said for a minute. A button that
+   springs back reads as nothing having happened, which is exactly what would
+   make somebody stand up and go looking anyway. */
+.call-waiter[data-sent="yes"] {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* What was chosen, read back on the line in the basket. */
+.item-spice {
+  margin-top: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/*
+ * HOW BUSY THE KITCHEN IS.
+ *
+ * A sentence, not a gate: it never blocks an order and never takes the
+ * screen. Warn-toned rather than red, because a busy kitchen is good news
+ * about the restaurant and only inconvenient news about the wait - red here
+ * would read as "something is wrong" and lose orders that nobody needed to
+ * lose. Hidden entirely when the kitchen is keeping up, so the day it does
+ * appear it still means something.
+ */
+.kitchen-notice {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--warn);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-sm);
+}
+
+/* The note on a line of the order, and the way to add one. */
+.item-note {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--ink);
+  white-space: pre-line;
+}
+
+.line-note-btn {
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.order-note-box {
+  margin: 12px 0 0;
+}
+
+/* What is being paid for, in one line, so the number on the button below
+   is not the first time the customer sees it. */
+.bill-brief {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.bill-brief-items {
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+.bill-brief-total {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The fee for the way chosen, under the total, before the button. */
+.pay-charges {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+
+/* The number as it is typed, in a field-shaped box with the country code
+   already in it. Digits are shown, not masked: a phone number is not a PIN,
+   and a customer needs to see they typed it right. */
+.phone-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.phone-prefix {
+  color: var(--ink-soft);
+  font-size: 16px;
+}
+
+.mobile-display {
+  flex: 1 1 auto;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+}
+
+.mobile-display[data-empty="true"] {
+  color: var(--ink-soft);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.keypad button {
+  min-height: 56px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raised);
+  font-size: 22px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.keypad button.key-soft {
+  font-size: 16px;
+  color: var(--ink-soft);
+}
+
+.pay-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+/* Something is wrong, said in a card rather than a shout. */
+.kiosk-alert {
+  max-width: 480px;
+  margin: 24px auto;
+  padding: 24px 20px;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  background: var(--warn-bg);
+  text-align: center;
+}
+
+.kiosk-alert .alert-icon {
+  font-size: 32px;
+  margin-bottom: 8px;
+}
+
+.kiosk-alert .alert-message {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+
+.alert-actions {
+  display: flex;
+  justify-content: center;
+}
+
+/* --------------------------------------------------------------- waiting */
+
+.loader {
+  width: 40px;
+  height: 40px;
+  border: 4px solid var(--line);
+  border-top-color: var(--ink);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+#page-loader,
+#loader {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+}
+
+#page-loader-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.payment-loader-card {
+  width: min(360px, 100%);
+  padding: 28px 24px;
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.payment-loader-title {
+  margin-top: 16px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.payment-loader-message {
+  margin-top: 6px;
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+/* ----------------------------------------------------------------- toast */
+
+#popup {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--bar) + 12px + env(safe-area-inset-bottom));
+  z-index: 1000;
+  display: none;
+  max-width: min(360px, calc(100% - 32px));
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  background: var(--ink);
+  color: var(--on-accent);
+  font-size: 14px;
+  line-height: 1.4;
+  box-shadow: var(--shadow-2);
+  opacity: 0;
+  transform: translate(-50%, 8px);
+  transition:
+    opacity var(--t-quick) var(--ease-enter),
+    transform var(--t-quick) var(--ease-enter);
+}
+
+#popup.show {
+  display: block;
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+#popup button {
+  margin-left: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+}
+
+/* ---------------------------------------------------------------- placed */
+
+.done {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 32px var(--pad) 24px;
+  text-align: center;
+}
+
+.done-mark {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 16px;
+  border: 2px solid var(--ok);
+  border-radius: 50%;
+  color: var(--ok);
+}
+
+.done-mark svg {
+  width: 30px;
+  height: 30px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.done h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.done .lead {
+  margin: 6px 0 0;
+  color: var(--ink-soft);
+  font-size: 15px;
+}
+
+/* The token is the whole point of this page: the one thing the customer
+   has to carry to the counter, so it is the largest thing on it. */
+.token {
+  margin: 24px 0 0;
+  padding: 18px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raised);
+}
+
+.token-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.token-number {
+  display: block;
+  margin: 4px 0 0;
+  font-size: 44px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.order-time {
+  margin: 8px 0 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+/*
+ * THE TRAIL: what has happened to this order, newest last.
+ *
+ * Quieter than the token, which is still the thing the customer carries to
+ * the counter. The dots are a history, not a progress bar - there is no
+ * unreached rung drawn ahead of the last one, because nothing here can
+ * promise the next step. The last dot is the darkest simply because it is
+ * where the order is now.
+ */
+.progress {
+  margin: 20px 0 0;
+  text-align: left;
+}
+
+.progress-trail {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.progress-trail li {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 0 0 10px 22px;
+}
+
+.progress-trail li:last-child {
+  padding-bottom: 0;
+}
+
+.progress-trail li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 6px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.progress-trail li:last-child::before {
+  background: var(--ink);
+}
+
+/* The thread between one moment and the next. Never drawn past the last
+   dot: the line would point at a step nobody has promised. */
+.progress-trail li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 17px;
+  bottom: 2px;
+  width: 1px;
+  background: var(--line);
+}
+
+.progress-what {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+.progress-trail li:last-child .progress-what {
+  color: var(--ink);
+}
+
+.progress-at {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-next {
+  margin: 10px 0 0 22px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+/* Refused or cancelled. The last dot stops meaning "here" and starts
+   meaning "this is where it ended". */
+.progress-ended .progress-trail li:last-child::before {
+  background: var(--danger);
+}
+
+.button-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+/* The receipt below the fold, set as a receipt. */
+.receipt-section {
+  max-width: 480px;
+  margin: 0 auto 32px;
+  padding: 16px var(--pad);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.receipt-line {
+  border-top: 1px dashed var(--line-strong);
+  margin: 8px 0;
+}
+
+.receipt-section .center {
+  text-align: center;
+  margin-bottom: 2px;
+}
+
+.receipt-section .item {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.receipt-section .header-row {
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.receipt-section .item-name {
+  flex: 2;
+  display: block;
+  font-size: 13px;
+  font-weight: 400;
+  white-space: normal;
+}
+
+.receipt-section .item-qty {
+  flex: 0 0 40px;
+  text-align: center;
+}
+
+.receipt-section .item-amt {
+  flex: 0 0 80px;
+  text-align: right;
+}
+
+.receipt-section .sub-info {
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+
+.receipt-section .totals .item {
+  color: var(--ink-soft);
+}
+
+.receipt-section .totals .item:last-child {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.powered {
+  margin-top: 12px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+
+@media print {
+  body {
+    background: #fff !important;
+  }
+  .done,
+  .page-head {
+    display: none !important;
+  }
+}
+
+/* ------------------------------------------------------------ language */
+
+/*
+ * The toggle names the language it would switch TO, in that language:
+ * "தமிழ்" on the English page, "English" on the Tamil one, so the person
+ * who cannot read the current page can still find the way out of it.
+ */
+.lang-toggle {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.attract-lang {
+  position: absolute;
+  top: calc(16px + env(safe-area-inset-top));
+  right: 16px;
+}
+
+/* Tamil glyphs stand taller than Latin ones, and have no capitals to space
+   out - tracking meant for uppercase Latin only pulls Tamil apart. */
+html[lang="ta"] body {
+  line-height: 1.6;
+}
+
+/* A Tamil sentence is longer than its English; three of them side by
+   side wrap to three lines each, one under the other they read. */
+html[lang="ta"] .eating-how-choices .eating-how-btn {
+  flex-basis: 100%;
+}
+
+html[lang="ta"] .add-word,
+html[lang="ta"] .btn-primary,
+html[lang="ta"] .btn-secondary,
+html[lang="ta"] .eyebrow,
+html[lang="ta"] .token-label,
+html[lang="ta"] .attract-note {
+  letter-spacing: 0;
+}
+
+/* ------------------------------------------------------ the assistant */
+
+/*
+ * The first-time callout: a small card under the spark, ink on paper, with
+ * a pointer. It rises once, waits a few seconds, and leaves; a tap opens
+ * the sheet, a cross dismisses it for good on this phone.
+ */
+.top-row {
+  position: relative;
+}
+
+.assistant-hint {
+  position: absolute;
+  top: calc(100% - 4px);
+  right: 88px;
+  z-index: 12;
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+}
+
+.assistant-hint::before {
+  content: "";
+  position: absolute;
+  top: -7px;
+  right: 18px;
+  width: 12px;
+  height: 12px;
+  border-left: 1px solid var(--line);
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  transform: rotate(45deg);
+}
+
+.assistant-hint-open {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 6px 10px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+}
+
+.assistant-hint-title {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.assistant-hint-close {
+  width: 36px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0 12px 12px 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 20px;
+  line-height: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .assistant-hint:not([hidden]) {
+    animation: hint-in var(--t-sheet) var(--ease-spring) both;
+  }
+}
+
+@keyframes hint-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .assistant-hint {
+    right: 8px;
+  }
+  .assistant-hint::before {
+    right: 98px;
+  }
+}
+
+/*
+ * The spark: the one thing in the header that is not the shop's own. Drawn
+ * only where the shop opened its assistant, and once, when it appears, it
+ * breathes - a customer should notice it exists without being nagged by it.
+ */
+.ask-ai {
+  color: var(--ink);
+}
+
+.ask-ai svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ask-ai:not([hidden]) {
+    animation: spark-in var(--t-sheet) var(--ease-enter) 0.3s both;
+  }
+}
+
+@keyframes spark-in {
+  0% {
+    transform: scale(0.6) rotate(-20deg);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.15) rotate(6deg);
+    opacity: 1;
+  }
+  100% {
+    transform: none;
+  }
+}
+
+dialog.assistant {
+  height: min(680px, calc(100vh - 24px));
+  height: min(680px, calc(100dvh - 24px));
+  overflow: hidden;
+}
+
+.assistant-body {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+}
+
+.assistant-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.assistant-spark {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+
+.assistant-talk {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: var(--tap);
+  height: var(--tap);
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.assistant-talk svg {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+}
+
+.assistant-talk[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+/* While the customer is talking, the keyboard row steps aside. */
+dialog.assistant[data-voice="on"] .assistant-ask,
+dialog.assistant[data-voice="on"] .assistant-chips {
+  display: none;
+}
+
+.voice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0 4px;
+  border-top: 1px solid var(--line);
+}
+
+.voice-orb {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: 2px solid var(--ink);
+  background: var(--surface);
+  transition:
+    transform var(--t-quick) var(--ease-move),
+    background-color var(--t-quick) var(--ease-move);
+}
+
+.voice-orb[data-state="connecting"] {
+  border-style: dashed;
+}
+
+.voice-orb[data-state="listening"] {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.voice-orb[data-state="speaking"] {
+  background: var(--surface);
+}
+
+.voice-orb[data-state="thinking"] {
+  border-color: var(--ink-soft);
+}
+
+/*
+ * WHILE IT IS ACTUALLY TALKING, the orb follows the voice.
+ *
+ * assets/assistant/talking.js measures the audio coming back and writes
+ * --voice-level, nothing to one, many times a second. A ring grows out of the
+ * orb with it and the orb itself swells a few per cent: enough to read as
+ * speech, small enough to forget. Owner: "little not too much annoy."
+ *
+ * The keyframe loop below is what plays when there is nothing to follow - a
+ * browser with no AudioContext, or the turn-by-turn mode, where the voice is
+ * the phone's own and never passes through here. data-follows is the switch
+ * between them, so the two never run at once.
+ */
+.voice-orb[data-follows="yes"] {
+  --voice-level: 0;
+  transform: scale(calc(1 + var(--voice-level) * 0.12));
+  transition: none;
+}
+
+.voice-orb[data-follows="yes"]::after {
+  content: "";
+  position: absolute;
+  inset: -10px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  opacity: calc(var(--voice-level) * 0.5);
+  transform: scale(calc(1 + var(--voice-level) * 0.25));
+  pointer-events: none;
+}
+
+/* The orb has to be a positioning context for that ring, and it was not. */
+.voice-orb {
+  position: relative;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .voice-orb[data-state="listening"] {
+    animation: orb-breathe 1.6s ease-in-out infinite;
+  }
+
+  .voice-orb[data-state="speaking"] {
+    animation: orb-talk 0.6s ease-in-out infinite;
+  }
+
+  /* Following the real voice beats a loop, so the loop stands down. */
+  .voice-orb[data-follows="yes"] {
+    animation: none;
+  }
+
+  .voice-orb[data-state="connecting"],
+  .voice-orb[data-state="thinking"] {
+    animation: orb-spin 1.2s linear infinite;
+  }
+}
+
+@keyframes orb-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.12);
+  }
+}
+
+@keyframes orb-talk {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(0.9);
+  }
+}
+
+@keyframes orb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.voice-status {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+.voice-orb[data-state="ready"] {
+  border-style: dashed;
+  border-color: var(--ink-soft);
+}
+
+.voice-start {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 56px;
+  padding: 0 26px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-size: 17px;
+  font-weight: 700;
+  box-shadow: var(--shadow-2);
+}
+
+.voice-start svg {
+  width: 24px;
+  height: 24px;
+  fill: currentColor;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .voice-start:not([hidden]) {
+    animation: orb-breathe 1.8s ease-in-out infinite;
+  }
+}
+
+.assistant-log {
+  flex: 1 1 auto;
+  min-height: 120px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0 8px;
+  scroll-behavior: smooth;
+}
+
+.assistant-msg {
+  display: flex;
+}
+
+.assistant-msg.me {
+  justify-content: flex-end;
+}
+
+.assistant-bubble {
+  max-width: 86%;
+  padding: 10px 14px;
+  border-radius: 16px;
+  background: var(--raised);
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.assistant-msg.me .assistant-bubble {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-bottom-right-radius: 6px;
+}
+
+.assistant-msg.ai .assistant-bubble {
+  border-bottom-left-radius: 6px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .assistant-msg {
+    animation: line-in var(--t-quick) var(--ease-enter) both;
+  }
+}
+
+/* A change made to the order, said in the conversation where it was asked. */
+.assistant-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.assistant-action svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: var(--veg);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.assistant-typing .assistant-bubble {
+  display: inline-flex;
+  gap: 5px;
+  padding: 12px 14px;
+}
+
+.assistant-typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-soft);
+  animation: typing 1s ease-in-out infinite;
+}
+
+.assistant-typing span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.assistant-typing span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes typing {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.5;
+  }
+  40% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .assistant-typing span {
+    animation: none;
+  }
+}
+
+.assistant-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 0 10px;
+}
+
+.assistant-chip {
+  min-height: 36px;
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+}
+
+.assistant-ask {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.assistant-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: var(--tap);
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--ink);
+  font: inherit;
+  font-size: 16px;
+}
+
+.assistant-send {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: var(--tap);
+  height: var(--tap);
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.assistant-send:disabled {
+  opacity: 0.5;
+}
+
+.assistant-send svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.assistant-foot {
+  margin: 8px 0 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-align: center;
+}
+
+/*
+ * Talking, not chatting: while a voice line is open the transcript is hidden
+ * and the order takes its place. A customer on a call is listening, not
+ * reading, and the one thing worth looking at is what they have ordered.
+ *
+ * UNLESS SOMEBODY IS LOOKING FOR WHAT WENT WRONG. This rule is why
+ * ?transcript=1 appeared to do nothing: the words were written into the log
+ * and the log was hidden outright. Owner: "first show what transcribtion text
+ * converstation in the screen. then only i know what input gone to ai."
+ *
+ * :has() on the log itself, so it comes back only once there is a transcript
+ * line in it - which only happens on a visit that asked for one.
+ */
+dialog.sheet[data-voice="on"] .assistant-log:not(:has([data-transcript])) {
+  display: none;
+}
+
+dialog.sheet[data-voice="on"] .assistant-chips,
+dialog.sheet[data-voice="on"] .assistant-foot {
+  display: none;
+}
+
+.assistant-order {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  margin: 4px 0 0;
+}
+
+.assistant-order-title {
+  margin: 0 0 6px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.assistant-order-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.assistant-order-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 15px;
+}
+
+.assistant-order-list li:last-child {
+  border-bottom: 0;
+}
+
+.assistant-order-qty {
+  min-width: 2.2em;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.assistant-order-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.assistant-order-note {
+  flex: 1 1 100%;
+  order: 3;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+/* Changed by hand: whatever the talking got wrong, a thumb can put right. */
+.assistant-order-step {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.assistant-order-empty {
+  padding: 7px 0;
+  color: var(--ink-soft);
+  font-size: 15px;
+}
+
+/*
+ * The order has gone. Two beats, in the sheet the customer was talking into:
+ * a tick that draws itself, then a pan with steam coming off it. Neither is
+ * decoration - between them they answer the only two questions a customer has
+ * at that moment, did it go and is anybody cooking it.
+ */
+.placed {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 18px 0 6px;
+  text-align: center;
+}
+
+/* The scene is drawn on a canvas (assets/assistant/kitchen-scene.js), so
+   all this has to do is give it a box and keep it inside one on a small
+   phone. Everything that moves is in the drawing. */
+.placed-art {
+  width: 100%;
+  max-width: 280px;
+  height: 170px;
+}
+
+.placed-said {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.placed-token {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.placed-token-label {
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.placed-token-number {
+  font-size: 40px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.placed-done {
+  min-width: 160px;
+  min-height: var(--tap);
+  margin-top: 4px;
+  padding: 0 24px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+/* While it is up, the conversation's own furniture is out of the way. The
+   basket is empty, and "Review order" is behind them. */
+dialog.sheet:has(.placed:not([hidden])) .assistant-order,
+dialog.sheet:has(.placed:not([hidden])) .assistant-chips,
+dialog.sheet:has(.placed:not([hidden])) .assistant-confirm,
+dialog.sheet:has(.placed:not([hidden])) .assistant-foot {
+  display: none;
+}
+
+/* The transcript and the box to talk into stand aside only while the scene
+   is playing. Once the order is on screen they come back, because the call
+   never ended - and an answer to "add a coke to that" has to land somewhere
+   the customer can see it. */
+dialog.sheet:has(.placed:not([hidden])):not(:has(.placed-order:not([hidden]))) .assistant-log,
+dialog.sheet:has(.placed:not([hidden])):not(:has(.placed-order:not([hidden]))) .assistant-ask {
+  display: none;
+}
+
+/* And then the order leads the sheet. It sits above the transcript rather
+   than under the box you type into, which is where the markup alone would
+   put it. */
+.assistant-body:has(.placed-order:not([hidden])) .placed {
+  order: -1;
+  flex: 0 0 auto;
+  justify-content: flex-start;
+  gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* ===================================================== the assistant's screen
+ *
+ * Owner: "when ai click occupie full screen ... not right bottom only. utlize
+ * the the space and make line item modifiable and have 'confirm & send
+ * order'. bottom only should have mic and ai anmiation, top user normal able
+ * increase edit add item with add button etc."
+ *
+ * So: the whole height, the order as the page rather than a summary under a
+ * chat log, and the microphone in a bar at the bottom where a thumb is. The
+ * top half stays workable by hand while the assistant listens at the bottom -
+ * which is the point of it. It is a helper, not a turn-taker.
+ */
+dialog.sheet.assistant {
+  width: 100%;
+  max-width: none;
+  height: 100dvh;
+  max-height: 100dvh;
+  margin: 0;
+  border-radius: 0;
+}
+
+@media (min-width: 720px) {
+  /* On a desktop a full-bleed dialog is a wall. A tall column, centred, is
+     the same screen at a size a person can read. */
+  dialog.sheet.assistant {
+    width: min(560px, 100%);
+    height: min(860px, 94dvh);
+    margin: auto;
+    border-radius: 16px;
+  }
+}
+
+/* The body is a column: title, the order, then the bar. Only the middle
+   scrolls, so the button a customer is reaching for never moves. */
+dialog.sheet.assistant .assistant-body {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding-bottom: 0;
+}
+
+/* ------------------------------------------------ the order, up top */
+
+.assistant-order-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.assistant-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.assistant-add span:first-child {
+  color: var(--ink-soft);
+  font-size: 17px;
+  line-height: 1;
+}
+
+/*
+ * BIG. Owner: "when ai found the line item show big font and nice
+ * professional design user able increase or decrease mean time."
+ *
+ * A line is the thing the customer is checking, out loud, against what they
+ * just said. Seventeen pixels and a tabular quantity so a glance is enough.
+ */
+dialog.sheet.assistant .assistant-order-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 17px;
+}
+
+dialog.sheet.assistant .assistant-order-list li:last-child {
+  border-bottom: 0;
+}
+
+dialog.sheet.assistant .assistant-order-qty {
+  min-width: 2.4em;
+  color: var(--ink-soft);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+dialog.sheet.assistant .assistant-order-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+}
+
+dialog.sheet.assistant .assistant-order-step {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 19px;
+  line-height: 1;
+}
+
+/* WRAPPED, never a sideways scroller. Owner: "cross selling i saw horrizontal
+   scroll. not soo good." A row that scrolls hides most of itself and asks for
+   a gesture nobody makes on a screen they are reading downwards. */
+.assistant-more {
+  margin-top: 18px;
+}
+
+.assistant-more-title {
+  margin: 0 0 10px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.assistant-more-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.assistant-more-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+}
+
+.assistant-more-item[disabled] {
+  opacity: 0.5;
+}
+
+.assistant-more-plus {
+  color: var(--ink-soft);
+  font-size: 17px;
+  line-height: 1;
+}
+
+/* --------------------------------------- what scrolls and what does not
+ *
+ * The sheet itself must NOT scroll, or the send button and the microphone
+ * slide off the bottom exactly when somebody reaches for them. The order in
+ * the middle scrolls instead, inside its own box, and everything either side
+ * of it is pinned.
+ */
+dialog.sheet.assistant {
+  overflow: hidden;
+}
+
+dialog.sheet.assistant .assistant-order {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* The transcript takes what is left when there is no order yet, and gives it
+   all up the moment there is one: the order is what a customer checks against
+   what they just said, not a list of sentences they have already heard. */
+dialog.sheet.assistant:has(.assistant-order:not([hidden])) .assistant-log {
+  flex: 0 0 auto;
+  max-height: 96px;
+}
+
+/*
+ * THE BAR AT THE BOTTOM, and nothing else in it.
+ *
+ * Owner: "bottom only should have mic and ai anmiation." It sits below the
+ * order, above the safe area, and does not move while the order is scrolled.
+ */
+dialog.sheet.assistant .voice,
+dialog.sheet.assistant .assistant-ask,
+dialog.sheet.assistant .assistant-confirm,
+dialog.sheet.assistant .assistant-chips {
+  flex: 0 0 auto;
+}
+
+dialog.sheet.assistant .voice {
+  margin-top: 12px;
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+}
+
+dialog.sheet.assistant .assistant-ask {
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+}
+
+dialog.sheet.assistant .assistant-foot {
+  flex: 0 0 auto;
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+}
+
+/* The one question this screen asks before it can send. */
+.assistant-ways {
+  flex: 0 0 auto;
+  margin-top: 12px;
+}
+
+.assistant-ways-title {
+  margin: 0 0 8px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.assistant-ways-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Equal width and equal weight: neither way is the one we would rather they
+   picked, and a big button beside a small one is a thumb being steered. */
+.assistant-way {
+  flex: 1 1 140px;
+  min-height: var(--tap);
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* ------------------------------------------- the one button that sends */
+
+/* Said once at the top of the history, not on every row. */
+.history-offline {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+/* Something that was never on the order, offered inside the row that is
+   open. The same shape as the confirmation screen's, because it is the same
+   offer and a customer should not have to learn it twice. */
+.history-more {
+  margin-top: 14px;
+}
+
+.history-more-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.history-more-row {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.history-more-item {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.history-more-item[disabled] {
+  opacity: 0.5;
+}
+
+.history-more-plus {
+  color: var(--ink-soft);
+  font-size: 17px;
+  line-height: 1;
+}
+
+.history-refused {
+  margin: 8px 0 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+/* ------------------------------------------- the order's own screen
+ *
+ * It opens under the scene once the kitchen has the order. Quiet: the token
+ * is the loud thing above it, and everything here is a small decision the
+ * customer may or may not want to make.
+ */
+.placed-order {
+  width: 100%;
+  margin-top: 4px;
+  text-align: left;
+}
+
+.placed-order-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.placed-order-title {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.placed-clock {
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The one line that says a plus is now a request rather than a change.
+   Quiet: it is a note about the buttons, not a warning. */
+.placed-mode {
+  margin: 0 0 2px;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--ink-soft, #5a5a52);
+  text-align: left;
+}
+
+.placed-lines {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.placed-lines li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 15px;
+}
+
+.placed-lines li:last-child {
+  border-bottom: 0;
+}
+
+.placed-line-qty {
+  min-width: 2.2em;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.placed-line-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.placed-step {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.placed-more {
+  margin-top: 14px;
+}
+
+.placed-more-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* One row, scrolled sideways rather than wrapped into a wall of choices. */
+.placed-more-row {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.placed-more-item {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.placed-more-item[disabled] {
+  opacity: 0.5;
+}
+
+.placed-more-plus {
+  color: var(--ink-soft);
+  font-size: 17px;
+  line-height: 1;
+}
+
+/* The edit that is waiting to be sent. Quiet until something has moved, and
+   then the only loud thing on the screen, because it is the one step left. */
+/*
+ * HOLD TO TALK: THE ONLY CONTROL ON THE SCREEN.
+ *
+ * Owner: "hold button need some animation. like finger press and hold first
+ * time. big more size ... after press proper animation that user pressed and
+ * listerning. like waves ... have some solid and satisfyig feeling over
+ * holing."
+ *
+ * Big enough that a thumb lands on it without looking, round because that is
+ * what a press target is, and it visibly takes the press: it darkens, it
+ * sinks, and the waves inside it start answering the voice. The waves are
+ * driven by --voice-in, which voice.js sets from the level it already
+ * measures off the microphone - so they fall silent when the customer stops
+ * talking, which a keyframe loop never does.
+ */
+.voice-hold {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: min(78vw, 260px);
+  min-height: 132px;
+  margin: 4px auto 0;
+  padding: 18px;
+  border: 2px solid var(--ink, #1d1d1b);
+  border-radius: 999px;
+  background: var(--paper-2, #faf8f3);
+  color: var(--ink, #1d1d1b);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  box-shadow: 0 6px 0 0 rgba(0, 0, 0, 0.07);
+  /* A press, not a text selection: a long press otherwise puts the word
+     "Hold" in a selection handle instead of opening the line. */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: none;
+  cursor: pointer;
+  transition:
+    transform var(--t-press) var(--ease-move),
+    background var(--t-quick) var(--ease-move),
+    box-shadow var(--t-press) var(--ease-move);
+}
+
+/* HELD: it goes dark, it sinks onto the page, and it says what it is doing. */
+.voice-hold[data-held] {
+  background: var(--ink, #1d1d1b);
+  color: var(--paper, #fff);
+  transform: translateY(4px) scale(0.99);
+  box-shadow: 0 1px 0 0 rgba(0, 0, 0, 0.12);
+}
+
+.voice-hold-word {
+  font-variant-numeric: tabular-nums;
+}
+
+/* The bars. At rest they are a flat line, which is the honest picture of a
+   microphone that is not listening. */
+.voice-wave {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 34px;
+}
+
+.voice-wave i {
+  display: block;
+  width: 5px;
+  height: 5px;
+  border-radius: 3px;
+  background: currentColor;
+  opacity: 0.45;
+  /*
+   * HEIGHT, and deliberately, which is the one place on this page that
+   * animates a layout property.
+   *
+   * These six bars are a voice meter: their height is driven by
+   * --voice-in, set from the microphone level many times a second. scaleY
+   * would keep it on the compositor, but it would also need the bars
+   * re-authored at full height and scaled down about their centre, and a
+   * meter that is smoothed wrongly reads as a microphone that is not
+   * listening. That is a change to make while watching it, not inside a
+   * pass about timing.
+   *
+   * It is cheap in practice: six 5px boxes inside a fixed 34px row, so the
+   * layout it dirties is the row and nothing else.
+   */
+  transition:
+    height var(--t-press) linear,
+    opacity var(--t-press) linear;
+}
+
+/*
+ * Each bar reads a different share of the level, so the group moves like a
+ * waveform rather than six copies of one meter. The middle bars swing most,
+ * which is what a voice looks like.
+ */
+.voice-hold[data-held] .voice-wave i {
+  opacity: 1;
+}
+
+.voice-hold[data-held] .voice-wave i:nth-child(1),
+.voice-hold[data-held] .voice-wave i:nth-child(6) {
+  height: calc(5px + (var(--voice-in, 0) * 14px));
+}
+
+.voice-hold[data-held] .voice-wave i:nth-child(2),
+.voice-hold[data-held] .voice-wave i:nth-child(5) {
+  height: calc(5px + (var(--voice-in, 0) * 24px));
+}
+
+.voice-hold[data-held] .voice-wave i:nth-child(3),
+.voice-hold[data-held] .voice-wave i:nth-child(4) {
+  height: calc(5px + (var(--voice-in, 0) * 32px));
+}
+
+/*
+ * THE FINGERTIP, SHOWN ONCE.
+ *
+ * Owner: "like finger press and hold first time." A sentence under a button
+ * is a sentence nobody reads; a fingertip coming down and staying down is the
+ * instruction itself. It goes for good the first time they hold it.
+ */
+.voice-finger {
+  position: absolute;
+  right: 18%;
+  bottom: 10px;
+  width: 26px;
+  height: 26px;
+  border: 2px solid var(--ink, #1d1d1b);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.65);
+  pointer-events: none;
+  animation: voice-finger-press 2.4s ease-in-out infinite;
+}
+
+.voice-finger[hidden] {
+  display: none;
+}
+
+@keyframes voice-finger-press {
+  /* Comes down... */
+  0% { transform: translateY(-16px) scale(1); opacity: 0; }
+  14% { transform: translateY(0) scale(1); opacity: 1; }
+  /* ...and STAYS down, which is the part being taught. */
+  22% { transform: translateY(0) scale(0.82); opacity: 1; }
+  70% { transform: translateY(0) scale(0.82); opacity: 1; }
+  82% { transform: translateY(-16px) scale(1); opacity: 0; }
+  100% { transform: translateY(-16px) scale(1); opacity: 0; }
+}
+
+.voice-hold-say {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--ink-soft, #5a5a52);
+  text-align: center;
+}
+
+.voice-hold[data-held] ~ .voice-hold-say {
+  visibility: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-finger { animation: none; transform: translateY(0) scale(0.82); opacity: 1; }
+  .voice-hold, .voice-wave i { transition: none; }
+}
+
+/*
+ * TALK, OR TYPE, before either happens.
+ *
+ * Owner: "have ai talk button seperate, type button seperate ... coz when
+ * user try to talk half screen showing keypad. not good."
+ */
+.assistant-choose {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0 4px;
+}
+
+.assistant-choose[hidden] {
+  display: none;
+}
+
+.assistant-choose-talk {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: min(78vw, 260px);
+  min-height: 56px;
+  padding: 14px 20px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--ink, #1d1d1b);
+  color: var(--paper, #fff);
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.assistant-choose-talk svg {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+}
+
+.assistant-choose-type {
+  min-height: 40px;
+  padding: 8px 16px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft, #5a5a52);
+  font-size: 14px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/*
+ * LESS EMPTY SPACE. Owner: "also screen now reduce empty spaces." A call
+ * shows one control and the order; the padding that suited a chat window
+ * leaves the button floating in the middle of nothing.
+ */
+dialog.sheet[data-voice="on"] .voice {
+  gap: 6px;
+  padding: 6px 0 2px;
+}
+
+dialog.sheet[data-voice="on"] .voice-orb {
+  width: 44px;
+  height: 44px;
+}
+
+dialog.sheet[data-voice="on"] .assistant-body {
+  gap: 6px;
+}
+
+/*
+ * THE SHOP IS SLOW, AND THE PAGE SAYS SO.
+ *
+ * Owner: "whenver we communicate or receiving show some progress then we know
+ * its network delay. otherwise it shows no sound nothing happening."
+ *
+ * Across the top, above everything, including inside a modal dialog - which
+ * is where the longest waits happen. It only ever appears once a request has
+ * taken long enough to look broken (assets/working.js), so seeing it always
+ * means something: the network is slow.
+ */
+.working-bar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 2147483000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px calc(6px + env(safe-area-inset-top, 0px));
+  background: var(--ink, #1d1d1b);
+  color: var(--paper, #fff);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.working-bar[hidden] {
+  display: none !important;
+}
+
+.working-bar-track {
+  position: relative;
+  flex: 0 0 44px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.working-bar-track::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  border-radius: 2px;
+  background: currentColor;
+  animation: working-bar-slide 1s ease-in-out infinite;
+}
+
+@keyframes working-bar-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+
+/* A bar that moves is the point; one that cannot move still says the words. */
+@media (prefers-reduced-motion: reduce) {
+  .working-bar-track::after { animation: none; width: 100%; }
+}
+
+.placed-confirm-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 10px;
+  border: 1px solid var(--line, #d9d5cb);
+  border-radius: 10px;
+  background: var(--paper-2, #faf8f3);
+}
+
+.placed-confirm-count {
+  font-size: 13px;
+  color: var(--ink-soft, #5a5a52);
+}
+
+.placed-confirm-row {
+  display: flex;
+  gap: 8px;
+}
+
+.placed-confirm {
+  flex: 1 1 auto;
+  min-height: 44px;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--ink, #1d1d1b);
+  color: var(--paper, #fff);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.placed-discard {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 10px 14px;
+  border: 1px solid var(--line, #d9d5cb);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft, #5a5a52);
+  font-size: 15px;
+  cursor: pointer;
+}
+
+/* A line the customer has moved but not yet sent, and one they have taken
+   down to nothing - still on screen, so it can be put back. */
+.placed-lines li[data-staged] .placed-line-qty {
+  font-weight: 700;
+  color: var(--ink, #1d1d1b);
+}
+
+.placed-lines li[data-staged="gone"] .placed-line-name {
+  text-decoration: line-through;
+  opacity: 0.55;
+}
+
+.placed-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+.placed-cancel {
+  min-height: var(--tap);
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.placed-cancel[disabled] {
+  opacity: 0.5;
+}
+
+/* Once the order is on screen the scene has done its job, so it steps back
+   rather than holding the top half of a phone. */
+.placed:has(.placed-order:not([hidden])) .placed-art {
+  height: 96px;
+}
+
+/* The way out of the conversation: the order, and the button that reviews
+   and places it. The page's own order bar is under this sheet, out of reach. */
+/*
+ * ONE RULE FOR THE BUTTON THAT SENDS THE ORDER.
+ *
+ * It used to say "Review order" and walk the customer to the basket to send
+ * it from there. It now sends. Owner, having reasoned it out himself: "confirm
+ * order visible once order ... if required we can do two steps. review and
+ * send.. i believe one enought. since we give 1 minute to modify item." He is
+ * right - a review before sending and a minute to change after are the same
+ * safety net paid for twice, and the second is the better one, because by
+ * then the customer is looking at what the kitchen actually has.
+ *
+ * Taller than a tap target, because it is the last thing anybody does here.
+ */
+.assistant-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 54px;
+  margin: 12px 0 0;
+  padding: 12px 18px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  text-align: left;
+}
+
+.assistant-review-sum {
+  font-weight: 500;
+  opacity: 0.9;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------- the machine */
+
+/*
+ * The screen a kiosk machine rests on between customers. Read from a metre
+ * away: the shop's name, one line, two targets a hand can land on without
+ * aiming. The shop's own picture behind it when it has uploaded one, a
+ * plain ground when it has not - never a stock photograph of somebody
+ * else's food.
+ */
+body.attract {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--raised);
+  background-size: cover;
+  background-position: center;
+}
+
+.attract-main {
+  position: relative;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 40px;
+  padding: 40px var(--pad) calc(40px + env(safe-area-inset-bottom));
+  background: rgba(255, 255, 255, 0.86);
+}
+
+body.attract.has-picture .attract-main {
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.attract-head {
+  text-align: center;
+}
+
+.attract-logo {
+  width: 88px;
+  height: 88px;
+  margin: 0 auto 16px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+}
+
+.attract-name {
+  margin: 0;
+  font-size: clamp(28px, 4vw, 44px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.attract-sub {
+  margin: 8px 0 0;
+  color: var(--ink-soft);
+  font-size: clamp(16px, 1.8vw, 20px);
+}
+
+.attract-choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  width: min(760px, 100%);
+}
+
+@media (max-width: 560px) {
+  .attract-choices {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.attract-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 220px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-1);
+  transition:
+    transform var(--t-press) var(--ease-move),
+    box-shadow var(--t-quick) var(--ease-move),
+    border-color var(--t-quick) var(--ease-move);
+}
+
+.attract-choice:active {
+  transform: scale(0.98);
+}
+
+@media (hover: hover) {
+  .attract-choice:hover {
+    border-color: var(--line-strong);
+    box-shadow: var(--shadow-2);
+    transform: translateY(-2px);
+  }
+}
+
+.attract-icon svg {
+  width: 72px;
+  height: 72px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.attract-title {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.attract-note {
+  color: var(--ink-soft);
+  font-size: 15px;
+}
+
+/* ---------------------------------------------------------------- misc */
+
+.access-denied {
+  max-width: 420px;
+  margin: 15vh auto;
+  padding: 0 var(--pad);
+  text-align: center;
+}
+
+.access-denied h1 {
+  font-size: 22px;
+  margin: 0 0 6px;
+}
+
+.access-denied p {
+  color: var(--ink-soft);
+  margin: 0 0 20px;
+}
+
+/* ================================================================ motion */
+
+/*
+ * Every action answers, and none of them shouts.
+ *
+ * A press shrinks the thing pressed; a number that changed pops once; the
+ * bar and the badge nudge when something lands in them; a sheet rises rather
+ * than appearing; a line in the order slides in. Each is under 300ms, each
+ * is one property, and every one of them is switched off for a phone that
+ * has asked for less motion. What is deliberately NOT here is the picture
+ * that used to fly across the screen on every tap.
+ */
+.product-card,
+.btn-primary,
+.btn-secondary,
+.btn-text,
+.icon-btn,
+.category-item,
+.order-tool,
+.eating-how-btn,
+.keypad button,
+.cart-controls button,
+.qty-btn,
+.sheet-add button,
+.modal-btn {
+  transition:
+    transform var(--t-press) var(--ease-move),
+    background-color var(--t-quick) var(--ease-move),
+    border-color var(--t-quick) var(--ease-move),
+    color var(--t-quick) var(--ease-move),
+    box-shadow var(--t-quick) var(--ease-move);
+}
+
+.btn-primary:active:not(:disabled),
+.btn-secondary:active,
+.eating-how-btn:active,
+.keypad button:active,
+.modal-btn:active,
+.category-item:active {
+  transform: scale(0.97);
+}
+
+.cart-controls button:active:not(:disabled),
+.qty-btn:active,
+.sheet-add button:active,
+.icon-btn:active {
+  transform: scale(0.88);
+}
+
+.keypad button:active {
+  background: var(--line);
+}
+
+@media (hover: hover) {
+  .product-card:hover {
+    border-color: var(--line-strong);
+    box-shadow: var(--shadow-1);
+    transform: translateY(-1px);
+  }
+
+  .product-card[data-available="false"]:hover {
+    transform: none;
+    box-shadow: none;
+  }
+
+  .category-item:not(.active):hover,
+  .order-tool:not([aria-pressed="true"]):hover {
+    border-color: var(--line-strong);
+    color: var(--ink);
+  }
+
+  .btn-secondary:hover,
+  .icon-btn:hover,
+  .keypad button:hover {
+    background: var(--raised);
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    background: #1f2937;
+    border-color: #1f2937;
+  }
+
+  .cart-controls button:hover:not(:disabled),
+  .qty-btn:hover {
+    background: rgba(17, 24, 39, 0.06);
+  }
+
+  .product-card:not([data-qty="0"]) .cart-controls button:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.14);
+  }
+}
+
+@keyframes qty-pop {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.35);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.product-qty,
+.sheet-qty,
+.qty-value,
+.badge {
+  display: inline-block;
+}
+
+.product-qty.pop,
+.sheet-qty.pop,
+.qty-value.pop,
+.badge.pop {
+  animation: qty-pop var(--t-move) var(--ease-spring);
+}
+
+@keyframes sheet-up {
+  from {
+    transform: translateY(28px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+dialog.sheet[open] {
+  animation: sheet-up var(--t-sheet) var(--ease-enter);
+}
+
+dialog.sheet[open]::backdrop {
+  animation: fade-in var(--t-quick) var(--ease-enter);
+}
+
+@keyframes line-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.cart-item,
+.panel-line,
+.product-card {
+  animation: line-in var(--t-quick) var(--ease-enter) both;
+}
+
+/* The tick on the token page draws itself, once. */
+@keyframes draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.done-mark svg path {
+  stroke-dasharray: 30;
+  stroke-dashoffset: 30;
+  animation: draw 0.5s var(--ease-move) 0.15s forwards;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.done h1,
+.done .lead,
+.token,
+.order-time,
+.done .button-group {
+  animation: fade-up var(--t-sheet) var(--ease-enter) both;
+}
+
+.done .lead {
+  animation-delay: 0.08s;
+}
+.token {
+  animation-delay: 0.16s;
+}
+.order-time {
+  animation-delay: 0.24s;
+}
+.done .button-group {
+  animation-delay: 0.32s;
+}
+
+/* ------------------------------------------------------------- skeleton */
+
+/*
+ * While the menu loads, the shape of a menu rather than a spinner. A page
+ * that already looks like the page it is about to be reads as fast; a wheel
+ * reads as waiting.
+ */
+.skeleton-list {
+  width: 100%;
+  max-width: 900px;
+  padding: 88px var(--pad) 0;
+}
+
+.skeleton-card {
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.skeleton-card .sk-body {
+  flex: 1 1 auto;
+}
+
+@keyframes sk-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.sk {
+  background: var(--line);
+  border-radius: 6px;
+  animation: sk-pulse 1.4s ease-in-out infinite;
+}
+
+.sk-line {
+  height: 14px;
+  margin-bottom: 8px;
+}
+
+.sk-line.short {
+  width: 55%;
+}
+
+.sk-line.price {
+  width: 28%;
+  height: 16px;
+  margin-top: 6px;
+}
+
+.sk-media {
+  flex: 0 0 auto;
+  width: 96px;
+  height: 96px;
+  border-radius: 10px;
+}
+
+/* ============================================================== desktop */
+
+/*
+ * A wide screen gets a wide layout, not a phone page stretched across it.
+ *
+ * Three columns, the shape every ordering site on a laptop has settled on:
+ * the sections down the left, the dishes in the middle, and the order so
+ * far on the right, where a customer can watch it build. The bottom bar
+ * goes - the panel is the bar - and the horizontal chip strip goes with it,
+ * because a rail that stays put beats a strip that has to be scrolled.
+ */
+.category-rail,
+.order-panel {
+  display: none;
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --pad: 24px;
+  }
+
+  .wrap {
+    max-width: 1240px;
+  }
+
+  .top .wrap {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(360px, 640px);
+    align-items: center;
+    column-gap: 32px;
+  }
+
+  .top-row {
+    grid-column: 1;
+    min-height: 68px;
+  }
+
+  .top-cart {
+    display: none;
+  }
+
+  .order-search {
+    grid-column: 2;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding-bottom: 0;
+  }
+
+  .search-row {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .order-tools {
+    flex: 0 0 auto;
+    margin-top: 0;
+  }
+
+  .top .fixed-categories {
+    display: none;
+  }
+
+  /* The ordering page only: the order page and the payment page wrap their
+     main in .content-wrapper too, for the room under the bar, and are one
+     column at every width. */
+  .order-layout {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr) 340px;
+    column-gap: 32px;
+    width: 100%;
+    max-width: 1240px;
+    margin: 0 auto;
+    padding: 0 var(--pad) 48px;
+  }
+
+  .top {
+    grid-column: 1 / -1;
+    margin: 0 calc(-1 * var(--pad));
+    padding-left: var(--pad);
+    padding-right: var(--pad);
+  }
+
+  .top > .wrap {
+    padding: 0;
+  }
+
+  .category-rail {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    grid-column: 1;
+    position: sticky;
+    top: 92px;
+    align-self: start;
+    max-height: calc(100vh - 108px);
+    overflow-y: auto;
+    padding: 20px 0;
+  }
+
+  .category-rail .category-item {
+    display: flex;
+    width: 100%;
+    min-height: 40px;
+    padding: 8px 12px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--ink-soft);
+    font-size: 15px;
+    text-align: left;
+    white-space: normal;
+  }
+
+  .category-rail .category-item.active {
+    background: var(--raised);
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: inset 3px 0 0 var(--ink);
+  }
+
+  .scrollable-products {
+    grid-column: 2;
+    min-width: 0;
+    max-width: none;
+    padding: 0;
+  }
+
+  /* No column count here. The grid fits as many columns as will hold a
+     card, in the width it actually has - which inside this middle column is
+     the only question worth asking. A count written against the viewport is
+     what put the photo on top of the price. */
+
+  .order-panel {
+    display: flex;
+    flex-direction: column;
+    grid-column: 3;
+    position: sticky;
+    top: 92px;
+    align-self: start;
+    max-height: calc(100vh - 108px);
+    margin-top: 20px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+
+  .cart-footer {
+    display: none;
+  }
+
+  /* The order and the payment pages read as one column, centred. */
+  .lines,
+  .destination,
+  .bill,
+  .order-clear {
+    max-width: 720px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .cart-actions {
+    padding-left: calc(50% - 360px);
+    padding-right: calc(50% - 360px);
+  }
+}
+
+/* The live order, on the right. */
+.order-panel-head {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.order-panel-lines {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 4px 16px;
+}
+
+.panel-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+
+.panel-line:last-child {
+  border-bottom: 0;
+}
+
+.panel-line-qty {
+  flex: 0 0 28px;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.panel-line-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel-line-total {
+  flex: 0 0 auto;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.order-panel-empty {
+  padding: 36px 16px;
+  text-align: center;
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+
+.order-panel-foot {
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.order-panel-total {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------- what this phone ordered
+ *
+ * A list of what has already happened, so it is quiet: no photographs, no
+ * prices shouted, one line of state per order. The state is the only thing
+ * carrying colour, because it is the only thing that changes.
+ */
+.history {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 12px 16px 40px;
+}
+
+.history-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.history-row {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.history-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history-shop {
+  font-weight: 700;
+}
+
+.history-when {
+  color: var(--ink-soft);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.history-what {
+  margin: 6px 0 10px;
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.history-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history-token {
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-state {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.history-state[data-state='paid'] {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.history-state[data-state='cancelled'] {
+  color: var(--ink-soft);
+  text-decoration: line-through;
+}
+
+.history-bill {
+  display: inline-block;
+  margin-top: 10px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+/*
+ * THE SAME AGAIN.
+ *
+ * Under the row rather than inside it: the row itself is already a button
+ * that opens the order, and a button inside a button is neither. Full width,
+ * because on a phone the thumb is the pointer and a small link beside a big
+ * tap target is the one that gets missed.
+ */
+.history-again {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.history-again:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.history-empty,
+.history-note {
+  color: var(--ink-soft);
+  font-size: 14px;
+  text-align: center;
+}
+
+.history-note {
+  margin-top: 24px;
+  font-size: 12px;
+}
+
+.done-bill {
+  margin: 8px auto 0;
+  display: block;
+}
+
+/*
+ * A CODE THE SHOP PRINTED SOMEWHERE.
+ *
+ * Collapsed to a link until somebody wants it. A promo box sitting open on
+ * every order teaches people they are missing a discount, and most of them
+ * are not - which turns a pleasant surprise into a small tax on everybody
+ * else's checkout.
+ */
+.promo {
+  margin: 16px 0 8px;
+}
+
+.promo-open {
+  padding: 8px 0;
+  border: 0;
+  background: none;
+  color: var(--ink-soft);
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.promo-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.promo-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 16px;
+  /* Uppercase as it is typed, because a printed code is uppercase and a
+     customer should not have to wonder whether the case matters. */
+  text-transform: uppercase;
+}
+
+.promo-apply {
+  flex: 0 0 auto;
+  padding: 12px 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.promo-apply:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.promo-said {
+  margin: 8px 0 0;
+  font-size: 14px;
+  color: var(--ink-soft);
+}
+
+/* Colour AND wording, never colour alone: about one man in twelve cannot
+   tell these two apart, and "cannot be used" reads the same to everybody. */
+.promo-said.is-good {
+  color: var(--ok);
+  font-weight: 700;
+}
+
+.promo-said.is-bad {
+  color: var(--danger);
+}
+
+/* ----------------------------------------------------------- paying by UPI
+ *
+ * One button, and under it the apps by name for anybody whose phone does not
+ * offer a chooser. The sentence underneath is the important part: this page
+ * does not know whether the money arrived, and says so rather than implying
+ * a confirmation it cannot give.
+ */
+.pay-upi {
+  margin: 18px auto 0;
+  max-width: 22rem;
+  text-align: center;
+}
+
+.pay-upi-amount {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.pay-upi-go {
+  display: block;
+  width: 100%;
+  min-height: var(--tap);
+  line-height: var(--tap);
+  text-align: center;
+  text-decoration: none;
+}
+
+.pay-upi-apps {
+  display: flex;
+  justify-content: center;
+  gap: 18px;
+  margin: 10px 0 0;
+  font-size: 14px;
+}
+
+.pay-upi-note {
+  margin: 12px 0 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* The row opens into the order: the lines, what they cost, and - while the
+   shop's window is open - a way to change them. */
+.history-open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.history-details {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.history-lines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history-lines li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  font-size: 15px;
+}
+
+.history-line-qty {
+  min-width: 2.2em;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.history-line-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.history-line-note {
+  flex: 1 1 100%;
+  order: 5;
+  padding-left: 2.2em;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.history-line-cost {
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.history-step {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.history-total {
+  margin: 8px 0 0;
+  font-weight: 700;
+  text-align: right;
+}
+
+.history-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.history-clock {
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-asked {
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.history-cancel {
+  min-height: var(--tap);
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.history-cancel[disabled] {
+  opacity: 0.5;
+}
+
+/* ------------------------------------------------ seeing what it heard
+ *
+ * ?transcript=1 turns the spoken words into the conversation for that visit,
+ * which is normally empty on a call. Owner: "also enable what is converted
+ * text i want to see. soemthing wrong."
+ *
+ * The log is short while an order is up, because the order is what a customer
+ * checks. Somebody who has deliberately asked to see the words wants to read
+ * them, so it gets room - and only then.
+ */
+dialog.sheet.assistant:has(.assistant-order:not([hidden])) .assistant-log:has([data-transcript]) {
+  max-height: 38vh;
+}
+
+/*
+ * A transcript that came back in the wrong alphabet is the single most useful
+ * thing this can show about a Tamil call, so it is marked rather than left to
+ * be squinted at.
+ */
+.assistant-msg[data-transcript] .assistant-bubble {
+  font-size: 14px;
+  opacity: 0.85;
+}
+
+.assistant-msg[data-script="other"] .assistant-bubble {
+  border: 1px dashed var(--warn);
+  color: var(--warn);
+}
+
+/* ================================================ what the line is doing
+ *
+ * Owner, three times: "i asked you so many times show what was talking or
+ * server logs you show me."
+ *
+ * Only on a visit that asked for it with ?transcript=1. A customer ordering
+ * lunch must never see any of this, so there is no switch on the page - only
+ * the link.
+ */
+.voice-debug {
+  flex: 0 0 auto;
+  max-height: 34vh;
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+  font-size: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.voice-debug-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-soft);
+}
+
+.voice-debug-clear {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+}
+
+.voice-debug-list {
+  margin: 0;
+  padding: 4px 10px 8px;
+  list-style: none;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.voice-debug-row {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.voice-debug-when {
+  display: inline-block;
+  min-width: 3.6em;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.voice-debug-detail {
+  margin-top: 2px;
+  padding-left: 3.6em;
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* What was heard is the line worth finding at a glance, and an error is the
+   line worth finding without looking. */
+.voice-debug-row[data-kind="heard"] .voice-debug-detail { color: var(--ink); font-weight: 600; }
+.voice-debug-row[data-kind="said"] .voice-debug-detail { color: var(--ok); }
+.voice-debug-row[data-kind="tool"] .voice-debug-detail { color: var(--warn); }
+.voice-debug-row[data-kind="error"] { background: var(--danger-bg); }
+.voice-debug-row[data-kind="error"] .voice-debug-what { color: var(--danger); font-weight: 700; }
+.voice-debug-row[data-kind="did"] .voice-debug-what { color: var(--accent); }
+
+/* ------------------------------------------------- something is happening
+ *
+ * Owner: "if something is loading show loader."
+ *
+ * A button that has been tapped and is waiting on a shop server looks exactly
+ * like a button that did nothing, which is what makes somebody tap it again.
+ * Every control that goes to the server wears this while it waits.
+ */
+.is-working {
+  position: relative;
+  color: transparent !important;
+  pointer-events: none;
+}
+
+.is-working::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  color: var(--on-accent);
+  animation: is-working-spin 0.7s linear infinite;
+}
+
+/* On a pale button the ring has to read against the paper, not the accent. */
+.assistant-way.is-working::after,
+.placed-step.is-working::after,
+.assistant-more-item.is-working::after,
+.placed-cancel.is-working::after {
+  color: var(--ink-soft);
+}
+
+@keyframes is-working-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .is-working::after { animation: none; opacity: 0.6; }
+}
+
+
+/* ==================================================================
+   THE MENU IS ONE PAGE, GROUPED.
+
+   The ordering page used to draw one category at a time, so a guest at
+   a table opened it and saw a single A5 ruled notebook under the words
+   "32 dishes" - whichever section sorted first, with the rest two taps
+   away behind a chip strip. The public menu had always done this the
+   right way. Owner: "its grouping the menu and easy to navigate. add
+   it here too."
+
+   A heading is a place, so it has to survive being scrolled to: the
+   chips jump here, and a heading that lands under the sticky header is
+   a jump that looks like it did nothing.
+   ================================================================== */
+
+.menu-section {
+  scroll-margin-top: 96px;
+}
+
+.menu-section + .menu-section {
+  margin-top: 20px;
+}
+
+/*
+ * The section owns the space under its last card, not the grid.
+ *
+ * .product-grid carries a 12px bottom padding from when it was the only
+ * thing on the page. Inside a section that stacks with the section's own
+ * margin AND the card's 18px bottom padding, and the gap between a dish
+ * and the next heading came out near 50px - which on a phone is a screen
+ * of nothing every few dishes. Owner, on an earlier round of this page:
+ * "screen now reduce empty spaces."
+ */
+.menu-section .product-grid {
+  padding-bottom: 0;
+}
+
+.menu-section-name {
+  margin: 0;
+  padding: 0 2px;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  /* Jumped to, and focused for a screen reader when it is. The ring is
+     the browser's own on keyboard focus only, so a tap does not leave a
+     box drawn around a heading nobody is editing. */
+  scroll-margin-top: 96px;
+}
+
+.menu-section-name:focus {
+  outline: none;
+}
+
+.menu-section-name:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.menu-section-count {
+  margin: 2px 0 10px;
+  padding: 0 2px;
+  font-size: 12.5px;
+  opacity: 0.62;
+}
+
+/* ------------------------------------------------------------------
+   BADGES.
+
+   At most two on a card - see badgesFor(). What the shop says about a
+   dish and what its numbers earned are different kinds of statement,
+   so they do not look alike: the shop's own recommendation is filled
+   and warm, a health claim is outlined and quiet.
+
+   The claim is outlined on purpose. A filled green pill saying "Heart
+   healthy" is advertising; an outline reads as a fact about the food,
+   which is what it is, and what the numbers behind it will support.
+   ------------------------------------------------------------------ */
+
+.product-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 5px 0 0;
+}
+
+.dish-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+/* The shop's own recommendation: ink, with the text punched out of it.
+   The ordering pages are one ink-on-paper system, so this borrows the
+   accent the rest of the page already uses rather than introducing the
+   only second hue on the screen. */
+.dish-badge-mark {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+/* A health claim is outlined, not filled. A solid green pill reading
+   "Heart healthy" is advertising; an outline reads as a fact about the
+   food, which is what it is and all the numbers behind it support. */
+.dish-badge-claim {
+  border: 1px solid var(--line-strong);
+  color: var(--ink-soft);
+}
+
+/* A long badge must not push a price off a narrow card. */
+@media (max-width: 380px) {
+  .dish-badge {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+
+/* ==================================================================
+   THE MENU BUTTON, and the contents page it opens.
+
+   A chip strip is fine for five sections and real work for twenty-nine.
+   On a live shop the strip runs Soup, Starters Veg, Salad, Prawn
+   Starters, Squid Starters, Crab Starters - and a guest who wants
+   dessert is swiping a chip at a time to find out what the place even
+   serves. This answers "what do they have here" in one tap.
+
+   The only floating control on the page, so there is nothing for it to
+   compete with, and it sits clear of the bill bar rather than over it.
+   ================================================================== */
+
+.menu-index-btn {
+  position: fixed;
+  right: 16px;
+  /* Above the bill bar when there is one; the bar is fixed at the bottom
+     and about 72px tall, plus the phone's own home indicator. */
+  bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+  z-index: 40;
+
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 44px;
+  padding: 10px 18px 10px 15px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  /* The one shadow on the page: it is the only thing that floats, and
+     without one it reads as a button printed on the dish behind it. */
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22);
+  cursor: pointer;
+}
+
+.menu-index-btn svg {
+  width: 17px;
+  height: 17px;
+  flex: none;
+}
+
+.menu-index-btn:active {
+  transform: translateY(1px);
+}
+
+/* An empty bill bar is hidden, so the button drops to where the bar was. */
+.cart-footer.is-empty ~ .menu-index-btn {
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+}
+
+/* ------------------------------------------------- the contents page */
+
+.menu-index .sheet-body {
+  padding-bottom: 8px;
+}
+
+/*
+ * TILES, NOT A LIST OF WORDS.
+ *
+ * Owner: "menu looks like shit... if possible have category image ( menu ).
+ * show some image as ccategory. how many items inside."
+ *
+ * A column of section names is a table of contents, which is accurate and
+ * dull; a diner scanning for "what do they have" reads pictures faster than
+ * words. Two across, so a fourteen-section menu is two screens rather than
+ * five, and every tile carries its count - which is the thing that says
+ * whether a section is worth the trip.
+ */
+.menu-index-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr));
+  gap: 10px;
+  margin-top: 6px;
+}
+
+/*
+ * A row per section: the name, and how many dishes are under it.
+ *
+ * The count is the point of reading this rather than scrolling. "Desserts
+ * 2 items" tells somebody whether it is worth the trip before they make
+ * it, which is the whole job of a contents page.
+ */
+.menu-index-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding: 0 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 15px;
+  text-align: left;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.menu-index-row:active {
+  background: var(--raised);
+}
+
+/* A band, not a square: a whole menu of squares is a lot of picture and
+   very little name, and the name is what is being chosen. */
+.menu-index-pic {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: var(--raised);
+  overflow: hidden;
+}
+
+.menu-index-pic img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* No photograph anywhere in the section: the emoji almost every dish gets
+   from its own name, or the section's initial. Never a broken image. */
+.menu-index-emoji,
+.menu-index-letter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 30px;
+  line-height: 1;
+}
+
+.menu-index-letter {
+  color: var(--ink-soft);
+  font-weight: 700;
+}
+
+.menu-index-words {
+  display: block;
+  padding: 0 10px;
+}
+
+.menu-index-name {
+  display: block;
+  min-width: 0;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.menu-index-count {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+
+/* ==================================================================
+   FILTERS.
+
+   Owner: "filter options. not too annoying make it very very
+   professional and neat."
+
+   The not-annoying part is mostly not CSS: a filter is offered only
+   where at least one dish on this menu carries it, so a shop that has
+   entered nothing gets no button at all. What is left for the styling
+   is to keep the sheet readable at a glance - the count beside each
+   option is the thing worth reading, so it is never allowed to be the
+   part that wraps away.
+   ================================================================== */
+
+.order-tool-icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+/* How many filters are on, on the button, so a narrowed menu can never
+   be mistaken for the whole one. The risk of a filter is forgetting it
+   is on and deciding the kitchen has run out of food. */
+.order-tool-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.order-tool[aria-pressed="true"] .order-tool-count {
+  background: var(--on-accent);
+  color: var(--accent);
+}
+
+.filters-group + .filters-group {
+  margin-top: 18px;
+}
+
+.filters-group-name {
+  margin: 0 0 9px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.filters-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/*
+ * The pill IS the checkbox. The native box is hidden rather than
+ * removed, so the label still toggles it, the keyboard still reaches
+ * it, and a screen reader is still told what it is - all of which a div
+ * with a click handler throws away.
+ */
+.filters-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 8px 13px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.2;
+  cursor: pointer;
+  user-select: none;
+}
+
+.filters-pill input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.filters-pill b {
+  flex: none;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.filters-pill[data-on="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.filters-pill[data-on="true"] b {
+  color: var(--on-accent);
+  opacity: 0.75;
+}
+
+.filters-pill input:focus-visible + span {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+
+/*
+ * The foot says what pressing it does.
+ *
+ * A tick narrows the menu straight away behind the sheet, so this is
+ * confirmation of something already visible rather than a commit step -
+ * and the number on it is the answer to "what will this leave me".
+ */
+.filters-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.filters-clear {
+  flex: none;
+  padding: 10px 4px;
+  border: 0;
+  background: none;
+  color: var(--ink-soft);
+  font-size: 14px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.filters-apply {
+  flex: 1 1 auto;
+}
+
+/* Nothing left to show is not a button worth pressing. */
+.filters-apply:disabled {
+  opacity: 0.5;
+}

@@ -1,0 +1,10 @@
+node_modules
+coverage
+uploads
+public
+*.min.js
+
+# Reference data, not code. Nothing under src/json is prettier-formatted, and
+# the hook rewriting currency.json end to end (1,800 lines) to change one
+# symbol is the whole-file rewrite .prettierignore exists to prevent.
+src/json

@@ -1,0 +1,377 @@
+<div class="vertical-layout page_loader" id="receivings_new" style="display: none">
+    <!-- Start Containerbar -->
+    <div id="containerbar">
+        <!-- Start Breadcrumbbar -->                    
+        <div class="breadcrumbbar crumbbar_padding">
+            <div class="row align-items-center">
+                <div class="col-md-8 col-lg-8">
+                    <h4 class="page-title break_title"><span class="purchase-tittle-change"><lang class="lang_addvariant_title">New</lang></span> <lang class="lang_purchase"> Purchase </lang> </h4>
+                </div>
+            </div>          
+        </div>
+        <!-- End Breadcrumbbar -->
+
+        <!-- Start Contentbar -->    
+        <div class="contentbar"> 
+            <form class='receiving_page' enctype="multipart/form-data" method="post" name="receiving_image_upload_form"
+                  id="receiving_add">
+                <!-- Start row -->
+                <div class="row">
+                    <!-- Start col -->
+                    <div class="col-lg-7 col-xl-7">
+                        <div class="tab-content loader-edit-receiving loader-add-receiving loader-low_stock" id="v-pills-tabContent">
+                            <!-- My Wallet Start -->
+                            <div class="card m-b-30">
+                                <!-- Supplier first (owner: "move Supplier above item input
+                                     box... move expected date next to supplier") - the
+                                     picker opens right here, above the lines it feeds. -->
+                                <div class="p-form-top receving-return-hide">
+                                    <div class="row">
+                                        <div class="form-group col-lg-8 col-xl-8 clear-supplier-error mb-0">
+                                            <label class="form-control-placeholder" for="receiving_add_supplier_name">
+                                                <lang class="lang_newsupplier_title">Supplier</lang>
+                                                <span class="text-danger">*</span>
+                                            </label>
+                                            <div class="input-group">
+                                                <input type="text" class="form-control" placeholder="Choose a Supplier" data-t-placeholder="lang_choose_a_supplier_2" id="receiving_add_supplier_name"
+                                                       name="receiving_add_supplier_name" minlength="3" maxlength="20" aria-label="Search" data-t-aria-label="lang_search" aria-describedby="button-addon-supplier" autocomplete="off">
+                                                <div class="input-group-append">
+                                                    <a data-module="supplier" data-access="write" id="button-addon-supplier" class="btn btn-success-rgba" href="#/receivings/suppliers/new"><i class="feather icon-plus" data-toggle="tooltip" title="Add new supplier easily" data-t-title="lang_add_new_supplier_easily"></i>
+                                                    </a>
+                                                </div>
+                                                <input type="hidden" class="form-control clear-receiving-text"
+                                                       id="receiving_add_supplier_id"
+                                                       name="receiving_add_supplier_id">
+                                                <input type="hidden" class="form-control clear-receiving-text"
+                                                       id="receiving_add_supplier_address"
+                                                       name="receiving_add_supplier_address">
+                                                <input type="hidden" class="form-control clear-receiving-text"
+                                                       id="receiving_add_supplier_phone"
+                                                       name="receiving_add_supplier_phone">
+                                                <input type="hidden" class="form-control clear-receiving-text"
+                                                       id="receiving_add_supplier_email"
+                                                       name="receiving_add_supplier_email">
+                                                <input type="hidden" class="form-control clear-receiving-text"
+                                                       id="receiving_add_supplier_state"
+                                                       name="receiving_add_supplier_state">
+                                                <input type="hidden" class="form-control clear-receiving-text"
+                                                       id="receiving_add_supplier_gst_type"
+                                                       name="receiving_add_supplier_gst_type">
+                                                <input type="hidden" class="form-control clear-receiving-text"
+                                                       id="receiving_add_supplier_gst_number"
+                                                       name="receiving_add_supplier_gst_number">
+                                            </div>
+                                        </div>
+                                        <div class="form-group col-lg-4 col-xl-4 mb-0" id="receiving_expected_wrap">
+                                            <label class="form-control-placeholder" for="receiving_expected_date"
+                                                   data-toggle="tooltip" title="When the order is due - shown while the status is Ordered" data-t-title="lang_when_the_order_is_due_shown_while_the_stat">
+                                                <lang class="lang_expected_on">Expected on</lang>
+                                            </label>
+                                            <input type="date" id="receiving_expected_date"
+                                                   class="form-control border-control clear-receiving-text"
+                                                   aria-label="Expected delivery date" data-t-aria-label="lang_expected_delivery_date" />
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="chat-list">
+                                    <div class="chat-search">
+                                        <div class="input-group">
+                                            <input type="search" class="form-control osk-trigger" placeholder="Find item name,sku or barcode" data-t-placeholder="lang_find_item_name_sku_or_barcode" name="receiving_add_item_name" id="receiving_add_item_name" aria-label="Search" data-t-aria-label="lang_search" aria-describedby="button-addon3">
+                                            <div class="input-group-append">
+                                                <span class="btn" id="button-addon3"><i class="feather icon-search"></i></span>
+                                            </div>
+                                        </div>
+                                        <!-- Loyverse study L2: fill the order from the chosen
+                                             supplier instead of typing every line. -->
+                                        <small class="text-muted d-block mt-1" id="receiving_autofill_row">
+                                            <lang class="lang_autofill_hint">Fill from supplier:</lang>
+                                            <a href="javascript:void(0)" onclick="PosnicPro.receivings.autofillFromSupplier(false);">
+                                                <lang class="lang_autofill_all">all items</lang>
+                                            </a>
+                                            ·
+                                            <a href="javascript:void(0)" onclick="PosnicPro.receivings.autofillFromSupplier(true);">
+                                                <lang class="lang_autofill_low">low-stock items</lang>
+                                            </a>
+                                        </small>
+                                    </div>
+                                </div>
+                                <!--start row-->
+                                <div class="col-sm-6 col-md-12 col-lg-12" id="receiviing_img_hide">
+                                    <img src="static/images/general/wallet.svg" class="img-fluid" style="opacity: 0.6;width: 100%;height: 250px;" alt="wallet" loading="lazy" decoding="async">
+                                </div>
+                                <!-- My Wishlist Start -->
+                                <div class="wishlist-box">
+                                    <div class="table-responsive">
+
+                                        <table class="table table-borderless" id="receiving_print">
+                                            <thead id="receving_tab_list">
+                                                <tr>
+                                                    <th scope="col" id="return_show_text" style="display: none;"><lang class="lang_selectreturn">Select To Return</lang></th>
+                                            <th scope="col"><lang class="lang_itemcut_title">Items</lang></th>
+                                            <th scope="col" class="text-center"><lang class="lang_qty_title">Qty</lang></th>
+                                            <th scope="col" class="text-center"><lang class="lang_unit_title">Unit</lang></th>
+                                            <th scope="col" class="text-center"><lang class="lang_cost_title">Cost</lang></th>
+                                            <th scope="col" class="text-center show-hide-exc-tax" style="display:none;"><lang class="lang_exclusive_tax_2">Exclusive (Tax)</lang></th>
+                                            <th scope="col" class="text-right"><lang class="lang_total_title">Total</lang></th>
+                                            <th scope="col" id="return_hide_text" style="display: none;"><lang class="lang_action">Action</lang></th>
+
+                                            </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr class="cart_content_area" id='cart_content_area'>
+                                                    <td colspan='5'>
+                                                        <div class='text-center'>
+                                                            <h2 class="text-primary"><lang class="lang_receive_empty">Receiving Order Empty</lang></h2>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                        <h4 class="text-center" id="show-already-return-table" style="display: none;"><hr><lang class="lang_already_returned">Already Returned</lang></h4>
+                                        <div id="receiving_return_view_table">
+
+                                        </div>
+                                    </div>
+                                </div>
+                                <!-- My Wishlist End -->
+                            </div>
+                            <!-- My Wallet End -->
+                        </div>                        
+                    </div>
+                    <!-- End col -->
+                    <!--start col-->
+                    <div class="col-lg-5 col-xl-5">
+                        <!--start checkout--> 
+                        <!-- The details card, compact on purpose (owner: "i need to
+                             scroll down for the details" - no more): supplier and the
+                             document facts aligned at the top, hints as tooltips
+                             instead of paragraphs. Status is a select with
+                             international labels; the stored values stay Open and
+                             Received so nothing downstream moves. -->
+                        <div class="card m-b-5 receving-return-hide">
+                            <div class="card-body">
+                                <div class="row">
+                                    <div class="form-group col-lg-6 col-xl-6">
+                                        <label class="form-control-placeholder" for="receiving_add_date">
+                                            <lang class="lang_bill_date">Bill date</lang>
+                                            <span class="text-danger">*</span>
+                                        </label>
+                                        <input type="text" class="form-control border-control commonDate" placeholder="Enter the date" data-t-placeholder="lang_enter_the_date_2"
+                                               id="receiving_add_date" name="receiving_add_date">
+                                    </div>
+                                    <div class="form-group col-lg-6 col-xl-6 receving-return-hide">
+                                        <label class="form-control-placeholder" for="receiving_status_select">
+                                            <lang class="lang_status_title">Status</lang>
+                                        </label>
+                                        <select class="form-control border-control custom-select receiving-status"
+                                                id="receiving_status_select" aria-label="Purchase status" data-t-aria-label="lang_purchase_status">
+                                            <option value="Open" selected><lang class="lang_po_ordered">Ordered</lang></option>
+                                            <option value="Received"><lang class="lang_po_received">Received</lang></option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div class="row">
+                                    <div class="form-group col-lg-6 col-xl-6">
+                                        <label class="form-control-placeholder" for="receiving_add_payment_mode">
+                                            <lang class="lang_paymentmode">Payment Mode</lang>
+                                        </label>
+                                        <select class="form-control border-control custom-select" name="receiving_add_payment_mode"
+                                                id='receiving_add_payment_mode' aria-label="Receiving add payment mode" data-t-aria-label="lang_receiving_add_payment_mode">
+                                        </select>
+                                    </div>
+                                    <div class="form-group col-lg-6 col-xl-6">
+                                        <label class="form-control-placeholder" for="receiving_invoice_total_declared">
+                                            <lang class="lang_invoice_total_declared">Invoice total (incl. tax)</lang>
+                                        </label>
+                                        <input type="number" step="0.01" min="0" id="receiving_invoice_total_declared"
+                                               class="form-control border-control clear-receiving-text"
+                                               placeholder="As printed on the supplier's invoice" data-t-placeholder="lang_as_printed_on_the_supplier_s_invoice"
+                                               oninput="PosnicPro.receivings.invoiceTotalCheck();" />
+                                        <small class="form-text" id="receiving_invoice_total_note"></small>
+                                    </div>
+                                </div>
+
+                                <div class="row">
+                                    <div class="form-group col-lg-12 col-xl-12">
+                                        <label class="form-control-placeholder" for="receiving_add_payment_description">
+                                            <lang class="lang_paymentnote_title">Payment Note</lang>
+                                        </label>
+                                        <textarea name="receiving_add_payment_description"
+                                                  id='receiving_add_payment_description' maxlength="500" rows="1"
+                                                  class="form-control border-control" placeholder="Enter payment note" data-t-placeholder="lang_enter_payment_note"></textarea>
+                                    </div>
+                                </div>
+
+                                <div class="row">
+                                    <div class="form-group col-lg-6 col-xl-6 mb-0">
+                                        <input type="checkbox" class="custom-control-input" id="exclusive_tax" name="exclusive_tax">
+                                        <label class="custom-control-label" for="exclusive_tax"
+                                               data-toggle="tooltip" title="Item prices are before tax; tax is added on top" data-t-title="lang_item_prices_are_before_tax_tax_is_added_on">
+                                            <lang class="lang_exclusive_tax">Exclusive Tax</lang>
+                                        </label>
+                                    </div>
+                                    <div class="form-group col-lg-6 col-xl-6 mb-0 receving-return-hide">
+                                        <input type="checkbox" id="receiving_itc_eligible" checked />
+                                        <label for="receiving_itc_eligible"
+                                               data-toggle="tooltip" title="Switch off for composition-scheme suppliers or blocked credits" data-t-title="lang_switch_off_for_composition_scheme_supplier">
+                                            <span id="receiving_itc_label"><lang class="lang_itc_eligible">Input credit claimable</lang></span>
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <!-- Charges and the attachment share one row so the whole
+                                     form stays on one screen (owner: "make sure i dont
+                                     need to scroll and enter all in one screen"). -->
+                                <div class="row mt-2 receving-return-hide"
+                                     style="border-top: 1px solid var(--theme-border-color, #eef1f4); padding-top: 10px;">
+                                    <div class="col-lg-6 col-xl-6">
+                                        <div class="d-flex align-items-center">
+                                            <label class="mb-0 text-muted" style="font-size:12px;"
+                                                   data-toggle="tooltip" title="Freight, loading and the rest - added to the total, never to item cost or tax" data-t-title="lang_freight_loading_and_the_rest_added_to_the">
+                                                <lang class="lang_additional_charges">Additional charges</lang>
+                                            </label>
+                                            <a class="ml-auto" href="javascript:void(0)" onclick="PosnicPro.receivings.addChargeRow();">
+                                                <i class="feather icon-plus mr-1"></i><lang class="lang_add_charge">Add charge</lang>
+                                            </a>
+                                        </div>
+                                        <div id="receiving_charges_rows"></div>
+                                    </div>
+                                    <div class="col-lg-6 col-xl-6">
+                                        <input type="hidden" id="item_upload_receiving_status" value="no">
+                                        <!-- One chip, not three labels (owner: "make it short
+                                             and crisp attachment stuff"). -->
+                                        <label class="p-attach" for="receiving_upload_image" data-toggle="tooltip"
+                                               title="Supplier invoice or payment proof - image or PDF, kept with this purchase" data-t-title="lang_supplier_invoice_or_payment_proof_image_or">
+                                            <i class="feather icon-paperclip"></i><span><lang class="lang_attach_invoice">Attach invoice</lang></span>
+                                        </label>
+                                        <input type="file" name="ImageReceiving[]" id="receiving_upload_image" class="d-none"
+                                               onchange="PosnicPro.receivings.receiving_image_preview(this)"
+                                               accept=".gif, .jpg, .png, .jpeg, .bmp, .pdf" multiple>
+                                        <input type="hidden" name="receiving_logo" id="receiving_logo">
+                                        <div id="display-preview"></div>
+                                        <div id="receving_image_count" style="display: none;">0</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!--end checkout--> 
+
+
+
+                        <!--start col-->
+                        <div class="card">
+                            <!--start row col-->
+                            <div class="cart-body loader-receiving">
+                                <div class="cart-container">
+                                    <div class="row">
+                                        <div class="col-md-12 col-lg-12 col-xl-12">
+                                            <div class="order-total table-responsive ">
+                                                <table class="table table-borderless text-center">
+                                                    <tbody>
+                                                        <tr>
+                                                            <td class="text-left font-17"><b><lang class="lang_subtotal_title">Sub Total :</lang></b></td>
+                                                            <td class="text-right font-17">
+                                                                <b><span class="display-currency"></span> <span class="add-sales-clear-text" id="receiving_add_subtotal_amount">0.00</span></b>
+                                                            </td>
+                                                        </tr>
+                                                        <tr>
+                                                            <td class="text-left"><lang class="lang_tax">Tax :</lang></td>
+                                                    <td class="text-right"> + <span class="tax-receiving-value">0.00</span></td>
+                                                    </tr>                                                      
+                                                    <tr id="receiving_charges_row" style="display:none;">
+                                                        <td class="text-left"><lang class="lang_charges_title">Charges :</lang></td>
+                                                        <td class="text-right"> + <span class="charges-receiving-value">0.00</span></td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td class="f-w-7 font-18 text-left"><b><lang class="lang_grandamount">Grand Total :</lang></b></td>
+                                                        <td class="f-w-7 font-18 text-right"><b><span class="display-currency"></span> <span class="add-sales-clear-text" id='receiving_add_total_amount'>0.00</span></b></td>
+                                                    </tr>
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="cart-footer text-center">                                        
+                                        <button type="button" class="btn btn-outline-secondary my-1" id="clearReceiving" onclick="return PosnicPro.resetForm('receiving');" style="display: none;"><i class="feather icon-refresh-ccw mr-2"></i><lang class="lang_clear_title"> Clear</lang>                                           
+                                        </button>  
+                                        <a href='#/purchaseorders' class="btn btn-outline-danger my-1"><i class="feather icon-x-circle mr-2"></i><lang class="lang_close_title"> Close</lang></a>
+                                        <button type="submit" id="receiving_submit" name="receiving_submit" class="btn btn-outline-primary my-1"><i class="feather icon-save mr-2"></i><span id="returnn_button" class="changeReceivingText"><lang class="lang_save_title"> Save</lang></span>
+                                        </button>
+                                    </div>
+                                    <div class="row mt-5" id="show_last_created_receiving" style="display: none;">
+                                        <div class="col-md-12 col-lg-12 col-xl-12">
+                                            <div class="text-center">
+                                                <h6><lang class="lang_saved_a_stock_entry">Saved a stock entry.</lang> <a href="#" id="last_created_receiving"><lang class="lang_open_it">Open it</lang></a></h6>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>                              
+                            <!--end row col-->
+                        </div>
+                        <!--end col-->
+                    </div>
+                    <!--end col-->
+
+                    <input type="hidden" id="row_id" name="row_id" value="">
+                    <input type="hidden" id="sale_return_item_id" name="row_id" value="">
+                    <input type="hidden" id="return_from_sales" name="return_from_sales" value="no">
+                    <input type='hidden' name='receiving_total' id='receiving_total'>
+                    <input type="hidden" class="form-control input-lg" id="receiving_add_selling_price"
+                           name="receiving_add_selling_price">
+                    <input type="hidden" class="form-control" id="receiving_add_available_stock" name="receiving_add_available_stock">
+                    <input type="hidden" class="form-control input-lg writeblock" id="receiving_add_line_total"
+                           name="receiving_add_line_total">
+
+                </div>
+                <!-- End row -->    
+            </form>
+            <!--end form-->
+        </div>
+        <!-- End Contentbar -->
+    </div>
+    <!-- End Containerbar -->
+
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

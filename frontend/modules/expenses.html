@@ -1,0 +1,75 @@
+<!-- page moved into Config > Modules (settings_write.html) -->
+<!-- End Containerbar -->
+<!--start expense view model-->
+<div class="modal fade close_on_esc" id="expenses_view" tabindex="-1" role="dialog" aria-hidden="true">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content loader-view-expense">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <lang class="lang_expensedetail_title">Expense Details</lang>
+                </h5>
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close" data-t-aria-label="lang_close_title">
+                    <span aria-hidden="true"><lang class="lang_text">&times;</lang></span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="row justify-content-center">
+                    <div class="row">
+                        <div class="col-lg-12">
+                            <div class="table-responsive">
+                                <table class="table table-borderless mb-0">
+                                    <tbody>
+                                        <tr>
+                                            <th scope="row"><lang class="lang_date_title"> Date </lang> :</th>
+                                    <td><span id="expenses_view_date"></span></td>
+                                    </tr>
+                                    <tr>
+                                        <th scope="row"><lang class="lang_amount_title"> Amount</lang> :</th>
+                                    <td><span id="expenses_view_amount"></span></td>
+                                    </tr>
+                                    <tr>
+                                        <th scope="row"><lang class="lang_type_title"> Type</lang> :</th>
+                                    <td><span id="expenses_view_type"></span></td>
+                                    </tr>
+                                    <tr>
+                                        <th scope="row"><lang class="lang_category_title">Category</lang> :</th>
+                                    <td class="address-text-wrap"><span id="expenses_view_category"></span></td>
+                                    </tr>
+                                    <tr>
+                                        <th scope="row"><lang class="lang_recipient_title"> Recipient Name</lang> :</th>
+                                    <td class="address-text-wrap"><span id="expenses_view_recipientname"></span></td>
+                                    </tr>
+                                    <tr>
+                                        <th scope="row"><lang class="lang_approved_by"> Approved by</lang> :</th>
+                                    <td class="address-text-wrap"><span id="expenses_view_approvedby"></span></td>
+                                    </tr>
+                                    <tr>
+                                        <th scope="row"><lang class="lang_expencenote_title"> Expenses Note</lang> :</th>
+                                    <td class="address-text-wrap"><span id="expenses_view_description"></span></td>
+                                    </tr>
+                                    <tr>
+                                        <th scope="row"><lang class="lang_createdate_title"> Created Date</lang> :</th>
+                                    <td><span id="expenses_view_created_date"></span></td>
+                                    </tr>
+                                    <tr>
+                                        <th scope="row"><lang class="lang_update_title"> Updated Date</lang> :</th>
+                                    <td><span id="expenses_view_updated_date"></span></td>
+                                    </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-danger" data-dismiss="modal">
+                    <i class="feather icon-x-circle mr-2"></i>
+                    <lang class="lang_close_title"> Close</lang>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+<!--end expense view model-->
+<!-- end  -->

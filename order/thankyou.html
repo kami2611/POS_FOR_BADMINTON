@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+    <!-- The browser chrome follows the page, so a dark phone does not
+         frame a dark page in a white bar. -->
+    <meta name="theme-color" content="#0b0f19" media="(prefers-color-scheme: dark)">
+    <!--
+        WHERE EVERY RELATIVE PATH ON THIS PAGE POINTS.
+        A printed code can be three segments deep - /order/AZ100/venue/RC/123
+        for a hotel room - and without this the browser looks for each asset
+        under /order/AZ100/venue/, a directory that does not exist. The page
+        loads and shows nothing, which is the worst kind of broken: a blank
+        screen with no error anybody sees.
+        Pinned to the mount rather than left to the arriving URL, so one file
+        serves the shop address, a table and a venue alike.
+    -->
+    <base href="/order/" />
+    <title>Order placed</title>
+    <link href="assets/order.css?v=20260912-design" rel="stylesheet">
+    <script src="assets/i18n.js?v=20260912-design"></script>
+    <script src="assets/jquery-3.7.1.min.js?v=20260912-design"></script>
+    <!-- The receipt's PDF library, served by the shop like everything else
+         on this page: the page's own policy allows no other host, and a
+         kiosk on the shop's wifi may have no other host to reach. -->
+    <script src="assets/html2pdf.bundle.min.js?v=20260912-design"></script>
+    <script src="config.js?v=20260912-design"></script>
+    <!-- Says so when the shop is slow to answer, on every request this
+         page makes. Loaded before anything that fetches. assets/working.js -->
+    <script src="assets/working.js?v=20260912-design"></script>
+    <link href="assets/channel-state.css?v=20260912-design" rel="stylesheet">
+    <script src="assets/channel-state.js?v=20260912-design"></script>
+    <script src="assets/service-point.js?v=20260912-design"></script>
+    <script src="assets/shop-address.js?v=20260912-design"></script>
+    <!-- The bell an order makes when the kitchen takes it. Synthesised,
+         so there is no file to fetch and nothing for the CSP to allow. -->
+    <script src="assets/ting.js?v=20260912-design"></script>
+</head>
+
+<body>
+    <!--
+        THE TOKEN IS THE PAGE. It is the one thing the customer has to carry
+        to the counter, so it is the largest thing on the screen; everything
+        else is quieter than it. "Payment Successful" in red is gone - red is
+        for things that went wrong.
+    -->
+    <main class="done">
+        <div class="done-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M5 12l5 5L20 7"></path></svg>
+        </div>
+        <h1 id="done-title">Order placed</h1>
+        <p class="lead" id="done-lead">The kitchen has it. Show this at the counter.</p>
+        <p class="lead" id="done-pay" hidden></p>
+
+        <div class="token">
+            <span class="token-label">Your token</span>
+            <span class="token-number" id="tokenId">--</span>
+        </div>
+        <p class="order-time">Placed <span id="orderTime">--</span></p>
+
+        <!--
+            WHERE IT HAS GOT TO: what has already happened, each with the
+            moment it happened, and nothing about what has not. There is no
+            row of greyed-out future steps here on purpose - nothing in the
+            product marks an order ready, and a ladder that stops on its
+            first rung reads as "stuck" to somebody whose food is cooking.
+            Filled in by watchTheOrder; see api/src/utils/order-progress.js.
+        -->
+        <section class="progress" id="progress" aria-live="polite" hidden>
+            <ol class="progress-trail" id="progress-trail"></ol>
+            <p class="progress-next" id="progress-next" hidden></p>
+        </section>
+
+        <!--
+            PAY NOW, where most customers in India would rather: their own app,
+            the shop's address and the amount already in it. Shown only while
+            the order is unpaid and only where the shop has given an address.
+            Nothing here confirms anything - the counter does that.
+        -->
+        <section class="pay-upi" id="pay-upi" hidden>
+            <p class="pay-upi-amount" id="pay-upi-amount"></p>
+            <a class="btn-primary pay-upi-go" id="pay-upi-any" href="#" rel="noopener">Pay by UPI</a>
+            <p class="pay-upi-apps">
+                <a href="#" id="pay-upi-gpay" rel="noopener">Google Pay</a>
+                <a href="#" id="pay-upi-phonepe" rel="noopener">PhonePe</a>
+                <a href="#" id="pay-upi-paytm" rel="noopener">Paytm</a>
+            </p>
+            <p class="pay-upi-note">Tell the counter once you have paid. They mark it, and your bill appears here.</p>
+        </section>
+
+        <!-- A bill is a record of money that has changed hands. This appears
+             when the shop has marked the order paid, and not before. -->
+        <button type="button" class="btn-primary done-bill" id="done-bill" hidden>Download the bill</button>
+
+        <div class="button-group">
+            <button type="button" class="btn-primary" onclick="clearReceiptAndGo('products.html')">Order more</button>
+            <button type="button" class="btn-secondary" onclick="window.location.href='history.html'">Your orders</button>
+        </div>
+    </main>
+
+    <!--
+        The receipt, built but not shown: no money has changed hands yet, so
+        there is nothing to give a customer a bill for. It is filled in as
+        the page loads so that the shop marking the order paid has something
+        to offer immediately.
+    -->
+    <section class="receipt-section" aria-label="Receipt" hidden>
+        <div class="center" id="branch-name"><strong>POS</strong></div>
+        <div class="center">Token <strong><span id="token-id"></span></strong></div>
+        <div class="center">Date <strong><span id="orderDate">--</span></strong></div>
+        <div class="receipt-line"></div>
+        <div class="center">
+            <div>Order <strong id="orderTypePrint">DINE IN</strong> &middot; Paid by <strong id="paymentTypePrint">Upi</strong></div>
+        </div>
+        <div class="receipt-line"></div>
+
+        <div id="items"></div>
+
+        <div class="receipt-line"></div>
+
+        <div class="totals">
+            <div class="item"><span>Subtotal</span><span><strong id="subtotal"></strong></span></div>
+            <div class="item"><span>Discount</span><span><strong id="discount"></strong></span></div>
+            <div class="item"><span>Tax</span><span><strong id="tax"></strong></span></div>
+            <div class="item" id="fee-row" hidden><span id="fee-label">Delivery</span><span><strong id="fee"></strong></span></div>
+            <div class="item"><span>Total</span><span><strong id="total"></strong></span></div>
+        </div>
+
+        <div class="receipt-line"></div>
+        <div class="center">Thank you. Visit again.</div>
+        <div class="powered">Powered by Posnic &middot; www.posnic.com</div>
+    </section>
+
+    <script src="assets/thankyou/script.js?v=20260912-design"></script>
+</body>
+</html>

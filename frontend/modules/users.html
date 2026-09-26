@@ -1,0 +1,63 @@
+<div class="vertical-layout page_loader" id="users" style="display: none">
+    <!-- Employees, built to LIST_PAGE_UX_STANDARD.md: standard header with
+         the Users/Roles tabs beside the title, filter strip on the header
+         line, one list card with the shared rhythm, numbered pagination.
+         A row click peeks the employee in place; Edit is the deliberate
+         act. The add/edit sidebar is unchanged. -->
+    <div id="containerbar">
+        <div class="breadcrumbbar crumbbar_padding">
+            <div class="row align-items-center row_filter">
+                <div class="col-auto d-flex align-items-center">
+                    <h4 class="page-title break_title mb-0 mr-3"><lang class="lang_user_title">Employees</lang></h4>
+                    <!-- Users and Roles are one place now: two tabs, one
+                         subject - styled like the Core Settings tabs. -->
+                    <ul class="nav nav-tabs users-roles-tabs">
+                        <li class="nav-item"><a class="nav-link active" href="#/users"><i class="feather icon-users mr-2"></i><lang class="lang_user_title">Employees</lang></a></li>
+                        <li class="nav-item"><a class="nav-link" data-module="user" data-access="write" href="#/roles"><i class="feather icon-shield mr-2"></i><lang class="lang_roles_title">Roles</lang></a></li>
+                    </ul>
+                </div>
+                <div class="col">
+                    <div class="lf-panel" id="users_filter_panel" style="display:none;"></div>
+                </div>
+                <div class="col-auto text-right">
+                    <div class="widgetbar" id="users_controls">
+                        <div class="btn-group">
+                        <button type="button" class="btn btn-primary-rgba dropdown-toggle" data-toggle="dropdown"
+                            aria-haspopup="true" aria-expanded="false" title="Export CSV" data-t-title="lang_export_csv" aria-label="Export CSV" data-t-aria-label="lang_export_csv">
+                            <i class="feather icon-share"></i>
+                        </button>
+                        <div class="dropdown-menu dropdown-menu-right">
+                            <a class="dropdown-item" href="javascript:void(0)" onclick="PosnicPro.users.exportCsv(); return false;"><lang class="lang_this_page_what_is_shown">This page (what is shown)</lang></a>
+                            <a class="dropdown-item" href="javascript:void(0)" onclick="PosnicPro.users.exportAllCsv(); return false;"><lang class="lang_everything_matching_the_filter">Everything matching the filter</lang></a>
+                        </div>
+                        </div>
+                        <button type="button" class="btn btn-primary-rgba lf-btn" id="users_filter_btn"
+                            data-toggle="tooltip" title="Filter employees" data-t-title="lang_filter_employees">
+                            <i class="feather icon-filter mr-2"></i><lang class="lang_filter">Filter</lang>
+                        </button>
+                        <a data-module="user" data-access="write" href="#/users/new"
+                            onclick="PosnicPro.users.addUserButton();"
+                            class="btn btn-primary-rgba user_new_shortcut" data-toggle="tooltip" title="New employee" data-t-title="lang_new_employee">
+                            <i class="feather icon-plus mr-2"></i><lang class="lang_addvariant_title">New</lang>
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="contentbar">
+        <div id="users_split">
+        <div class="card m-b-30 md-rail" id="users_list_card">
+            <div class="card-body">
+                <div id="users_list_rows" class="md-rail-rows text-muted"><lang class="lang_loading_employees">Loading employees ...</lang></div>
+                <div class="q-pager" id="users_list_paging"></div>
+            </div>
+        </div>
+            <div class="card m-b-30 md-detail" id="users_detail_card" style="display:none;">
+                <div id="users_doc"></div>
+            </div>
+        </div>
+    </div>
+</div>
+<!-- End Containerbar -->

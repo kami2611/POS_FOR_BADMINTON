@@ -1,0 +1,257 @@
+<div class="vertical-layout page_loader" id="customercategory" style="display: none">
+    <!-- Customer Categories, built to LIST_PAGE_UX_STANDARD.md: standard
+         header, one list card with the shared rhythm, numbered pagination.
+         A row click opens the category's details slide-over (its sales
+         activity lives there); the add/edit sidebar is unchanged. -->
+    <div id="containerbar">
+        <div class="breadcrumbbar crumbbar_padding">
+            <div class="row align-items-center row_filter">
+                <div class="col-auto">
+                    <h4 class="page-title break_title mb-0"><lang class="lang_customercategory_title">Customer Categories</lang></h4>
+                </div>
+                <div class="col">
+                    <div class="lf-panel" id="customercategory_filter_panel" style="display:none;"></div>
+                </div>
+                <div class="col-auto text-right">
+                    <div class="widgetbar" id="customercategory_controls">
+                        <div class="btn-group">
+                        <button type="button" class="btn btn-primary-rgba dropdown-toggle" data-toggle="dropdown"
+                            aria-haspopup="true" aria-expanded="false" title="Export CSV" data-t-title="lang_export_csv" aria-label="Export CSV" data-t-aria-label="lang_export_csv">
+                            <i class="feather icon-share"></i>
+                        </button>
+                        <div class="dropdown-menu dropdown-menu-right">
+                            <a class="dropdown-item" href="javascript:void(0)" onclick="PosnicPro.customercategory.exportCsv(); return false;"><lang class="lang_this_page_what_is_shown">This page (what is shown)</lang></a>
+                            <a class="dropdown-item" href="javascript:void(0)" onclick="PosnicPro.customercategory.exportAllCsv(); return false;"><lang class="lang_everything_matching_the_filter">Everything matching the filter</lang></a>
+                        </div>
+                        </div>
+                        <button type="button" class="btn btn-primary-rgba lf-btn" id="customercategory_filter_btn"
+                            data-toggle="tooltip" title="Filter customer categories" data-t-title="lang_filter_customer_categories">
+                            <i class="feather icon-filter mr-2"></i><lang class="lang_filter">Filter</lang>
+                        </button>
+                        <a data-module="customer" data-access="write" href="#/customercategory/new"
+                            class="btn btn-primary-rgba customercategory_new_shortcut" data-toggle="tooltip" title="New customer category" data-t-title="lang_new_customer_category">
+                            <i class="feather icon-plus mr-2"></i><lang class="lang_addvariant_title">New</lang>
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="contentbar">
+        <div id="customercategory_split">
+        <div class="card m-b-30 md-rail" id="customercategory_list_card">
+            <div class="card-body">
+                <div id="customercategory_list_rows" class="md-rail-rows text-muted"><lang class="lang_loading_customer_categories">Loading customer categories ...</lang></div>
+                <div class="q-pager" id="customercategory_list_paging"></div>
+            </div>
+        </div>
+            <div class="card m-b-30 md-detail" id="customercategory_detail_card" style="display:none;">
+                <div id="customercategory_doc"></div>
+            </div>
+        </div>
+    </div>
+</div>
+<!-- End Containerbar -->
+
+<div id="infobar-settings-sidebar-customercategory-details" class="infobar-settings-sidebar scroll_width" style="z-index: 1005 !important;">
+    <div class="infobar-settings-sidebar-head d-flex w-100 justify-content-between">
+        <h4 id="exampleModalCenterTitle"><lang class="lang_customercategorydetail_title">Customer Category Details</lang></h4>
+        <a href="javascript:void(0)" class="infobar-settings-close" data-id="customercategory">
+            <img src="static/images/svg-icon/close.svg" class="img-fluid menu-hamburger-close" alt="close" loading="lazy" decoding="async">
+        </a>
+    </div>
+    <div class="infobar-settings-sidebar-body">
+
+        <ul class="nav nav-tabs mb-3" id="defaultTab" role="tablist">
+            <li class="nav-item">
+                <a class="nav-link active" id="customercategory-detail-tab" data-toggle="tab" href="#customercategory_detail" role="tab" aria-controls="customercategory_detail" aria-selected="true"><i class="feather icon-list mr-1"></i><lang class="lang_item_details_title"> Details</lang></a>
+            </li>
+            <li class="nav-item" onclick="return PosnicPro.customercategorydetails.customercategorydetailsTable();">
+                <a class="nav-link" id="customercategory-sale-tab" data-toggle="tab" href="#customercategory_sale" role="tab" aria-controls="customercategory_sale" aria-selected="false"><i class="feather icon-activity mr-1"></i><lang class="lang_activity"> Activities</lang></a>
+            </li>
+        </ul>
+
+        <div class="custom-mode-setting loader-item" style="border:none;">            
+            <div class="slider-modal-body">
+                <div class="tab-content" id="defaultTabContent">
+
+                    <div class="tab-pane fade show active" id="customercategory_detail" role="tabpanel" aria-labelledby="customercategory-detail-tab">
+                        <div class="row">
+                            <div class="col-lg-8 col-xl-8 col-sm-12">
+                                <div class="row">
+                                    <div class="col-lg-9">
+                                        <div class="table-responsive">
+                                            <table class="table table-border table-striped mb-0">
+                                                <tbody>
+                                                    <tr>
+                                                        <th scope="row"><lang class="lang_name_title"> Name</lang> :</th>
+                                                <td><span id="customercategory_view_name"></span></td>
+                                                </tr>
+                                                <tr>
+                                                    <th scope="row"><lang class="lang_description_title"> Description</lang> :</th>
+                                                <td class="address-text-wrap"><span id="customercategory_view_description"></span></td>
+                                                </tr>
+                                                <tr>
+                                                    <th scope="row"><lang class="lang_createdate_title"> Created Date </lang> :</th>
+                                                <td><span id="customercategory_view_created_date"></span></td>
+                                                </tr>
+                                                <tr>
+                                                    <th scope="row"><lang class="lang_update_title"> Updated Date </lang> :</th>
+                                                <td><span id="customercategory_view_updated_date"></span></td>
+                                                </tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="tab-pane fade" id="customercategory_sale" role="tabpanel" aria-labelledby="customercategory-sale-tab">
+                        <div class="row">
+                            <div class="col-xs-12 col-sm-3 col-lg-3 col-md-12">
+                                <div class="portlet light slider-portlet-vh">
+                                    <div class="portlet-body">
+                                        <div class="row">
+                                            <div class="col-lg-12 col-xl-12">
+                                                <div class="card bg-secondary-rgba m-b-30">
+                                                    <div class="card-body">
+                                                        <div class="row align-items-center">
+                                                            <div class="col-12 text-center">
+                                                                <h5 class="card-title text-primary mb-1 font-16"><lang class="lang_noreturnds">Total Sales</lang></h5>
+                                                            </div>
+                                                            <div class="col-12 text-center">
+                                                                <span class="customercategory_details_saletotalvalue font-18">0</span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div class="card bg-secondary-rgba m-b-30">
+                                                    <div class="card-body">
+                                                        <div class="row align-items-center">
+                                                            <div class="col-12 text-center">
+                                                                <h5 class="card-title text-primary mb-1 font-16"> <lang class="lang_noitemsold">Total Items Sold</lang></h5>
+                                                            </div>
+                                                            <div class="col-12 text-center">
+                                                                <span class="customercategory_details_totalsale font-18">0</span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div class="card bg-secondary-rgba m-b-30">
+                                                    <div class="card-body">
+                                                        <div class="row align-items-center">
+                                                            <div class="col-12 text-center">
+                                                                <h5 class="card-title text-primary mb-1 font-16"><lang class="lang_total_returns">Total Returns</lang></h5>
+                                                            </div>
+                                                            <div class="col-12 text-center">
+                                                                <span class="customercategory_details_returntotalvalue font-18">0</span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <div class="card bg-secondary-rgba m-b-30">
+                                                    <div class="card-body">
+                                                        <div class="row align-items-center">
+                                                            <div class="col-12 text-center">
+                                                                <h5 class="card-title text-primary mb-1 font-16"><lang class="lang_total_items_returned">Total Items Returned</lang></h5>
+                                                            </div>
+                                                            <div class="col-12 text-center">
+                                                                <span class="customercategory_details_totalreturn font-18">0</span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div> 
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-xs-12 col-sm-9 col-md-12 col-lg-9">
+                                <div class="portlet light slider-portlet-vh">
+                                    <div class="portlet-title margin-bottom-0">
+                                        <div class="caption caption-basic font-green-meadow">
+                                            <span class="caption-subject bold uppercase"><lang class="lang_sale_history">Sale History</lang></span>
+                                        </div>
+                                        <div class="actions">
+                                            <div class="inline-block text-left">
+                                                <div class="form-md-line-input form-md-floating-label custom-select2-ui">
+
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="portlet-body padding-top-0 loader-customercategoryactivity">
+                                        <div class="row customercategoryactivity_content">
+                                            <div class="col-lg-2 col-md-2 form-group mb-0 amount-spent-select selecct-align">
+                                                <select class="form-control select_page" id="view_customercategorydetails_per_page" data-id="customercategorydetails" onChange="PosnicPro.setPerPage(this, 'Table');" aria-label="View customercategorydetails per page">
+                                                    <option value="5" selected>5</option>
+                                                    <option value="10">10</option>
+                                                    <option value="25">25</option>
+                                                    <option value="50">50</option>
+                                                    <option value="100">100</option>
+                                                </select>
+                                            </div>
+                                            <div class="col-lg-10 col-md-10">                                                                                       
+                                                <button data-module="customer" data-access="write" data-id="customercategoryreportexport" 
+                                                        onclick="PosnicPro.customercategorydetails.customercategorydetailsreportexport(this);"
+                                                        class="btn btn-primary-rgba pull-right"><lang class="lang_exportcsv_title">Export All To CSV</lang>
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div class="card-body card-box no-padding loader-item-report">
+                                            <!-- Start table -->
+                                            <div class="table-responsive">
+                                                <table id="view_customercategorydetails" class="table table-borderless m-cards" cellspacing="0"
+                                                       width="100%">
+                                                    <div class="col-sm-6 col-md-12 col-lg-12" id="customercategoryactivity_img_hide" style="display:none;"> 
+                                                        <img src="static/images/general/nodata.svg" class="img-fluid" style="opacity: 0.6;width: 100%;height: 250px;" alt="" loading="lazy" decoding="async">
+                                                        <div class="text-center text-dark"> <p><lang class="lang_no_records">No Records</lang> </p></div>
+                                                    </div>
+                                                    <thead class="report-thead-tfoot table-header customercategoryactivity_content"></thead>
+                                                    <tbody class="report-thead-tfoot table-body customercategoryactivity_content"></tbody>
+                                                </table>
+                                            </div>
+                                            <!-- End table -->
+                                        </div>
+                                        <div class="card m-b-30 customercategoryactivity_content">
+                                            <div class="card-body ecommerce-pagination">
+                                                <div class="row align-items-center">
+                                                    <div class="col-8">
+                                                        <div class="hint-text">
+                                                            <lang class="lang_showing">Showing</lang> 
+                                                            <b><span id="view_customercategorydetails_page_total"></span></b> 
+                                                            <lang class="lang_to">to</lang> 
+                                                            <b><span id="view_customercategorydetails_page_perpage_total"></span></b> 
+                                                            <lang class="lang_of">of</lang> 
+                                                            <b><span id="view_customercategorydetails_total"></span></b>
+                                                            <lang class="lang_entries">entries</lang> 
+                                                            <span class="showing-hide-show-customercategorydetails" style="display:none;"> &nbsp;&nbsp;&nbsp;&nbsp; 
+                                                                <span class="showing-value-customercategorydetails text-dark"> 0 </span><lang class="lang_rows_selected">&nbsp;
+                                                                rows selected</lang>  
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                    <div class="col-4">
+                                                        <nav aria-label="Page navigation example" data-t-aria-label="lang_page_navigation_example">
+                                                            <ul class="pagination mb-0">
+                                                                <button class="btn previous page-item text-dark-gradient f-w-7" data-id="customercategorydetails" onclick="PosnicPro.previousPage(this, 'Table')" aria-label="Previous page" data-t-aria-label="lang_previous_page"> <i class="fa fa-angle-left font-20"></i> </button>
+                                                                <button class="btn next page-item text-dark-gradient f-w-7" data-id="customercategorydetails" onclick="PosnicPro.nextPage(this, 'Table')" aria-label="Next page" data-t-aria-label="lang_next_page"> <i class="fa fa-angle-right font-20"></i> </button>
+                                                            </ul>
+                                                        </nav>
+                                                    </div>
+                                                </div>                                
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+    <!-- The browser chrome follows the page, so a dark phone does not
+         frame a dark page in a white bar. -->
+    <meta name="theme-color" content="#0b0f19" media="(prefers-color-scheme: dark)">
+    <!--
+        WHERE EVERY RELATIVE PATH ON THIS PAGE POINTS.
+        A printed code can be three segments deep - /order/AZ100/venue/RC/123
+        for a hotel room - and without this the browser looks for each asset
+        under /order/AZ100/venue/, a directory that does not exist. The page
+        loads and shows nothing, which is the worst kind of broken: a blank
+        screen with no error anybody sees.
+        Pinned to the mount rather than left to the arriving URL, so one file
+        serves the shop address, a table and a venue alike.
+    -->
+    <base href="/order/" />
+    <title>Your order</title>
+    <link href="assets/order.css?v=20260912-design" rel="stylesheet">
+    <script src="assets/i18n.js?v=20260912-design"></script>
+    <script src="assets/jquery-3.7.1.min.js?v=20260912-design"></script>
+    <script src="config.js?v=20260912-design"></script>
+    <!-- Says so when the shop is slow to answer, on every request this
+         page makes. Loaded before anything that fetches. assets/working.js -->
+    <script src="assets/working.js?v=20260912-design"></script>
+    <link href="assets/channel-state.css?v=20260912-design" rel="stylesheet">
+    <script src="assets/channel-state.js?v=20260912-design"></script>
+    <script src="assets/service-point.js?v=20260912-design"></script>
+    <script src="assets/shop-address.js?v=20260912-design"></script>
+    <script src="assets/kiosk-core.js?v=20260912-design"></script>
+    <script src="assets/spice.js?v=20260912-design"></script>
+    <script src="indexedDB.js?v=20260912-design"></script>
+    <script src="assets/cart/script.js?v=20260912-design"></script>
+</head>
+
+<body>
+
+    <div id="page-loader">
+        <div class="loader" role="status" aria-label="Loading your order"></div>
+    </div>
+
+    <div id="popup" role="status">
+        Need more than that? The counter can help.
+        <button type="button" onclick="hidePopup()" aria-label="Close">&times;</button>
+    </div>
+
+    <!-- A way back, the page's name, nothing else. It was "Shopping Cart",
+         which is what a website calls it; a person at a table has an order. -->
+    <header class="page-head">
+        <button type="button" class="icon-btn" aria-label="Back to the menu"
+                onclick="window.location.href='products.html'">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"></path></svg>
+        </button>
+        <h1>Your order</h1>
+        <span class="page-head-spacer"></span>
+    </header>
+
+    <main class="wrap content-wrapper">
+        <!-- One row per dish: picture, name, price each, the line, the pill. -->
+        <!-- How busy the kitchen is, said again where somebody commits. -->
+        <div id="kitchen-notice" hidden></div>
+
+        <section class="lines" id="cart-summary"></section>
+
+        <!--
+            BACK TO THE MENU, FROM THE BASKET.
+
+            Every cart worth copying has this and this one did not: the only
+            ways out were the back arrow and Continue. It matters most in a
+            restaurant, where people order in rounds - somebody who has just
+            added a biryani and wants a lassi should not have to work out that
+            the arrow at the top is how.
+        -->
+        <a class="add-more" id="add-more" href="products.html">
+            <span aria-hidden="true">+</span> Add more items
+        </a>
+
+        <!--
+            WHERE THE FOOD IS GOING, when it is not going to a table here.
+
+            Shown only for a hotel room or another partner venue, and only
+            after the shop has said so - a table needs no address, and an
+            empty destination box on every dine-in order is a field people
+            learn to skip.
+
+            EDITABLE, and that is the point. A guest photographs the code in
+            room 123 and sends it to a friend in 456. A code gets stuck on the
+            wrong door during a refit. Record only what the link said and the
+            food goes to the wrong room, with nothing anywhere showing that the
+            link and the guest disagreed.
+        -->
+        <section class="destination" id="destination" hidden>
+            <div class="destination-title" id="destination-title"></div>
+            <label class="destination-field">
+                <span id="destination-unit-label">Room</span>
+                <input type="text" id="destination-unit" inputmode="text"
+                       autocomplete="off" maxlength="24" />
+            </label>
+            <label class="destination-field" id="destination-floor-field" hidden>
+                <span>Floor</span>
+                <input type="text" id="destination-floor" inputmode="text"
+                       autocomplete="off" maxlength="20" />
+            </label>
+            <p class="destination-note" id="destination-note" hidden></p>
+        </section>
+
+        <!--
+            WHERE IT IS GOING, at the moment of committing to it.
+
+            The table was on the menu screen and nowhere near the button that
+            sends the order, so the last thing a customer saw before paying
+            never told them which table the food was for. On a printed code
+            that is the one fact they cannot check any other way.
+        -->
+        <p class="going-to" id="going-to" hidden></p>
+
+        <!--
+            A CODE THE SHOP PRINTED SOMEWHERE.
+
+            Above the sums, because it changes them. Collapsed to a link until
+            somebody wants it: a promo box sitting open on every order teaches
+            people they are missing a discount, and most of them are not.
+
+            The page says whether a code is real and what it offers. What it is
+            WORTH is decided by the shop when the order is placed, and an order
+            carrying a code the shop will not honour is refused rather than
+            quietly charged at full price.
+        -->
+        <section class="promo" id="promo" hidden>
+            <button type="button" class="promo-open" id="promo-open">Have a code?</button>
+            <div class="promo-box" id="promo-box" hidden>
+                <label class="field-label" for="promo-code">Discount code</label>
+                <div class="promo-row">
+                    <input type="text" id="promo-code" class="promo-field" maxlength="40"
+                           autocapitalize="characters" autocomplete="off" spellcheck="false">
+                    <button type="button" class="promo-apply" id="promo-apply">Apply</button>
+                </div>
+                <p class="promo-said" id="promo-said" hidden></p>
+            </div>
+        </section>
+
+        <!-- The sums. Taxes shown only where there are any to show. -->
+        <section class="bill" id="bill" hidden aria-label="Bill">
+            <div class="bill-row" id="bill-items-row"><span>Items</span><span id="bill-items"></span></div>
+            <div class="bill-row" id="bill-tax-row" hidden><span>Taxes</span><span id="bill-tax"></span></div>
+            <div class="bill-row bill-total"><span>Total</span><span id="bill-total"></span></div>
+        </section>
+
+        <!-- What the kitchen (or the shop) should know about the whole order.
+             Kept as it is typed; the order carries whatever is here. -->
+        <section class="order-note-box" id="order-note-box" hidden>
+            <label class="field-label" for="order-note" id="order-note-label">A note for the kitchen</label>
+            <textarea id="order-note" class="note-field" rows="2" maxlength="300"
+                      placeholder="Anything we should know?"></textarea>
+        </section>
+
+        <!-- Possible, not invited: a quiet text button, and a question before
+             it does anything. -->
+        <div class="order-clear">
+            <button type="button" class="btn-text is-danger" id="cancel-btn" onclick="onCancelClick()">Clear the order</button>
+        </div>
+    </main>
+
+    <footer class="cart-actions">
+        <div class="summary-display" id="summary-display"></div>
+        <button type="button" class="btn-primary checkout-btn" id="next-btn"
+                onclick="window.location.href='payment.html'">
+            Continue
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M5 12h14M13 6l6 6-6 6"></path>
+            </svg>
+        </button>
+    </footer>
+
+    <!-- A note on one line: "less spicy", "no onion". -->
+    <dialog id="note-sheet" class="sheet" aria-labelledby="note-title">
+        <div class="sheet-handle" aria-hidden="true"></div>
+        <div class="sheet-body">
+            <h2 class="sheet-title" id="note-title">Any request for this dish?</h2>
+            <p class="sheet-desc" id="note-for"></p>
+            <!-- The same picker as the dish sheet, for a change of mind at the
+                 basket. Hidden for a dish that does not offer the choice. -->
+            <div class="sheet-spice" id="note-spice-box" hidden></div>
+            <textarea id="note-text" class="note-field" rows="3" maxlength="200"
+                      placeholder="Less spicy, no onion, extra gravy..."></textarea>
+            <div class="pay-actions">
+                <button type="button" class="btn-primary btn-block" id="note-save">Save request</button>
+                <button type="button" class="btn-secondary btn-block" id="note-cancel">Cancel</button>
+            </div>
+        </div>
+    </dialog>
+
+    <div id="cancelModal" class="modal" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="cancel-title">
+        <div class="modal-content">
+            <h3 class="modal-title" id="cancel-title">Clear the order?</h3>
+            <p class="modal-message">Everything you have added will be removed.</p>
+            <div class="modal-buttons">
+                <button type="button" id="confirmCancel" class="modal-btn confirm" onclick="confirmCancelOrder()">Yes, clear it</button>
+                <button type="button" id="closeModal" class="modal-btn cancel" onclick="closeCancelModal()">Keep it</button>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>

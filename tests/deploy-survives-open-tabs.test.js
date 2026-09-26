@@ -1,0 +1,163 @@
+'use strict';
+
+/*
+ * A deploy must not break the tabs that are already open.
+ *
+ * Owner: "mobile view add category shown and page broken. crashed." The
+ * beacon log told the real story: no JS error at all - the page had lost
+ * style/dashboard.<oldhash>.css with a 404. Ten deploys shipped that day;
+ * each one ran rsync --delete on the tenant instance, so every deploy
+ * deleted the bundles every already-open tab still referenced. The page
+ * kept running, unstyled - which a person reads as "broken. crashed."
+ *
+ * Three layers, pinned together because any one alone can silently rot:
+ *  1. the tenant deploy PROTECTS hashed bundles from --delete and prunes
+ *     by family instead (newest 3 stay),
+ *  2. the service worker answers a 404'd hashed bundle with the CURRENT
+ *     build's file of the same family,
+ *  3. reference-data endpoints carry HTTP cache headers (pinned api-side
+ *     in settings.routes.test.js).
+ */
+const test = require('node:test');
+const assert = require('node:assert');
+const fs = require('fs');
+const path = require('path');
+
+const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+
+test('the tenant deploy keeps the last builds\' hashed bundles alive', () => {
+  const wf = read('.github/workflows/deploy-frontend.yml');
+  assert.match(wf, /--filter='protect public\/script\/\*\.js'/,
+    'hashed js is no longer protected from rsync --delete');
+  assert.match(wf, /--filter='protect public\/style\/\*\.css'/,
+    'hashed css is no longer protected from rsync --delete');
+  /* and the retention prune bounds the growth */
+  assert.match(wf, /Prune old hashed bundles/);
+  assert.match(wf, /tail -n \+4/, 'the keep-newest-3 retention changed shape');
+});
+
+test('the CDN deploy never gained --delete on its bundle pass', () => {
+  const wf = read('.github/workflows/deploy-frontend-cdn.yml');
+  const bundlePass = wf.slice(wf.indexOf("--include 'style/*'"));
+  assert.ok(!bundlePass.includes('--delete'),
+    'the CDN bundle pass deletes old hashes - open tabs break on deploy');
+});
+
+test('the service worker answers a dead hashed bundle with its current sibling', () => {
+  const sw = read('frontend/sw-template.js');
+  assert.match(sw, /function familyFallback\(pathname\)/);
+  /* only precached families are eligible - guessing at others would serve
+     wrong bytes with confidence */
+  assert.match(sw, /for \(const entry of PRECACHE\)/);
+  /* wired on BOTH failure paths: http error and network throw */
+  const hits = sw.match(/familyFallback\(url\.pathname\)/g) || [];
+  assert.ok(hits.length >= 2, 'the fallback lost one of its two failure paths');
+});
+
+test('phantom images heal themselves instead of burning the beacon budget', () => {
+  /* src='' or src='undefined' resolves to the page URL and "fails" - our
+     own template bug, six of which once consumed the whole per-IP beacon
+     window while a real stylesheet 404 waited behind them. The watchdog
+     swaps them to the placeholder pixel and keeps them out of the journal. */
+  const dash = read('frontend/dashboard.html');
+  const at = dash.indexOf("tagName === 'IMG'");
+  assert.ok(at > -1, 'the phantom-image healer is gone');
+  const block = dash.slice(at, at + 700);
+  assert.match(block, /data:image\/gif;base64/);
+  assert.match(block, /return;/);
+  assert.match(block, /\(undefined\|null\)/);
+});
+
+test('the worker steps aside when its cache layer is wedged', () => {
+  /* A full or corrupt Cache Storage made caches.open reject, the
+     respondWith promise reject with it, and EVERY asset request die -
+     a phone that "does not even open" while the origin is perfectly
+     healthy. Each cached branch now ends by falling back to a plain
+     network fetch, so a broken cache never outranks a working network. */
+  const sw = read('frontend/sw-template.js');
+  const fallthroughs = sw.match(/\)\.catch\(\(\) => fetch\(request\)\)/g) || [];
+  assert.ok(fallthroughs.length >= 3,
+    'a cached branch lost its network fall-through (' + fallthroughs.length + '/3)');
+  /* and a failed cache WRITE never takes the answer with it */
+  const putGuards = sw.match(/cache\.put\(request, response\.clone\(\)\)\.catch/g) || [];
+  assert.ok(putGuards.length >= 2, 'a cache.put lost its guard');
+});
+
+test('a page that watches its own stylesheet die reloads once to re-pair', () => {
+  const dash = read('frontend/dashboard.html');
+  const at = dash.indexOf('posnic_repair_reload');
+  assert.ok(at > -1, 'the one-shot repair reload is gone');
+  const block = dash.slice(at - 700, at + 400);
+  /* own bundles only, and exactly once per tab session */
+  assert.match(block, /(dashboard\|login)/);
+  assert.match(block, /sessionStorage\.getItem\('posnic_repair_reload'\)/);
+  assert.match(block, /location\.reload\(\)/);
+});
+
+test('the develop deploy keeps them alive too', () => {
+  /*
+   * THE GAP THAT BIT, 2026-09-11.
+   *
+   * Only deploy-frontend.yml was pinned here, so develop kept a plain
+   * `rsync --delete` over frontend/public. Develop is the environment where
+   * somebody sits with a tab open all day while builds land on top of them -
+   * four inside thirteen minutes on the day this was written - and every one
+   * of those deleted the bundles that tab was still asking for by name.
+   *
+   * The owner's report was "i cant access in develop.posnic.io". Every page
+   * answered 200, every deploy was green, the bundle parsed and sign-in
+   * returned a clean 401. His open tab was asking for a dashboard.<hash>.js
+   * that a later deploy had removed.
+   */
+  const wf = read('.github/workflows/deploy-develop.yml');
+  assert.match(
+    wf,
+    /--filter='protect public\/script\/\*\.js'/,
+    'develop deletes the hashed js that open tabs still reference'
+  );
+  assert.match(
+    wf,
+    /--filter='protect public\/style\/\*\.css'/,
+    'develop deletes the hashed css that open tabs still reference'
+  );
+  assert.match(
+    wf,
+    /tail -n \+4/,
+    'develop protects the bundles but never prunes them, so the box grows without bound'
+  );
+});
+
+test('no deploy runs a bare --delete over a directory of built bundles', () => {
+  /*
+   * The general rule rather than one test per workflow, which is how develop
+   * came to be missed in the first place. Any rsync whose source is a built
+   * frontend directory and which carries --delete must also protect the
+   * hashed files, because their names are what an open page remembers.
+   */
+  const offenders = [];
+  for (const file of ['deploy-frontend.yml', 'deploy-develop.yml']) {
+    const wf = read(`.github/workflows/${file}`);
+    for (const chunk of wf.split(/\brsync\s/).slice(1)) {
+      /* One rsync invocation: up to the first line that is not a continuation. */
+      const lines = [];
+      for (const line of chunk.split('\n')) {
+        lines.push(line);
+        /* A continuation line ends in a backslash. Named rather than written
+           as a literal: this file went through a heredoc that ate one. */
+        if (!line.trimEnd().endsWith(String.fromCharCode(92))) break;
+      }
+      const pass = lines.join('\n');
+      if (!/\bfrontend\//.test(pass)) continue;
+      if (!pass.includes('--delete')) continue;
+      if (!pass.includes('protect public/script/*.js')) {
+        offenders.push(`${file}: ${pass.split('\n')[0].trim()}`);
+      }
+    }
+  }
+
+  assert.deepStrictEqual(
+    offenders,
+    [],
+    `these rsyncs delete bundles that open tabs still ask for:\n  ${offenders.join('\n  ')}`
+  );
+});

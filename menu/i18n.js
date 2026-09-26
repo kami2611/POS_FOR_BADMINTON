@@ -1,0 +1,696 @@
+/*
+ * The customer's language.
+ *
+ * Every word a customer reads on /menu and /order is English in the source.
+ * This file is the one place a second language lives: a dictionary keyed by
+ * the English sentence itself, and a walker that swaps the words in the page
+ * as they appear - the static ones as the page is parsed, the ones scripts
+ * draw later as they land. Nothing else on the pages has to know a second
+ * language exists.
+ *
+ * WHO DECIDES THE LANGUAGE, in order:
+ *   1. ?lang=ta on the link - a shop prints it on the codes it puts out
+ *      for Tamil-reading customers;
+ *   2. the choice the customer made last time on this phone;
+ *   3. the phone's own language;
+ *   4. English.
+ *
+ * WHY THE ENGLISH SENTENCE IS THE KEY. Two hundred keys called
+ * lang_pay_at_counter_2 would have to be invented, looked up and kept in
+ * step with the markup; the sentence itself is already unique, already in
+ * the markup, and reads as what it is. A translation that is missing shows
+ * the English, never a key.
+ *
+ * WHY A WALKER AND NOT ATTRIBUTES. The pages draw most of what they say from
+ * scripts - a card, a count, a line on the bill - and marking every string
+ * in every template would touch two thousand lines to no benefit. The
+ * walker translates a text node whose whole trimmed text is a known
+ * sentence, and the observer does the same to nodes added later. A sentence
+ * built around a number goes through t() in the script instead, so the
+ * number lands where the other language wants it.
+ *
+ * Numbers stay in the digits the bill will show. Names the shop typed -
+ * dishes, categories, the shop's own name - are never translated, because
+ * they are not in the dictionary.
+ *
+ * ONE FILE, TWO COPIES. /menu and /order are separate bundles deployed to
+ * separate folders, and neither may reach into the other. order/assets/i18n.js
+ * and menu/i18n.js are the same bytes; tests/customer-i18n.test.js refuses a
+ * commit where they differ.
+ */
+(function () {
+  "use strict";
+
+  var LANGS = { en: "English", ta: "தமிழ்" };
+  var STORAGE_KEY = "posnic_lang";
+  var ATTRS = ["placeholder", "aria-label", "title"];
+
+  var DICT = {
+    ta: {
+      /* ---------------------------------------------------- the menu */
+      "Menu": "மெனு",
+      "Our Menu": "எங்கள் மெனு",
+      "Products": "பொருட்கள்",
+      "All products": "எல்லா பொருட்களும்",
+      "{shop} menu": "{shop} மெனு",
+      "{shop} · Order": "{shop} · ஆர்டர்",
+      "Order": "ஆர்டர்",
+      "Search the menu": "மெனுவில் தேடுங்கள்",
+      "Search products": "பொருட்களைத் தேடுங்கள்",
+      "Catalogue order": "பட்டியல் வரிசை",
+      "Search by voice": "குரல் மூலம் தேடுங்கள்",
+      "Clear search": "தேடலை அழிக்கவும்",
+      "Back to the menu": "மெனுவிற்குத் திரும்பு",
+      "Menu sections": "மெனு பிரிவுகள்",
+      "Sort": "வரிசை",
+      "Sort the menu": "மெனுவை வரிசைப்படுத்து",
+      "Menu order": "மெனு வரிசை",
+      "Most ordered": "அதிகம் ஆர்டர் செய்தவை",
+      "Price: low to high": "விலை: குறைவு முதல் அதிகம்",
+      "Price: high to low": "விலை: அதிகம் முதல் குறைவு",
+      "Veg only": "சைவம் மட்டும்",
+      "Available now": "இப்போது கிடைப்பவை",
+      "Loading the menu": "மெனு ஏற்றப்படுகிறது",
+      "One moment.": "ஒரு நிமிடம்.",
+      "Results": "முடிவுகள்",
+      "Show all {n}": "{n}ஐயும் காட்டு",
+      "Often ordered with": "இதனுடன் அடிக்கடி ஆர்டர் செய்யப்படுவது",
+      "Order now": "இப்போது ஆர்டர் செய்யுங்கள்",
+      "Photo": "படம்",
+      "Close": "மூடு",
+      "Close photo": "படத்தை மூடு",
+      "Prices shown for {venue}": "{venue} க்கான விலைகள்",
+      "Change language": "மொழியை மாற்று",
+
+      /* counts */
+      "dish": "உணவு",
+      "dishes": "உணவுகள்",
+      "item": "பொருள்",
+      "items": "பொருட்கள்",
+      "Items": "உருப்படிகள்",
+      "{n} dish": "{n} உணவு",
+      "{n} dishes": "{n} உணவுகள்",
+      "{n} item": "{n} பொருள்",
+      "{n} items": "{n} பொருட்கள்",
+      "{n} kcal": "{n} கலோரி",
+
+      /* The sort-and-filter sheet. */
+      "Filters": "வடிகட்டிகள்",
+      "Sort and filter": "வரிசைப்படுத்தி வடிகட்டு",
+      "Clear all": "அனைத்தையும் நீக்கு",
+      "Show dishes": "உணவுகளைக் காட்டு",
+      "Show {n} dishes": "{n} உணவுகளைக் காட்டு",
+      "Show 1 dish": "1 உணவைக் காட்டு",
+      "What you can eat": "நீங்கள் உண்பவை",
+      "Good for": "எதற்கு நல்லது",
+
+      /* The badges on a dish card. What the SHOP says about its own food
+         first, then the health claims the numbers earned - which are worked
+         out on the server by utils/dish-facts.js and cannot be typed in. */
+      "Signature": "தனிச்சிறப்பு",
+      "Chef's pick": "சமையல்காரரின் தேர்வு",
+      "House special": "எங்கள் சிறப்பு",
+      "New": "புதியது",
+      "High protein": "அதிக புரதம்",
+      "Keto friendly": "கீட்டோவுக்கு ஏற்றது",
+      "Diabetic friendly": "நீரிழிவுக்கு ஏற்றது",
+      "Heart healthy": "இதயத்துக்கு நல்லது",
+      "High fibre": "அதிக நார்ச்சத்து",
+      "Under 300 kcal": "300 கலோரிக்குக் கீழ்",
+      "No added sugar": "சர்க்கரை சேர்க்கப்படவில்லை",
+      "{n} dish found": "{n} உணவு கிடைத்தது",
+      "{n} dishes found": "{n} உணவுகள் கிடைத்தன",
+      "{n} item found": "{n} பொருள் கிடைத்தது",
+      "{n} items found": "{n} பொருட்கள் கிடைத்தன",
+      "Nothing matches those filters": "இந்த வடிகட்டிகளுக்கு எதுவும் பொருந்தவில்லை",
+      "Nothing matches \"{q}\"": "\"{q}\" க்கு எதுவும் பொருந்தவில்லை",
+      "Nothing matches \"{q}\". Try a different word.": "\"{q}\" க்கு எதுவும் பொருந்தவில்லை. வேறு வார்த்தையை முயற்சிக்கவும்.",
+      "Try a different word.": "வேறு வார்த்தையை முயற்சிக்கவும்.",
+      "Try turning one off.": "ஒன்றை அணைத்துப் பாருங்கள்.",
+      "Nothing on the menu is marked vegetarian.": "மெனுவில் எதுவும் சைவம் எனக் குறிக்கப்படவில்லை.",
+      "No dishes yet": "இன்னும் உணவுகள் இல்லை",
+      "This shop has not added anything to its menu.": "இந்தக் கடை தனது மெனுவில் இன்னும் எதையும் சேர்க்கவில்லை.",
+
+      /* a dish */
+      "Add": "சேர்",
+      "Add one": "ஒன்று சேர்",
+      "One more": "இன்னொன்று",
+      "One fewer": "ஒன்று குறை",
+      "Quantity": "எண்ணிக்கை",
+      "Category": "வகை",
+      "Diet": "உணவு வகை",
+      "Vegetarian": "சைவம்",
+      "Non-vegetarian": "அசைவம்",
+      "Contains egg": "முட்டை உள்ளது",
+      "Vegan": "வீகன்",
+      "Served at": "பரிமாறப்படும் நேரம்",
+      "Served at {when} only": "{when} மட்டும் பரிமாறப்படும்",
+      "Takes about": "தயாராக ஆகும் நேரம்",
+      "{n} minutes": "{n} நிமிடங்கள்",
+      "~{n} min": "~{n} நிமி",
+      "Right now": "இப்போது",
+      "Available": "கிடைக்கிறது",
+      "Not available today": "இன்று கிடைக்காது",
+      "Market price": "சନ்தை விலை",
+      "Ask staff for today's price": "இன்றைய விலையை பணியாளரிடம் கேட்கவும்",
+      "Not available right now": "இப்போது கிடைக்காது",
+      "Not being served - {when} only": "இப்போது பரிமாறப்படவில்லை - {when} மட்டும்",
+      "{when} only": "{when} மட்டும்",
+      " and ": " மற்றும் ",
+      "A note for this dish": "இந்த உணவுக்கு ஒரு குறிப்பு",
+      "Any request for this dish?": "இந்த உணவுக்கு ஏதேனும் வேண்டுகோள்?",
+      "Add a request: less spicy, no onion...": "வேண்டுகோள் சேர்க்கவும்: காரம் குறைவாக, வெங்காயம் வேண்டாம்...",
+      "Edit request": "வேண்டுகோளைத் திருத்து",
+      /* ------------------------------------------------- how hot */
+      "How hot would you like it?": "எவ்வளவு காரமாக வேண்டும்?",
+      "Mild": "குறைந்த காரம்",
+      "Medium": "நடுத்தர காரம்",
+      "Spicy": "அதிக காரம்",
+      "However the kitchen makes it": "சமையல்காரர் செய்யும் படியே",
+      "No onion, extra gravy, cut in half...": "வெங்காயம் வேண்டாம், கூடுதல் குழம்பு, பாதியாக வெட்டவும்...",
+      /* --------------------------------------- how busy the kitchen is */
+      "The kitchen is busy. Expect about {n} minutes longer than usual.": "சமையலறை பரபரப்பாக உள்ளது. வழக்கத்தை விட சுமார் {n} நிமிடங்கள் கூடுதலாக ஆகலாம்.",
+      "The kitchen is very busy. Expect over an hour longer than usual.": "சமையலறை மிகவும் பரபரப்பாக உள்ளது. வழக்கத்தை விட ஒரு மணி நேரத்திற்கு மேல் ஆகலாம்.",
+      "The kitchen is busy right now, so your order may take longer than usual.": "இப்போது சமையலறை பரபரப்பாக உள்ளதால், உங்கள் ஆர்டருக்கு வழக்கத்தை விட நேரம் ஆகலாம்.",
+      /* ---------------------------------------- when it will be ready */
+      "Usually ready by about {when}": "வழக்கமாக {when} மணிக்கு தயாராகிவிடும்",
+      "About {n} minutes once the shop accepts it": "கடை ஏற்றதும் பிறகு சுமார் {n} நிமிடங்கள்",
+      /* -------------------------------------------- calling a waiter */
+      "Call waiter": "பணியாளரை கூப்பிடுங்கள்",
+      "Somebody is coming": "ஒருவர் வருகிறார்",
+      "Less spicy, no onion, extra gravy...": "காரம் குறைவாக, வெங்காயம் வேண்டாம், கூடுதல் குழம்பு...",
+      "A note for the kitchen": "சமையலறைக்கு ஒரு குறிப்பு",
+      "A note for the shop": "கடைக்கு ஒரு குறிப்பு",
+      "Add a note": "குறிப்பு சேர்",
+      "Edit note": "குறிப்பைத் திருத்து",
+      "Save note": "குறிப்பைச் சேமி",
+      "Save request": "வேண்டுகோளைச் சேமி",
+      "Less spicy, no onion, cut in half...": "காரம் குறைவாக, வெங்காயம் வேண்டாம், பாதியாக வெட்டவும்...",
+      "Anything we should know?": "நாங்கள் தெரிந்து கொள்ள வேண்டியது ஏதேனும்?",
+      "Need more than that? The counter can help.": "இதற்கு மேல் வேண்டுமா? கவுண்டரில் கேளுங்கள்.",
+
+      /* the order */
+      "Your order": "உங்கள் ஆர்டர்",
+      "Review order": "ஆர்டரைப் பார்க்கவும்",
+      "View order": "ஆர்டரைப் பார்",
+      "Nothing yet. Add a dish to start.": "இன்னும் எதுவும் இல்லை. தொடங்க ஒரு உணவைச் சேர்க்கவும்.",
+      "Loading your order": "உங்கள் ஆர்டர் ஏற்றப்படுகிறது",
+      "Total": "மொத்தம்",
+      "Taxes": "வரிகள்",
+      "Tax": "வரி",
+      "Subtotal": "கூட்டுத்தொகை",
+      "Discount": "தள்ளுபடி",
+      "Bill": "பில்",
+      "Continue": "தொடரவும்",
+      "Cancel": "ரத்து",
+      "Clear the order": "ஆர்டரை அழி",
+      "Clear the order?": "ஆர்டரை அழிக்கவா?",
+      "Everything you have added will be removed.": "நீங்கள் சேர்த்த அனைத்தும் நீக்கப்படும்.",
+      "Keep it": "வைத்திரு",
+      "Yes, clear it": "ஆம், அழி",
+      "We will bring it to {place}": "{place} க்குக் கொண்டு வருகிறோம்",
+      "Room": "அறை",
+      "Floor": "தளம்",
+      "Table": "மேசை",
+      "Table {n}": "மேசை {n}",
+
+      /* paying */
+      "Almost done": "கிட்டத்தட்ட முடிந்தது",
+      "Back to your order": "உங்கள் ஆர்டருக்குத் திரும்பு",
+      "Back to cart": "ஆர்டருக்குத் திரும்பு",
+      "How would you like it?": "எப்படி வேண்டும்?",
+      "How would you like it served?": "எப்படிப் பரிமாற வேண்டும்?",
+      "Choose one to continue.": "தொடர ஒன்றைத் தேர்ந்தெடுங்கள்.",
+      "Bring it to my table": "என் மேசைக்குக் கொண்டு வாருங்கள்",
+      "Bring it to table {table}": "மேசை {table} க்குக் கொண்டு வாருங்கள்",
+      "Bringing it to table {table}": "மேசை {table} க்குக் கொண்டு வருகிறோம்",
+      "Bringing it to {place}": "{place} க்குக் கொண்டு வருகிறோம்",
+      "Change": "மாற்று",
+      "I'll collect it at the counter": "கவுண்டரில் நானே வாங்கிக் கொள்கிறேன்",
+      "I'll collect it from the shop": "கடையில் நானே வாங்கிக் கொள்கிறேன்",
+      "Deliver it to me": "எனக்கு டெலிவரி செய்யுங்கள்",
+      "Which table?": "எந்த மேசை?",
+      "Which table are you at?": "நீங்கள் எந்த மேசையில் இருக்கிறீர்கள்?",
+      "Table number": "மேசை எண்",
+      "Where to deliver": "எங்கு டெலிவரி செய்ய வேண்டும்",
+      "Your name": "உங்கள் பெயர்",
+      "Name": "பெயர்",
+      "Door, street, landmark": "கதவு எண், தெரு, அடையாளம்",
+      "Your mobile number": "உங்கள் மொபைல் எண்",
+      "Enter mobile number": "மொபைல் எண்ணை உள்ளிடுங்கள்",
+      "For this order only, so the shop can reach you about it.": "இந்த ஆர்டருக்கு மட்டும், கடை உங்களைத் தொடர்பு கொள்ள.",
+      "Number keys": "எண் விசைகள்",
+      "Delete the last digit": "கடைசி இலக்கை நீக்கு",
+      "Clear": "அழி",
+      "Please enter a valid 10-digit mobile number starting with 6-9.": "6-9 இல் தொடங்கும் சரியான 10 இலக்க மொபைல் எண்ணை உள்ளிடுங்கள்.",
+      "How will you pay?": "எப்படி பணம் செலுத்துவீர்கள்?",
+      "Pay now": "இப்போது செலுத்து",
+      "Pay at the counter": "கவுண்டரில் செலுத்து",
+      "Pay on delivery": "டெலிவரியின் போது செலுத்து",
+      "Pay when collecting": "வாங்கும் போது செலுத்து",
+      "Pay {amount}": "{amount} செலுத்து",
+      "Place order": "ஆர்டர் செய்",
+      "Add {amount} more": "இன்னும் {amount} சேர்க்கவும்",
+      "Orders start at {min}. Add {more} more.": "ஆர்டர் குறைந்தபட்சம் {min}. இன்னும் {more} சேர்க்கவும்.",
+      "Delivery orders start at {min}. Add {more} more.": "டெலிவரி ஆர்டர் குறைந்தபட்சம் {min}. இன்னும் {more} சேர்க்கவும்.",
+      "Add {amount} more and {what} is free.": "இன்னும் {amount} சேர்த்தால் {what} இலவசம்.",
+      "Delivery": "டெலிவரி",
+      "delivery": "டெலிவரி",
+      "Service": "சேவை",
+      "service": "சேவை",
+      "Packing": "பேக்கிங்",
+      "packing": "பேக்கிங்",
+      "Free": "இலவசம்",
+      "Setting up your payment": "பணம் செலுத்துதல் தயாராகிறது",
+      "One moment. Please keep this page open.": "ஒரு நிமிடம். இந்தப் பக்கத்தைத் திறந்து வையுங்கள்.",
+      "Something went wrong. Please try again.": "ஏதோ தவறு நடந்தது. மீண்டும் முயற்சிக்கவும்.",
+      "Payment could not be started": "பணம் செலுத்துதலைத் தொடங்க முடியவில்லை",
+      "Payment request failed. Please try again.": "பணம் செலுத்தும் கோரிக்கை தோல்வி. மீண்டும் முயற்சிக்கவும்.",
+      "Payment failed": "பணம் செலுத்துதல் தோல்வி",
+      "The payment was not completed. Return to the cart and try again.": "பணம் செலுத்துதல் முடியவில்லை. ஆர்டருக்குத் திரும்பி மீண்டும் முயற்சிக்கவும்.",
+      "Payment confirmation timed out": "பணம் செலுத்திய உறுதிப்படுத்தல் நேரம் முடிந்தது",
+      "Payment page could not be loaded": "பணம் செலுத்தும் பக்கத்தை ஏற்ற முடியவில்லை",
+      "Please check the connection and try again.": "இணைப்பைச் சரிபார்த்து மீண்டும் முயற்சிக்கவும்.",
+      "Unable to load Razorpay checkout script.": "Razorpay ஐ ஏற்ற முடியவில்லை.",
+      "Razorpay payment could not be started.": "Razorpay பணம் செலுத்துதலைத் தொடங்க முடியவில்லை.",
+      "This shop is not taking payment through this page right now. Please order at the counter.": "இந்தக் கடை இப்போது இந்தப் பக்கத்தின் மூலம் பணம் பெறவில்லை. கவுண்டரில் ஆர்டர் செய்யுங்கள்.",
+      "Retry payment": "பணம் செலுத்த மீண்டும் முயற்சி",
+      "Checking the payment": "பணம் செலுத்துதல் சரிபார்க்கப்படுகிறது",
+      "Payment status": "பணம் செலுத்திய நிலை",
+
+      /* placed */
+      "Order placed": "ஆர்டர் செய்யப்பட்டது",
+      "The kitchen has it. Show this at the counter.": "சமையலறைக்குச் சென்றது. இதைக் கவுண்டரில் காட்டுங்கள்.",
+      "The kitchen has it. We'll bring it to table {table}.": "சமையலறைக்குச் சென்றது. மேசை {table} க்குக் கொண்டு வருகிறோம்.",
+      "The kitchen has it. We'll bring it to your table.": "சமையலறைக்குச் சென்றது. உங்கள் மேசைக்குக் கொண்டு வருகிறோம்.",
+      "The kitchen has it. Collect it at the counter when your token is called.": "சமையலறைக்குச் சென்றது. உங்கள் டோக்கன் அழைக்கப்படும்போது கவுண்டரில் வாங்கிக் கொள்ளுங்கள்.",
+      "Your order is in. Collect it from the shop when it's ready.": "உங்கள் ஆர்டர் பெறப்பட்டது. தயாரானதும் கடையில் வாங்கிக் கொள்ளுங்கள்.",
+      "Your order is in. It's on its way as soon as it's ready.": "உங்கள் ஆர்டர் பெறப்பட்டது. தயாரானதும் உடனே அனுப்பப்படும்.",
+      "Pay {amount} on delivery.": "டெலிவரியின் போது {amount} செலுத்துங்கள்.",
+      "Pay {amount} when you collect it.": "வாங்கும் போது {amount} செலுத்துங்கள்.",
+      "Pay {amount} at the counter.": "கவுண்டரில் {amount} செலுத்துங்கள்.",
+      "Your token": "உங்கள் டோக்கன்",
+      "Token": "டோக்கன்",
+      "Placed": "ஆர்டர் நேரம்",
+      "Order more": "மேலும் ஆர்டர் செய்",
+      "Finish": "முடி",
+      "Receipt": "ரசீது",
+      "Date": "தேதி",
+      "· Paid by": "· செலுத்திய முறை",
+      "Cash": "ரொக்கம்",
+      "Unknown": "தெரியவில்லை",
+      "Thank you. Visit again.": "நன்றி. மீண்டும் வாருங்கள்.",
+      "Receipt PDF could not be generated.": "ரசீது PDF உருவாக்க முடியவில்லை.",
+      "The receipt could not be saved on this device. Ask at the counter for a printed copy.": "இந்தச் சாதனத்தில் ரசீதைச் சேமிக்க முடியவில்லை. அச்சிட்ட நகலுக்கு கவுண்டரில் கேளுங்கள்.",
+      "Nothing to show": "காட்ட எதுவும் இல்லை",
+      "Nothing to show here": "இங்கே காட்ட எதுவும் இல்லை",
+      "This receipt is not from an order placed on this phone.": "இந்த ரசீது இந்த போனில் செய்யப்பட்ட ஆர்டருடையது அல்ல.",
+      "See the menu": "மெனுவைப் பாருங்கள்",
+
+      /* where the order has got to - the trail on the thank-you page */
+      "The shop has it": "கடையிடம் உள்ளது",
+      "In the kitchen": "சமையலறையில்",
+      "Waiting for the shop to accept it.": "கடை ஏற்கும் வரை காத்திருக்கிறது.",
+      "Waiting for the shop to accept it. Most orders here are accepted in about {minutes} minutes.": "கடை ஏற்கும் வரை காத்திருக்கிறது. இங்கு பெரும்பாலான ஆர்டர்கள் சுமார் {minutes} நிமிடங்களில் ஏற்கப்படுகின்றன.",
+      "Nothing has been charged.": "எந்தத் தொகையும் வசூலிக்கப்படவில்லை.",
+      "Nothing has been charged. Ask at the counter if you would like to know why.": "எந்தத் தொகையும் வசூலிக்கப்படவில்லை. காரணம் தெரிய வேண்டுமானால் கவுண்டரில் கேளுங்கள்.",
+
+      /* the assistant */
+      "Ask about the menu": "மெனு பற்றிக் கேளுங்கள்",
+      "New": "புதிது",
+      "Ask me what's good, or just talk": "எது நன்றாக இருக்கும் என்று கேளுங்கள், அல்லது பேசுங்கள்",
+      "Ask me what's good": "எது நன்றாக இருக்கும் என்று கேளுங்கள்",
+      "Dismiss": "மூடு",
+      "Or tap the microphone and just talk.": "அல்லது மைக்ரோஃபோனைத் தட்டிப் பேசுங்கள்.",
+      "What do you recommend?": "நீங்கள் எதைப் பரிந்துரைக்கிறீர்கள்?",
+      "Something vegetarian and spicy": "சைவமும் காரமுமான ஏதாவது",
+      "A meal for two": "இரண்டு பேருக்கு ஒரு உணவு",
+      "What is quick to make?": "விரைவாகத் தயாராவது எது?",
+      "Your message": "உங்கள் செய்தி",
+      "Ask anything about the menu...": "மெனு பற்றி எதையும் கேளுங்கள்...",
+      "Send": "அனுப்பு",
+      "Thinking": "யோசிக்கிறது",
+      "Talk to order": "பேசி ஆர்டர் செய்யுங்கள்",
+      "Stop talking": "பேச்சை நிறுத்து",
+      "Tap to talk": "பேசத் தட்டுங்கள்",
+      "Connecting...": "இணைக்கிறது...",
+      "Listening...": "கேட்கிறது...",
+      "Speaking...": "பேசுகிறது...",
+      "Thinking...": "யோசிக்கிறது...",
+      "Go ahead, I'm listening. Say what you feel like, and I'll answer out loud and add to your order.": "சொல்லுங்கள், கேட்கிறேன். உங்களுக்கு என்ன வேண்டும் என்று சொல்லுங்கள்; சத்தமாகப் பதிலளித்து உங்கள் ஆர்டரில் சேர்க்கிறேன்.",
+      "The microphone was not allowed. You can still type.": "மைக்ரோஃபோன் அனுமதிக்கப்படவில்லை. நீங்கள் தட்டச்சு செய்யலாம்.",
+      "No microphone was found on this device. You can still type.": "இந்தச் சாதனத்தில் மைக்ரோஃபோன் இல்லை. நீங்கள் தட்டச்சு செய்யலாம்.",
+      "Could not connect the voice line. You can still type.": "குரல் இணைப்பை ஏற்படுத்த முடியவில்லை. நீங்கள் தட்டச்சு செய்யலாம்.",
+      "This shop's assistant has reached its limit for the month. You can still order the usual way.": "இந்தக் கடையின் உதவியாளர் இந்த மாதத்திற்கான வரம்பை அடைந்துவிட்டது. வழக்கம் போல் ஆர்டர் செய்யலாம்.",
+      "Live voice is switched off for this shop, so I'll answer turn by turn.": "இந்தக் கடையில் நேரடிக் குரல் அணைக்கப்பட்டுள்ளது, எனவே முறை முறையாகப் பதிலளிக்கிறேன்.",
+      "The live voice line did not open ({why}), so I'll answer turn by turn.": "நேரடிக் குரல் இணைப்பு திறக்கவில்லை ({why}), எனவே முறை முறையாகப் பதிலளிக்கிறேன்.",
+      "Answers come from this shop's menu. Please confirm allergies at the counter.": "பதில்கள் இந்தக் கடையின் மெனுவிலிருந்து வருகின்றன. ஒவ்வாமை பற்றி கவுண்டரில் உறுதிப்படுத்துங்கள்.",
+      "Hi! Tell me what you feel like, or ask what's good here. I'll suggest from the menu and can add it to your order.": "வணக்கம்! உங்களுக்கு என்ன வேண்டும் என்று சொல்லுங்கள், அல்லது இங்கே எது நன்றாக இருக்கும் என்று கேளுங்கள். மெனுவிலிருந்து பரிந்துரைத்து உங்கள் ஆர்டரில் சேர்க்கிறேன்.",
+      "Added {n} × {name}": "{name} {n} சேர்க்கப்பட்டது",
+      "Removed {name}": "{name} நீக்கப்பட்டது",
+      "Now {n} × {name}": "இப்போது {name} {n}",
+      "Request noted: {note}": "வேண்டுகோள் குறிக்கப்பட்டது: {note}",
+      "Your orders": "உங்கள் ஆர்டர்கள்",
+      "Back to the menu": "மெனுவுக்குத் திரும்பு",
+      "Nothing ordered from this phone yet.": "இந்த போனிலிருந்து இதுவரை ஒன்றும் ஆர்டர் செய்யவில்லை.",
+      "Kept on this phone. Clearing your browser data clears this list.": "இந்த போனில் மட்டும் வைக்கப்படுகிறது. பிரவுசர் தரவை அழித்தால் இந்தப் பட்டியலும் போய்விடும்.",
+      "Token {token}": "டோக்கன் {token}",
+      "With the kitchen": "சமையலறையில்",
+      "Waiting for the shop": "கடையின் பதிலுக்குக் காத்திருக்கிறது",
+      "The shop could not take it": "கடையால் ஏற்க முடியவில்லை",
+      "Paid": "பணம் செலுத்தப்பட்டது",
+      "Cancelled": "கேன்சல் ஆனது",
+      "Not checked": "சரிபார்க்கப்படவில்லை",
+      "{n}s to change it": "மாற்ற {n} வினாடிகள்",
+      "Total {amount}": "மொத்தம் {amount}",
+      "Cancel the order": "ஆர்டரை ரத்து செய்",
+      "Ask the shop to cancel": "ரத்து செய்யக் கடையிடம் கேளுங்கள்",
+      "The shop has your cancellation request": "உங்கள் ரத்துக் கோரிக்கை கடையிடம் உள்ளது",
+      "The shop has your change request": "உங்கள் மாற்றக் கோரிக்கை கடையிடம் உள்ளது",
+      "Changes now go to the shop to approve": "இனி மாற்றங்கள் கடையின் ஒப்புதலுக்குப் போகும்",
+      "Ask for one more {name}": "{name} இன்னொன்று கேட்க",
+      "Ask for one less {name}": "{name} ஒன்று குறைக்கக் கேட்க",
+      "Could not reach the shop just now. This is what this phone remembers.": "இப்போது கடையைத் தொடர்பு கொள்ள முடியல. இந்த போன் நினைவில் வெச்சிருக்கறது இதுதான்.",
+      "That could not be added. The shop may have started on your order.": "அதைச் சேர்க்க முடியல. கடை உங்கள் ஆர்டரைத் தயார் செய்ய ஆரம்பிச்சிருக்கலாம்.",
+      "See the bill": "பில்லைப் பார்க்க",
+      "How we know": "எப்படி தெரியும்",
+      "Estimated, not measured": "மதிப்பிடப்பட்டது, அளக்கப்படவில்லை",
+      "Have a code?": "கூபன் குறியீடு உள்ளதா?",
+      "Discount code": "தள்ளுபடி குறியீடு",
+      "Apply": "பயன்படுத்து",
+      "Checking...": "சரிபார்க்கிறது...",
+      "That code cannot be used here.": "அந்த குறியீட்டை இங்கு பயன்படுத்த முடியாது.",
+      "Could not reach the shop just now.": "இப்போது கடையைத் தொடர முடியவில்லை.",
+      "{n}% off": "{n}% தள்ளுபடி",
+      "{amount} off": "{amount} தள்ளுபடி",
+      "{off} on orders over {min}": "{min}க்கு மேல் ஆர்டர்களுக்கு {off}",
+      "Required": "கட்டாயம்",
+      "Order this again": "இதே மீண்டும் ஆர்டர் செய்ய",
+      "Adding...": "சேர்க்கிறது...",
+      "Nothing from that order is on the menu today.": "அந்த ஆர்டரில் இருந்த எதுவும் இன்று மெனுவில் இல்லை.",
+      "Added {count} of {total}. Not on the menu today: {names}": "{total}ல் {count} சேர்க்கப்பட்டது. இன்று மெனுவில் இல்லை: {names}",
+      "Pay by UPI": "UPI மூலம் பணம் செலுத்து",
+      "Pay {amount} to {who}": "{who}-க்கு {amount} செலுத்தவும்",
+      "Order {token}": "ஆர்டர் {token}",
+      "Google Pay": "Google Pay",
+      "PhonePe": "PhonePe",
+      "Paytm": "Paytm",
+      "Tell the counter once you have paid. They mark it, and your bill appears here.": "பணம் செலுத்தியதும் கவுண்டரில் சொல்லுங்கள். அவர்கள் பதிவு செய்ததும் உங்கள் பில் இங்கே வரும்.",
+      "Download the bill": "பில்லைப் பதிவிறக்கு",
+      "Sent to the kitchen": "சமையலறைக்கு அனுப்பிட்டோம்",
+      "Sending your order to the kitchen": "உங்கள் ஆர்டரை சமையலறைக்கு அனுப்புகிறோம்",
+      "The kitchen has it": "சமையலறையில் கிடைத்துவிட்டது",
+      "The chef is preparing your order": "சமையல்காரர் உங்கள் ஆர்டரைத் தயார் செய்கிறார்",
+      "Token": "டோக்கன்",
+      "Done": "முடிந்தது",
+      "Sent to the kitchen. Token {token}.": "சமையலறைக்கு அனுப்பிட்டோம். டோக்கன் {token}.",
+      "Your order": "உங்கள் ஆர்டர்",
+      "Nothing yet": "இன்னும் ஒன்றும் இல்லை",
+      "One less {name}": "{name} ஒன்று குறைக்க",
+      "One more {name}": "{name} ஒன்று சேர்க்க",
+      "Order changed": "ஆர்டர் மாற்றிட்டோம்",
+      "Order cancelled": "ஆர்டர் கேன்சல் ஆயிடுச்சு",
+
+      /* the order's own screen, once the kitchen has it */
+      "Anything else?": "வேறு ஏதாவது வேணுமா?",
+      "Add item": "உணவு சேர்க்க",
+      "Confirm & send": "உறுதி செய்து அனுப்பு",
+
+      /* The one question this screen asks before it can send, and what it
+         says when it cannot. */
+      "How are you having it?": "எப்படி சாப்பிடப் போறீங்க?",
+      "Eating here": "இங்கேயே சாப்பிட",
+      "Taking it away": "பார்சல் எடுத்துப் போக",
+      "Collecting it": "வந்து வாங்கிக்க",
+      "Delivered": "வீட்டுக்கு டெலிவரி",
+      "Nothing to send yet.": "இன்னும் அனுப்ப ஒன்றும் இல்லை.",
+      "A few details are needed to finish this order.": "இந்த ஆர்டரை முடிக்க சில விவரங்கள் தேவை.",
+      "This shop's smallest order that way is {amount}.": "அந்த முறையில் இந்தக் கடையின் குறைந்தபட்ச ஆர்டர் {amount}.",
+
+      "Add {name}": "{name} சேர்க்க",
+      "Cancellation asked for": "ரத்துக் கோரிக்கை அனுப்பிட்டோம்",
+      "The shop has been asked to cancel it": "ரத்து செய்யக் கடையிடம் கேட்டுவிட்டோம்",
+      "The shop has been asked to change it": "மாற்றம் செய்யக் கடையிடம் கேட்டுவிட்டோம்",
+      "Confirm the change": "மாற்றத்தை உறுதி செய்",
+      "Ask the shop for this change": "இந்த மாற்றத்தைக் கடையிடம் கேள்",
+      "Listening": "கேட்டுக்கொண்டிருக்கிறேன்",
+      "Press and hold while you speak": "பேசும்போது அழுத்திப் பிடித்திருங்கள்",
+      "Type instead": "தட்டச்சு செய்ய வேண்டுமா",
+      "Going to": "இங்கே செல்கிறது",
+      "Add more items": "மேலும் சேர்க்க",
+      "Hold to talk": "பேச அழுத்திப் பிடிக்கவும்",
+      "Undo": "மீட்டெடு",
+      "Sending your order": "உங்கள் ஆர்டரை அனுப்புகிறோம்...",
+      "Changing your order": "உங்கள் ஆர்டரை மாற்றுகிறோம்...",
+      "Cancelling your order": "உங்கள் ஆர்டரை ரத்து செய்கிறோம்...",
+      "Checking your order": "உங்கள் ஆர்டரைப் பார்க்கிறோம்...",
+      "Opening the line": "இணைப்பைத் திறக்கிறோம்...",
+      "Thinking": "யோசிக்கிறேன்...",
+      "Loading the menu": "மெனுவை ஏற்றுகிறோம்...",
+      "Talking to the shop": "கடையுடன் பேசுகிறோம்...",
+      "1 line changed": "1 வரி மாற்றப்பட்டது",
+      "{n} lines changed": "{n} வரிகள் மாற்றப்பட்டன",
+      "The shop has been asked to add it": "இதைச் சேர்க்கக் கடையிடம் கேட்டுவிட்டோம்",
+      "The kitchen has it. A change now goes to the shop to confirm.": "சமையலறைக்குப் போய்விட்டது. இப்போது மாற்றம் வேண்டுமானால் கடை உறுதி செய்ய வேண்டும்.",
+      "The kitchen has started on it, so it cannot be changed now": "சமையல் ஆரம்பிச்சாச்சு, இப்போ மாற்ற முடியாது",
+      "The shop has made the bill, so the counter has to change it": "கடை பில் போட்டாச்சு, கவுண்டரில்தான் மாற்ற முடியும்",
+      "It is paid for, so the counter has to change it": "பணம் செலுத்தியாச்சு, கவுண்டரில்தான் மாற்ற முடியும்",
+      "That order is already cancelled": "அந்த ஆர்டர் ஏற்கனவே ரத்து ஆயிடுச்சு",
+      "The shop could not take that order": "அந்த ஆர்டரை கடையால் எடுக்க முடியல",
+      "This one has to be changed at the counter": "இதை கவுண்டரில்தான் மாற்ற முடியும்",
+      "That order cannot be found": "அந்த ஆர்டர் கிடைக்கல",
+      "Nothing to change there": "மாற்ற ஒன்றும் இல்ல",
+      "The shop cannot be reached right now": "இப்போ கடையைத் தொடர்பு கொள்ள முடியல",
+      "That did not go through. Please try again": "அது போகல. மீண்டும் முயற்சி செய்யுங்க",
+      "The assistant is not available at this shop right now.": "இந்தக் கடையில் உதவியாளர் இப்போது கிடைக்கவில்லை.",
+      "One moment. That is a lot of questions at once; please try again shortly.": "ஒரு நிமிடம். ஒரே நேரத்தில் நிறைய கேள்விகள்; சிறிது நேரம் கழித்து மீண்டும் முயற்சிக்கவும்.",
+      "I could not answer just now. The menu still works the usual way.": "இப்போது பதிலளிக்க முடியவில்லை. மெனு வழக்கம் போல் வேலை செய்யும்.",
+
+      /* the machine's resting screen */
+      "Start your order": "ஆர்டரைத் தொடங்குங்கள்",
+      "Welcome": "வரவேற்கிறோம்",
+      "Touch to start your order": "ஆர்டர் செய்யத் தொடுங்கள்",
+      "Dine in": "இங்கே சாப்பிட",
+      "We bring it to your table": "உங்கள் மேசைக்குக் கொண்டு வருகிறோம்",
+      "Take away": "பார்சல்",
+      "Packed to carry": "எடுத்துச் செல்ல பேக் செய்யப்படும்",
+
+      /* when things go wrong */
+      "This menu is not available": "இந்த மெனு கிடைக்கவில்லை",
+      "Could not load the menu": "மெனுவை ஏற்ற முடியவில்லை",
+      "Check your connection and try again.": "இணைப்பைச் சரிபார்த்து மீண்டும் முயற்சிக்கவும்.",
+      "Menu not loaded": "மெனு ஏற்றப்படவில்லை",
+      "Scan the code on the table again, or ask at the counter.": "மேசையில் உள்ள குறியீட்டை மீண்டும் ஸ்கேன் செய்யுங்கள், அல்லது கவுண்டரில் கேளுங்கள்.",
+      "Unable to load the menu": "மெனுவை ஏற்ற முடியவில்லை",
+      "Unable to reach the server": "சர்வரை அடைய முடியவில்லை",
+      "The server returned an invalid response.": "சர்வர் தவறான பதிலைத் தந்தது.",
+      "You are offline": "இணையம் இல்லை",
+      "Check the internet connection, then tap Retry.": "இணைய இணைப்பைச் சரிபார்த்து, மீண்டும் முயற்சி என்பதைத் தட்டவும்.",
+      "Connection restored. Tap Retry to continue.": "இணைப்பு மீண்டும் வந்தது. தொடர மீண்டும் முயற்சி என்பதைத் தட்டவும்.",
+      "Internet connection is still unavailable.": "இணைய இணைப்பு இன்னும் இல்லை.",
+      "Retry": "மீண்டும் முயற்சி",
+      "Retrying...": "மீண்டும் முயற்சிக்கிறது...",
+      "Retry failed. Check the connection and try again.": "மீண்டும் முயற்சி தோல்வி. இணைப்பைச் சரிபார்த்து மீண்டும் முயற்சிக்கவும்.",
+      "Retry order": "ஆர்டரை மீண்டும் முயற்சி",
+      "Your order is being submitted. Please do not close this page.": "உங்கள் ஆர்டர் அனுப்பப்படுகிறது. இந்தப் பக்கத்தை மூட வேண்டாம்.",
+      "Order could not be completed": "ஆர்டரை முடிக்க முடியவில்லை",
+      "Checkout failed. Please try again.": "ஆர்டர் அனுப்ப முடியவில்லை. மீண்டும் முயற்சிக்கவும்.",
+      "This shop is not taking online orders yet.": "இந்தக் கடை இன்னும் ஆன்லைன் ஆர்டர் எடுக்கவில்லை.",
+      "This shop is not taking orders right now.": "இந்தக் கடை இப்போது ஆர்டர் எடுக்கவில்லை."
+    }
+  };
+
+  function saved() {
+    try {
+      return localStorage.getItem(STORAGE_KEY) || "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function remember(code) {
+    try {
+      localStorage.setItem(STORAGE_KEY, code);
+    } catch (e) {
+      /* A browser that keeps nothing still gets the language for this page. */
+    }
+  }
+
+  function fromUrl() {
+    try {
+      var code = new URLSearchParams(window.location.search).get("lang");
+      return code && LANGS[code] ? code : "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function fromPhone() {
+    var list = navigator.languages || [navigator.language || ""];
+    for (var i = 0; i < list.length; i++) {
+      var code = String(list[i] || "").toLowerCase().split("-")[0];
+      if (LANGS[code]) return code;
+    }
+    return "";
+  }
+
+  var lang = fromUrl();
+  if (lang) remember(lang);
+  else lang = LANGS[saved()] ? saved() : fromPhone() || "en";
+
+  document.documentElement.setAttribute("lang", lang);
+
+  /** The sentence in the customer's language, with {names} filled in. */
+  function t(key, vars) {
+    var table = DICT[lang];
+    var out = table && Object.prototype.hasOwnProperty.call(table, key) ? table[key] : String(key);
+    if (vars) {
+      out = out.replace(/\{(\w+)\}/g, function (m, name) {
+        return vars[name] != null ? String(vars[name]) : m;
+      });
+    }
+    return out;
+  }
+
+  function lookup(text) {
+    var table = DICT[lang];
+    return table && Object.prototype.hasOwnProperty.call(table, text) ? table[text] : null;
+  }
+
+  function untranslatable(el) {
+    var tag = el.nodeName;
+    return tag === "SCRIPT" || tag === "STYLE" || tag === "TEXTAREA" || el.getAttribute("translate") === "no";
+  }
+
+  function underUntranslatable(node) {
+    for (var el = node.parentNode; el && el.nodeType === 1; el = el.parentNode) {
+      if (untranslatable(el)) return true;
+    }
+    return false;
+  }
+
+  /* The text around the sentence - a space before a number, a line break in
+     the markup - stays exactly as it was. */
+  function fixText(node) {
+    var data = node.data;
+    var key = data.trim();
+    if (!key) return;
+    var out = lookup(key);
+    if (out == null || out === key) return;
+    node.data = data.replace(key, out);
+  }
+
+  function fixAttrs(el) {
+    for (var i = 0; i < ATTRS.length; i++) {
+      var name = ATTRS[i];
+      if (!el.hasAttribute(name)) continue;
+      var out = lookup(el.getAttribute(name).trim());
+      if (out != null) el.setAttribute(name, out);
+    }
+  }
+
+  /** Translate everything under `root`, root included. */
+  function walk(root) {
+    if (!root) return;
+    if (root.nodeType === 3) {
+      if (!underUntranslatable(root)) fixText(root);
+      return;
+    }
+    if (root.nodeType !== 1 && root.nodeType !== 9 && root.nodeType !== 11) return;
+    if (root.nodeType === 1) {
+      if (untranslatable(root) || underUntranslatable(root)) return;
+      fixAttrs(root);
+    }
+    var doc = root.ownerDocument || root;
+    var tw = doc.createTreeWalker(root, 5 /* elements and text */, {
+      acceptNode: function (n) {
+        return n.nodeType === 1 && untranslatable(n) ? 2 /* skip the subtree */ : 1;
+      }
+    });
+    var n;
+    while ((n = tw.nextNode())) {
+      if (n.nodeType === 1) fixAttrs(n);
+      else fixText(n);
+    }
+  }
+
+  /* Nodes the parser and the scripts add later come through here. Our own
+     rewrite fires a characterData record too, but the rewritten text is no
+     longer a key, so it stops there. */
+  function observe() {
+    if (!window.MutationObserver) return;
+    new MutationObserver(function (records) {
+      for (var i = 0; i < records.length; i++) {
+        var r = records[i];
+        if (r.type === "characterData") {
+          if (!underUntranslatable(r.target)) fixText(r.target);
+        } else if (r.type === "attributes") {
+          if (!untranslatable(r.target) && !underUntranslatable(r.target)) fixAttrs(r.target);
+        } else {
+          for (var j = 0; j < r.addedNodes.length; j++) walk(r.addedNodes[j]);
+        }
+      }
+    }).observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ATTRS
+    });
+  }
+
+  function nextLang() {
+    var codes = Object.keys(LANGS);
+    return codes[(codes.indexOf(lang) + 1) % codes.length];
+  }
+
+  /* The toggle names the language it would switch TO, in that language, so
+     the person who cannot read the current one can still find their way. */
+  function paintToggles() {
+    var other = nextLang();
+    var list = document.querySelectorAll("[data-lang-toggle]");
+    for (var i = 0; i < list.length; i++) {
+      list[i].textContent = LANGS[other];
+      list[i].setAttribute("lang", other);
+      list[i].setAttribute("aria-label", t("Change language"));
+      list[i].hidden = false;
+    }
+  }
+
+  /* A choice is kept and the page reloaded: every sentence a script has
+     already composed comes back in the new language, and nothing on these
+     pages is lost by a reload - the order lives in IndexedDB. */
+  function set(code) {
+    if (!LANGS[code] || code === lang) return;
+    remember(code);
+    try {
+      var url = new URL(window.location.href);
+      url.searchParams.delete("lang");
+      window.history.replaceState(null, "", url.toString());
+    } catch (e) {
+      /* An old browser reloads with the URL it has. */
+    }
+    window.location.reload();
+  }
+
+  document.addEventListener("click", function (e) {
+    var target = e.target && e.target.closest ? e.target.closest("[data-lang-toggle]") : null;
+    if (!target) return;
+    e.preventDefault();
+    set(target.getAttribute("data-lang-toggle") || nextLang());
+  });
+
+  function start() {
+    walk(document.body);
+    var title = lookup(document.title.trim());
+    if (title) document.title = title;
+    paintToggles();
+  }
+
+  if (lang !== "en") observe();
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+  else start();
+
+  window.i18n = { t: t, lang: lang, languages: LANGS, apply: walk, set: set };
+  window.t = t;
+})();

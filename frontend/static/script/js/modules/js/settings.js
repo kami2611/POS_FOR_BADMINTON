@@ -1,0 +1,10129 @@
+PosnicPro.settings = {
+    /* which reference lists have been fetched this session */
+    _refLoaded: {},
+
+    /*
+     * ORDERS PER TABLE: one number, typed through two controls.
+     *
+     * The setting is a single integer - 1 for one order per table, 0 for no
+     * limit, N for at most N - because that is what the server enforces and
+     * what a count is compared against. A dropdown plus a number box is only
+     * a way of typing it that does not ask a shopkeeper to know that zero
+     * means unlimited.
+     */
+    showTableOrderLimit: function (value) {
+        var n = parseInt(value, 10);
+        if (isNaN(n) || n < 0) { n = 1; }
+        var mode = n === 0 ? '0' : (n === 1 ? '1' : 'max');
+        $('#table_order_limit_mode').val(mode);
+        /* Keep the box at something usable even when it is hidden: a shop
+           that switches to "at most this many" should not find a 1 in a box
+           whose own minimum is 2. */
+        $('#table_order_limit_max').val(String(n > 1 ? n : 2));
+        PosnicPro.settings.tableOrderLimitMode();
+    },
+
+    /** Show or hide the number box. The value itself is read at save time by
+        tableOrderLimitValue, so there is nothing here to keep in step. */
+    tableOrderLimitMode: function () {
+        $('#table_order_limit_max_wrap').toggle($('#table_order_limit_mode').val() === 'max');
+    },
+
+    /** The number that is actually saved. Always a string, like every other
+        field in the settings payload. */
+    tableOrderLimitValue: function () {
+        var mode = $('#table_order_limit_mode').val();
+        if (mode === '0') { return '0'; }
+        if (mode === '1') { return '1'; }
+        var n = parseInt($('#table_order_limit_max').val(), 10);
+        /* A blank or nonsense box must not save as "no limit", which is what
+           parseInt('') || 0 would have done. Two is the smallest number that
+           means anything under "at most this many". */
+        if (isNaN(n) || n < 2) { n = 2; }
+        return String(Math.min(n, 99));
+    },
+    store_telephone: null,
+    /*
+     * #/settings/<x> serves two callers: a 24-hex Mongo id is a recycle-bin
+     * row (the original meaning), anything else is a SECTION deep link
+     * (#/settings/modules, #/settings/tax ...) so a refresh keeps the page
+     * you were on - Config sections finally have routes.
+     */
+    showDetails: function (id) {
+        if (!/^[0-9a-f]{24}$/i.test(String(id))) {
+            PosnicPro.settings.openSection(String(id));
+            return;
+        }
+        var loader = $(".loader-view-recyclebin");
+        loader.find(".loadingSpinner:first").remove();
+        PosnicPro.settings.viewRecycleBinDetails(id);
+    },
+    openSection: function (key) {
+        if (!$('#settings').is(':visible')) {
+            PosnicPro.settings.showDataTablePage();
+        }
+        // Pill ids are v-pills-<key>-tab, with a few legacy ones missing the
+        // suffix (v-pills-unit). Clicking (not tab('show')) runs the pill's
+        // own loader onclick; an already-active pill is a no-op, so the
+        // hash-sync round trip cannot loop.
+        /*
+         * Sections that MOVED keep their old addresses working. The desktop
+         * app and old bookmarks still say #/settings/branches; walking that
+         * into a pill that no longer exists left whatever panes were last
+         * active stacked on screen - the owner's "broken page". A legacy key
+         * routes to the page that owns it now; a key nobody knows lands on
+         * Core Settings rather than on rubble.
+         */
+        if (key === 'handsets') key = 'devices';
+        var LEGACY_SECTIONS = {
+            branches: 'branches',
+            outlet: 'branches',
+            /* #/settings/kiosk was the one channels page. It is four pages now;
+               the storefront settings that address mostly meant are here. */
+            kiosk: 'onlineordering',
+        };
+        if (LEGACY_SECTIONS[key]) {
+            hasher.setHash(LEGACY_SECTIONS[key]);
+            return;
+        }
+        var $pill = $('#v-pills-' + key + '-tab');
+        if (!$pill.length) { $pill = $('#v-pills-' + key); }
+        if (!$pill.length) { key = 'general'; $pill = $('#v-pills-general-tab'); }
+        // NOT :visible - the whole pills rail is display:none now (the
+        // Manage sidebar replaced it), which made every pill "invisible"
+        // and silently refused every section switch. Module gating sets
+        // INLINE display:none on individual pills; that is the real gate.
+        if ($pill.length && $pill.css('display') !== 'none') { $pill[0].click(); }
+        /*
+         * The click ASKS Bootstrap to switch panes; this ENFORCES it.
+         *
+         * The general pane ships 'show active' in the markup, and this page
+         * already carries one duplicated-id landmine (#v-pills-tab exists
+         * twice - the sidebar rail got there first). When the tab plugin
+         * resolves the wrong "previously active" element, it activates the
+         * new pane WITHOUT deactivating general - and the owner's Features
+         * page grew the whole day-to-day settings form underneath its
+         * cards. One pane per section, whatever Bootstrap thought.
+         */
+        var $pane = $('#v-pills-' + key);
+        if ($pane.hasClass('tab-pane')) {
+            $pane.siblings('.tab-pane').removeClass('show active');
+            $pane.addClass('show active');
+        }
+        /* The Manage-sidebar highlight mirrors from shown.bs.tab - which
+           Bootstrap never fires for a pill that is ALREADY active. Core
+           Settings ships active in the markup, so the FIRST entry never
+           highlighted its menu row (owner report). Mirror directly; the
+           event handler doing it again is harmless. */
+        $('.manage-settings-entry').removeClass('active');
+        $('#manage_sec_' + key).addClass('active');
+        if (key === 'general') { PosnicPro.settings.restoreCoreTab(); }
+        if (PosnicPro.desktopSettings) { PosnicPro.desktopSettings.load(key); }
+        if (key === 'taxmodule') { PosnicPro.settings.taxSystemLoad(); }
+        /* A list has to be fetched every time it is opened: a phone that
+           signed in a minute ago belongs on it. */
+        if (key === 'devices' && PosnicPro.handsets) { PosnicPro.handsets.load(); }
+        if (key === 'mobilepos' || key === 'branchpayments') {
+            var base = (typeof API_URL === 'string' && API_URL) || '/api';
+            $('#' + (key === 'mobilepos' ? 'mobile_pos_frame' : 'branch_payments_frame')).attr('src', base.replace(/\/+$/, '') + '/mobile-pos-setup' + (key === 'branchpayments' ? '?view=payments' : ''));
+        }
+        if (key === 'ai') { PosnicPro.settings.ai.load(); }
+    },
+    /*
+     * The branch's tax profile dresses the registration field (T2): every
+     * country has a registration identity - GSTIN, VAT No., TRN, ABN - so
+     * the field shows for everyone, labelled and shaped by the profile.
+     * India keeps exactly its current look; the gst_action machinery is
+     * untouched. Presentation only, and failure leaves things as they are.
+     */
+    applyTaxProfile: function () {
+        PosnicPro.get({ url: 'setting/taxProfile', data: {} }, function (r) {
+            var p = r && r.data;
+            if (!p || !p.registration) { return; }
+            PosnicPro.settings._taxProfile = p;
+            $('.branch-gstin-hide-show').show();
+            $('.branch-gstin-hide-show label lang').text(p.registration.label);
+            $('#branch_gstin_number').attr('placeholder', 'Enter the ' + p.registration.label);
+            if (!p.registration.regex) {
+                $('#branch_gstin_number').removeAttr('minlength').attr('maxlength', 30);
+            }
+        }, function () { /* presentation only - never disturb the page */ });
+    },
+    /*
+     * The Tax System card (PURCHASE_TAX_PLAN G6). One GET fills everything:
+     * the profile says which country family the shop lives in, `decisions`
+     * carries what the shop chose inside it. Save writes ONLY the decision
+     * keys through the tax settings group - the profile is never edited here.
+     */
+    taxSystemLoad: function () {
+        PosnicPro.get({ url: 'setting/taxProfile', data: {} }, function (r) {
+            var d = r && r.data;
+            if (!d) { return; }
+            PosnicPro.settings._taxSystem = d;
+            /* One source of truth for every India-only surface: the resolved
+               profile. Entering this section directly used to leave the
+               Indian GST select visible to a shop in Berlin - the old toggle
+               only ran inside the settings-data callback. */
+            PosnicPro.local.set('tax_profile_code', d.code || '');
+            var isIndia = d.code === 'IN';
+            $('.hide_indian_gst,.indian-gstr').toggle(isIndia);
+            $('#tax_system_india').toggle(isIndia);
+            var dec = d.decisions || {};
+            $('#tax_regime_override').val(dec.tax_regime || '');
+            $('#india_gst_type').val(dec.india_gst_type || 'regular');
+            $('#india_turnover_above_5cr').prop('checked', dec.india_turnover_above_5cr === true || dec.india_turnover_above_5cr === 'true');
+            $('#india_qrmp').prop('checked', dec.india_qrmp === true || dec.india_qrmp === 'true');
+            $('#us_resale_certificate').val(dec.us_resale_certificate || '');
+            PosnicPro.settings.taxSystemRegimeChanged();
+        }, function () { /* configuration card only - never disturb the page */ });
+    },
+    taxSystemRegimeChanged: function () {
+        var d = PosnicPro.settings._taxSystem || {};
+        var override = $('#tax_regime_override').val();
+        var regime = override || d.regime || 'vat_credit';
+        var family = regime === 'vat_credit' ? 'credit method'
+            : regime === 'sales_tax' ? 'no input credit' : 'no consumption tax';
+        var where = d.country || (d.code === '_default' ? 'generic' : d.code);
+        $('#tax_system_summary').text((d.label || 'Tax') + ' — ' + where + ' — ' + family);
+        var india = d.code === 'IN' && regime === 'vat_credit';
+        $('#tax_system_india').toggle(india);
+        $('#tax_system_us').toggle(regime === 'sales_tax');
+        if (india) {
+            var type = $('#india_gst_type').val();
+            $('#india_gst_type_note').text(
+                type === 'composition' ? 'Composition shops collect no GST and claim no input credit - sale and purchase screens follow.'
+                : type === 'unregistered' ? 'An unregistered shop neither collects GST nor claims credit.'
+                : 'Collects GST on sales; input credit on purchases.');
+            var above = $('#india_turnover_above_5cr').is(':checked');
+            $('#india_5cr_note').text(above
+                ? 'B2B e-invoicing is mandatory and items must carry 6-digit HSN codes.'
+                : '4-digit HSN suffices; the QRMP quarterly scheme is available.');
+            $('#india_qrmp_row').toggle(!above);
+        }
+    },
+    taxSystemSave: function () {
+        var values = {
+            tax_regime: $('#tax_regime_override').val() || null,
+            india_gst_type: $('#india_gst_type').val(),
+            india_turnover_above_5cr: $('#india_turnover_above_5cr').is(':checked'),
+            india_qrmp: $('#india_qrmp').is(':checked'),
+            us_resale_certificate: $.trim($('#us_resale_certificate').val())
+        };
+        PosnicPro.put({ url: 'settings/group/tax', data: JSON.stringify(values) }, function (r) {
+            PosnicPro.alert(r.type || 'success', r.message || 'Tax system saved');
+            PosnicPro.settings.taxSystemLoad();
+        }, function (xhr) {
+            var resp = {}; try { resp = jQuery.parseJSON(xhr.responseText) || {}; } catch (e) { }
+            PosnicPro.alert('error', resp.message || 'Could not save the tax system');
+        });
+    },
+    restoreCoreTab: function () {
+        var stored = PosnicPro.local.get('posnic_core_tab');
+        if (stored && $('#core_settings_tabs a[href="' + stored + '"]').length) {
+            $('#core_settings_tabs a[href="' + stored + '"]').tab('show');
+        }
+    },
+    showShortcut: function () {
+        $('#shortcutkey').modal('show');
+        $(document).ready(function () {
+            $("#shortcutkey").on("keypress", function (e) {
+                if ((e.keyCode <= '122')) {
+                    $('#shortcutkey').modal('hide');
+                }
+            });
+        });
+    },
+    restoreDetails: function (id) {
+        PosnicPro.settings.restoreTableData(id);
+    },
+    /*** restore Document Backup ***/
+    restoreTableData: function (id) {
+        var arr = [];
+        var obj = {};
+        obj = id;
+        arr.push(obj);
+        var params = {
+            url: 'setting/restoreBackup',
+            data: JSON.stringify({ data: arr })
+        };
+        PosnicPro.post(params, function (response) {
+            if (response.type === 'success') {
+                PosnicPro.settings.settingsTable();
+                PosnicPro.items.loadSelectCategory();
+                PosnicPro.stocklogs.viewLowStockDashboard();
+                hasher.setHash('settings');
+            }
+            PosnicPro.alert(response.type, response.message);
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    triggerDefault: function (name) {
+        $('.customer_edit_reset').hide();
+        $('default' + name).val('');
+        $('#' + name + '_title').text(PosnicPro.i18n.t('lang_nav_add', 'Add'));
+        $('#' + name + '_button_title').text(PosnicPro.i18n.t('lang_save_title', 'Save'));
+        $('.' + name + '-trigger').val('');
+        $(".infobar-settings-sidebar-overlay").css({ "background": "rgba(0,0,0,0.4)", "position": "fixed" });
+        $("#infobar-settings-sidebar-" + name).addClass("sidebarshow");
+        let default_name = $('.default-' + name + '-name').val();
+        $('#' + name + '_name').val(default_name);
+    },
+    viewRecycleBinDetails: function (id) {
+        var module_name = $('#backuptablelist :selected').val();
+        $(".setting-heading").text(module_name);
+        var loader = $(".loader-view-recyclebin");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        var params = {
+            url: 'setting/getRecycleBin',
+            data: { id: id }
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                var data = response.data;
+                var module = $('#backuptablelist').val();
+                if (module === 'customers') {
+                    PosnicPro.customers.viewCustomerData(response);
+                } else if (module === 'suppliers') {
+                    PosnicPro.suppliers.viewSupplierData(response);
+                } else if (module === 'categories') {
+                    PosnicPro.categories.viewCategoryData(response);
+                } else if (module === 'expenses') {
+                    PosnicPro.expenses.viewExpensesData(response);
+                } else if (module === 'items') {
+                    PosnicPro.items.viewItemData(response);
+                } else if (module === 'branches') {
+                    PosnicPro.branches.viewBranchData(response);
+                } else if (module === 'users') {
+                    PosnicPro.users.viewUserData(response);
+                } else if (module === 'sales') {
+                    $('#sales-total-hide,#viewsale_edit_print_view,#salesitemtitleText,#sale_print_view,#return_print_view').show();
+                    $('#hide_sales_print,#hide_return_print').show();
+                    var data = response.data;
+                    if (data.payment_description === '') {
+                        $('.paynote_hide').hide();
+                    } else {
+                        $('.paynote_hide').show();
+                    }
+                    if (data.sales_description === '') {
+                        $('.salenote_hide').hide();
+                    } else {
+                        $('.salenote_hide').show();
+                    }
+                    if (data.sale_process === 'Add' || data.sale_process === 'Edit' || data.sale_process === 'Hold') {
+                        $('.sale-view-heading').html(PosnicPro.i18n.t('lang_newsale_title', 'Sale'));
+                        $('.hide-sale-return,#salesreturntitleText,#return_print_view,#hide_return_print,#show_sales_print').hide();
+                    } else if (data.sale_process === 'FullReturn') {
+                        $('.sale-view-heading').html(PosnicPro.i18n.t('lang_return_title', 'Return'));
+                        $('.hide-sale-return,#salesreturntitleText,#return_print_view,#hide_return_print').show();
+                        $('#viewsale_edit_print_view,#salesitemtitleText,#sales-total-hide,#sale_print_view,#hide_sales_print,#show_sales_print').hide();
+                    } else {
+                        $('.sale-view-heading').html(PosnicPro.i18n.t('lang_newsale_title', 'Sale'));
+                        $('#sales-total-hide,.hide-sale-return,#salesreturntitleText,#return_print_view,#hide_return_print,#show_sales_print').show();
+                        $('#hide_sales_print,#hide_return_print').hide();
+                    }
+                    var saleId = data._id || data.id || id;
+                    PosnicPro.record_id = saleId;
+                    PosnicPro.sales.view.viewSaleData(response, saleId);
+                } else if (module === 'stocklogs') {
+                    PosnicPro.stocklogs.viewStockData(response);
+                } else {
+                    $('#receiving_button_print_view,#receiving_return_print_view').show();
+                    $('#hide_receiving_print,#hide_receiving_return_print').show();
+                    if (data.receiving_status === 'FullReturn') {
+                        $('.hide-receiving-return,#receiving_return_print_view,#hide_receiving_return_print').show();
+                        $('.hide-receiving-table,#receiving_button_print_view,#show_receiving_print,#hide_receiving_print').hide();
+                    } else if (data.receiving_status === 'Open' || data.receiving_status === 'Received') {
+                        $('.hide-receiving-table,#receiving_button_print_view,#hide_receiving_print').show();
+                        $('.hide-receiving-return,#receiving_return_print_view,#show_receiving_print,#hide_receiving_return_print').hide();
+                    } else {
+                        $('.hide-receiving-table,.hide-receiving-return,#receiving_button_print_view,#receiving_return_print_view,#show_receiving_print').show();
+                        $('#hide_receiving_print,#hide_receiving_return_print').hide();
+                    }
+
+                    $('#receivingtitelText').html('Receiving Details (' + data.receiving_status + ')');
+                    PosnicPro.receivings.view.viewReceivingData(response);
+                }
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    settingsTable: function () {
+        PosnicPro.HideSideBarModal();
+        let branchId = $("#Select_backup_Branch").val().toString();
+        if (branchId !== '') {
+            $("#backup_report_selecter").hide();
+            $("#backup_report_table_div").show();
+            let tableName = $('#backuptablelist').val();
+            (tableName === 'branches') ? $('#hide_branch_recyclebin,#Select_backup_Branch').hide() : $('#hide_branch_recyclebin,#Select_backup_Branch').show();
+            let loader = $(".loader-table-recyclebin,.loader-table-setting");
+            $("<div class='loadingSpinner'></div>").appendTo(loader);
+            PosnicPro.appendRecyclebinDataTableBody(tableName);
+            $("#view_settings").show();
+            let daterange = $("#view_backup_daterange").val();
+            let fields = daterange.split('-');
+            let first_date = fields[0];
+            let last_date = fields[1];
+            let field_select = $("#view_recycle_bin_fields option:selected").val();
+            let field_input = $("#view_recycle_bin_input").val();
+            let table = $('#view_settings');
+            $('#card_recycle').css({ "background-color": "transparent", "margin-bottom": "0px" });
+            let data = {
+                page: table.data('current_page'),
+                limit: parseInt($('#view_settings_per_page  option:selected').text()),
+                table: tableName,
+                starting_date: first_date,
+                ending_date: last_date,
+                branch: $("#Select_backup_Branch").val(),
+                field_select: field_select,
+                field_input: field_input
+            };
+            let params = {
+                url: 'setting/backupTable',
+                data: data
+            };
+            PosnicPro.get(params, function (response) {
+                if (response.type === 'success') {
+                    table.data('total', response.data.total);
+                    table.data('total_pages', response.data.total_pages);
+                    table.data('current_page', response.data.current_page);
+                    table.data('per_page', response.data.per_page);
+                    PosnicPro.paging(response.data.total_pages, response.data.current_page);
+                    table.children('tbody').text('');
+                    $('#view_settings_total').text(response.data.total);
+                    var row_total = (table.data('current_page') - 1) * table.data('per_page') + 1;
+                    $('#view_settings_page_total').text(row_total);
+                    var page_totals = (table.data('current_page') - 1) * table.data('per_page');
+                    $('#view_settings_page_perpage_total').text(page_totals + response.data.list.length);
+                    var currency = PosnicPro.local.get('currencySign');
+                    for (var i = 0; i < response.data.list.length; i++) {
+                        var row = response.data.list[i];
+                        var row_no = (table.data('current_page') - 1) * table.data('per_page') + i + 1;
+                        var action = '<div id="onclick-toolbar-options_' + i + '" class="hidden">' +
+                            '<a data-module = "branch" data-access = "read"  href="#/settings/' + row._id + '" data-id="settings/' + row._id + '"  data-toggle="tooltip" title="View" data-t-title="lang_view" class="point-cursor mobile_tooltip"><i class="feather icon-eye"></i></a>' +
+                            '<a data-module = "branch" data-access = "write" data-toggle="tooltip" title="Restore" data-t-title="lang_restore_title" href="#/settings/' + row._id + '/restore" data-id="settings/' + row._id + '/restore" class="point-cursor mobile_tooltip"><i class="feather icon-repeat"></i></a>' +
+                            '</div>' +
+                            '<div data-toolbar="user-options" class="btn btn-round btn-primary-rgba round-pad" id="onclick-toolbar_' + i + '"><i class="feather icon-more-vertical-"></i></div>';
+                        var updateDate = PosnicPro.convertDate(row.string_date);
+                        if (tableName === 'sales') {
+                            var trow = '<tr> <td><input type="checkbox" class="sales-row-id" id="' + row._id + '" name="id[]" value="' + row._id + '" onclick="PosnicPro.checkboxSelectOne(this,\'sales\');"></td> <td scope="row">' + row_no + '</td>  <td>' + row.sales_id + '</td> <td>' + updateDate + '</td> <td>' + row.customer_name + '</td> <td class="text-center"><span class="badge badge-success-inverse">' + row.sale_process + '</span></td> <td class="text-right">' + currency + '&nbsp;<span class="number">' + row.sales_total + '</span></td> <td><span>' + action + ' </span></td> </tr>';
+                        } else if (tableName === 'receivings') {
+                            var receiving_status = '';
+                            if (row.receiving_status === 'open') {
+                                receiving_status = row.receiving_status;
+                            } else {
+                                if (row.items.length === 0 && row.items_return.length > 0) {
+                                    receiving_status = 'FullReturn';
+                                } else if (row.items_return.length === 0 && row.items.length > 0) {
+                                    receiving_status = row.receiving_status;
+                                } else {
+                                    receiving_status = 'PartialReturn';
+                                }
+                            }
+
+                            var trow = '<tr> <td><input type="checkbox" class="receivings-row-id" id="' + row._id + '" name="id[]" value="' + row._id + '" onclick="PosnicPro.checkboxSelectOne(this,\'receivings\');"></td> <td scope="row">' + row_no + '</td>  <td>' + row.receiving_id + '</td> <td>' + updateDate + '</td> <td>' + row.supplier_name + '</td> <td class="text-center"><span class="badge badge-success-inverse">' + receiving_status + '</span></td> <td class="text-right">' + currency + '&nbsp;<span class="number">' + row.total_amount + '</span></td>  <td><span>' + action + ' </span></td> </tr>';
+                        } else if (tableName === 'branches') {
+                            var trow = '<tr> <td><input type="checkbox" class="branches-row-id" id="' + row._id + '" name="id[]" value="' + row._id + '" onclick="PosnicPro.checkboxSelectOne(this,\'branches\');"></td> <td scope="row">' + row_no + '</td>  <td>' + row.branch_name + '</td> <td><a class="sale_color" href="tel:' + row.store_telephone + '">' + row.store_telephone + '</a></td> <td><a class="sale_color" href="mailto:' + row.store_email + '">' + row.store_email + '</a></td> <td>' + row.store_address + '</td>' + '<td>' + row.state + '</td>' + '<td>' + row.country + '</td>' + '<td><span>' + action + ' </span></td> </tr>';
+                        } else if (tableName === 'categories') {
+                            var discountSign = (row.discount_amount > 0) ? '$' : '%';
+                            if (row.discount_amount > 0) {
+                                var discount = row.discount_amount;
+                            } else {
+                                discount = row.discount_percentage;
+                            }
+                            var image_path = (row.image !== "category.svg") ? row.image : 'static/images/default/' + row.image;
+                            var trow = '<tr> <td><input type="checkbox" class="categories-row-id" id="' + row._id + '" name="id[]" value="' + row._id + '" onclick="PosnicPro.checkboxSelectOne(this,\'categories\');"></td> <td scope="row">' + row_no + '</td>  <td>' + row.name + '</td> <td><img loading="lazy" decoding="async" src=' + image_path + ' width=30 height=20 class="imagezoom" id="' + row.image + '" onclick="PosnicPro.viewImage(this.id,\'category\');"></td> <td>' + discount + '' + discountSign + '</td> <td>' + (row.description || '') + '</td> <td><span>' + action + ' </span></td> </tr>';
+                        } else if (tableName === 'customers') {
+                            var trow = '<tr> <td><input type="checkbox" class="customers-row-id" id="' + row._id + '" name="id[]" value="' + row._id + '" onclick="PosnicPro.checkboxSelectOne(this,\'customers\');"></td> <td scope="row">' + row_no + '</td>  <td>' + row.name + '</td> <td><a class="sale_color" href="tel:' + (row.phone || '') + '">' + (row.phone || '') + '</a></td> <td><a class="sale_color" href="mailto:' + (row.email || '') + '">' + (row.email || '') + '</a></td> <td>' + (row.address || '') + '</td><td><span>' + action + ' </span></td> </tr>';
+                        } else if (tableName === 'expenses') {
+                            var trow = '<tr> <td><input type="checkbox" class="expenses-row-id" id="' + row._id + '" name="id[]" value="' + row._id + '" onclick="PosnicPro.checkboxSelectOne(this,\'expenses\');"></td> <td scope="row">' + row_no + '</td>  <td>' + currency + '&nbsp;<span class="number">' + row.amount + '</span></td> <td>' + row.type + '</td> <td>' + row.category + '</td>  <td>' + row.recipientname + '</td> <td>' + row.approvedby + '</td> <td>' + (row.description || '') + '</td><td><span>' + action + ' </span></td> </tr>';
+                        } else if (tableName === 'items') {
+                            var image_path = (row.image !== "item.svg") ? row.image : 'static/images/default/' + row.image;
+                            var trow = '<tr> <td><input type="checkbox" class="items-row-id" id="' + row._id + '" name="id[]" value="' + row._id + '" onclick="PosnicPro.checkboxSelectOne(this,\'items\');"></td> <td scope="row">' + row_no + '</td>  <td>' + row.name + '</td> <td><img loading="lazy" decoding="async" src=' + image_path + ' width=30 height=20 class="imagezoom" id="' + row.image + '" onclick="PosnicPro.viewImage(this.id,\'image\');"></td> <td>' + row.itemid + '</td> <td>' + currency + '&nbsp;<span class="number">' + row.selling_price + '</span></td> <td>' + row.available_quantity + '</td> <td><span>' + action + ' </span></td> </tr>';
+                        } else if (tableName === 'suppliers') {
+                            var trow = '<tr> <td><input type="checkbox" class="suppliers-row-id" id="' + row._id + '" name="id[]" value="' + row._id + '" onclick="PosnicPro.checkboxSelectOne(this,\'suppliers\');"></td> <td scope="row">' + row_no + '</td>  <td>' + row.name + '</td> <td><a class="sale_color" href="tel:' + (row.phone || '') + '">' + (row.phone || '') + '</a></td> <td><a class="sale_color" href="mailto:' + (row.email || '') + '">' + (row.email || '') + '</a></td> <td>' + (row.address || '') + '</td> <td><span>' + action + ' </span></td> </tr>';
+                        } else if (tableName === 'registers') {
+                            var trow = '<tr> <td data-module="user" data-access="delete"><input type="checkbox" class="registers-row-id" id="' + row._id + '" name="id[]" value="' + row._id + '" onclick="PosnicPro.checkboxSelectOne(this,\'registers\');"></td> <td scope="row">' + row_no + '</td> <td>' + row.register_name + '</td><td>' + updateDate + '</td><td>' + row.sales_id + '</td><td>' + row.created_by + '</td><td>' + row.branch_name + '</td><td class="text-right">' + currency + '&nbsp;<span class="number">' + row.register_amount + '</span></td> <td><span>' + action + ' </span></td> </tr>';
+                        } else if (tableName === 'stocklogs') {
+                            var trow = '<tr> <td data-module="user" data-access="write"><input type="checkbox" class="stocklogs-row-id" id="' + row._id + '" name="id[]" value="' + row._id + '" onclick="PosnicPro.checkboxSelectOne(this,\'stocklogs\');"></td> <td scope="row">' + row_no + '</td>  <td class="text-center">' + row.item_barcode_id + '</td> <td>' + row.item_name + '</td><td>' + updateDate + '</td> <td class="text-center"><span class="badge badge-success-inverse">' + row.process + '</span></td><td class="text-right">' + currency + '&nbsp;<span class="number">' + row.opening_balance + '</span></td><td class="text-right">' + currency + '&nbsp;<span class="number">' + row.closing_balance + '</span></td> <td><span>' + action + ' </span></td> </tr>';
+                        } else {
+                            var image_path = (row.image !== "user.svg") ? row.image : 'static/images/default/' + row.image;
+                            var trow = '<tr> <td><input type="checkbox" class="users-row-id" id="' + row._id + '" name="id[]" value="' + row._id + '" onclick="PosnicPro.checkboxSelectOne(this,\'users\');"></td> <td scope="row">' + row_no + '</td>  <td>' + row.username + '</td> <td><img loading="lazy" decoding="async" src=' + image_path + ' width=30 height=20 class="imagezoom" id="' + row.image + '" onclick="PosnicPro.viewImage(this.id,\'user\');"></td> <td><a class="sale_color" href="mailto:' + (row.email || '') + '">' + (row.email || '') + '</a></td> <td>' + row.usertype + '</td><td><span>' + action + ' </span></td> </tr>';
+                        }
+                        $('#view_settings').children('tbody').append(trow);
+                    }
+                    $('span.number').number(true, 2);
+                    $(document).ready(function () {
+                        for (var i = 0; i < response.data.list.length; i++) {
+                            $('#onclick-toolbar_' + i).toolbar({
+                                content: '#onclick-toolbar-options_' + i,
+                                event: 'click',
+                                style: 'primary',
+                                hideOnClick: true
+                            });
+                            $('#onclick-toolbar_' + i).on('toolbarItemClick', function (event, element) {
+                                hasher.setHash($(element).data('id'));
+                                $(this).trigger('click');
+                                $('.mobile_tooltip').tooltip('hide');
+                            });
+                        }
+                    });
+                    PosnicPro.setSelectedCheckbox(PosnicPro[tableName + "_checkbox"], tableName);
+                    loader.find(".loadingSpinner:first").remove();
+                } else {
+                    PosnicPro.alert(response.type, response.message);
+                }
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+        } else {
+            $('#card_recycle').css({ "display": "block", "background-color": "#fff", "margin-bottom": "30px" });
+            $("#Select_backup_Branch").select2('focus');
+            var branch_id = PosnicPro.local.get('branch_id_set');
+            $('.display-current-branch').select2('val', [branch_id]);
+        }
+    },
+    showDataTablePage: function () {
+        $('.print_url').hide();
+        if (PosnicPro.local.get('userplan') !== 'free') {
+            $('.print_url').show();
+        }
+        PosnicPro.HideSideBarModal();
+        PosnicPro.dashboard.datePicker();
+        $('.nav-link-active,.tab-pane-active,.dropdown-item').removeClass('active');
+        $(".vertical-layout").removeClass("toggle-menu");
+        $(".vertical-menu li a").removeClass("active");
+        $('.dropdown-item').removeClass('active');
+        $('.page_loader,#osk-container,#danger_zone').hide();
+        $('.page-title-box,#settings,#dangerZone,#dangetzoneUserverify').show();
+        $('#v-pills-manage-tab,#view_config_page').addClass('active');
+        $('#v-pills-manage').addClass('show active');
+        $('.dashboard_img_menu').hide();
+        $('#image_sidebar_config').show();
+        if ($('a#v-pills-recyclebin-tab').hasClass('active')) {
+            PosnicPro.settings.settingsTable();
+        }
+        PosnicPro.settings.coreTabsOverflow();
+        PosnicPro.settings.restoreCoreTab();
+        // Every Config open re-reads server truth. The controls used to be
+        // populated only at login (the DOM carried them between visits), so
+        // a change saved on another till showed stale here until re-login -
+        // and "does Module On/Off preserve the selections?" deserves a
+        // guaranteed yes, not a usually.
+        PosnicPro.settings.initPrintEditors();
+        PosnicPro.settings.viewSettings(PosnicPro.local.get('branch_id_set'));
+        /* Core Settings is the tab that is already active, so a click handler
+           alone never fires on the way in - the switches would sit at their
+           markup default and disagree with what is stored. */
+        PosnicPro.settings.loadSharing();
+        /* Which tills may print this shop's bills. Guarded because the module
+           is only on the pages that carry the card, and a settings page that
+           throws here would stop drawing everything after it. */
+        if (PosnicPro.printTills) PosnicPro.printTills.render();
+    },
+    settingImageFormSubmit: function () {
+        if ($('#setting_image_value').val() !== '') {
+            var data = new FormData(document.getElementById("setting_image_add"));
+            PosnicPro.requestImage('POST', "setting/updateBranchLogo", data, false, function (response) {
+                if (response.type === 'success') {
+                    var imgdata = response.data.replace(/\s/g, '');
+                    $('#setting_logo_value').val(imgdata);
+                    var image_path = (imgdata !== "store.png") ? imgdata : 'static/images/default/' + imgdata;
+                    $('#previewing,#store_image').attr('src', image_path);
+                    PosnicPro.settings.updatedImage();
+                } else {
+                    PosnicPro.alert(response.type, response.message);
+                }
+            });
+        } else {
+            PosnicPro.alert('success', PosnicPro.i18n.t('lang_image_updated', 'Image updated'));
+        }
+        return false;
+    },
+    updatedImage: function () {
+        var params = {
+            url: 'setting/storedImageData',
+            data: JSON.stringify(PosnicPro.getFormData($('#setting_image_add')))
+        };
+        PosnicPro.put(params, function (response) {
+            if (response.type === 'success') {
+                PosnicPro.local.set('branchimage', response.data);
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    /*store details Add/Update function*/
+    generalSetting: function (value) {
+        if ($('#store_name').val() !== '' && $('#store_telephone').val() !== '' && PosnicPro.validateEmail($('#store_email').val()) && $('#setting_country').val() !== '' && $('#setting_state').val() !== '' && $('#currency').val() !== '' && $('#time_zone').val() !== '' && $('#storedate').val() !== '' && $('#store_address').val() !== '' && $('#printing_address').val() !== '') {
+            var loader = $(".loader-view-generalsetting");
+            $("<div class='loadingSpinner'></div>").appendTo(loader);
+            var currency = $('#currency_type').val();
+            var timeZone = $("#time_zone").select2("data");
+            var currencyText = $('#currencyText').val();
+            var currencyTextname = $('#currencyTextname').val();
+            var timezoneValue = {
+                time_zone: timeZone[0].element.attributes['data-timezone-name'].value
+            };
+            let countryValue = $("#setting_country").select2("data");
+            let countryId = {
+                country_id: countryValue[0].element.attributes['data-setting-id'].value
+            };
+            var formData = PosnicPro.getFormData($('#setting_add'));
+            /* The form lives on the Branch edit page now and always names its
+               target branch; registers ride along (class-collected - the
+               dynamic rows are not form-serialized). Local state refresh only
+               applies when the branch being edited IS the session branch. */
+            var target = $('#edit_branch_target').val() || '';
+            var editingCurrent = !target || target === PosnicPro.local.get('branch_id_set');
+            var registers = {
+                register: $('.be-register').map(function () { return $(this).val(); }).get()
+                    .filter(function (v) { return v && v.trim().length >= 3; })
+            };
+            var params = {
+                url: 'setting/updateGeneralSetting',
+                data: JSON.stringify(Object.assign(formData, timezoneValue, countryId, registers))
+            };
+            PosnicPro.put(params, function (response) {
+                if (response.type === 'success' && !editingCurrent) {
+                    loader.find(".loadingSpinner:first").remove();
+                    PosnicPro.alert(response.type, response.message);
+                    hasher.setHash('branches');
+                    PosnicPro.branches.branchesTable('branches');
+                    return;
+                }
+                if (response.type === 'success') {
+                    $('.print_store_address').text(response.data['printing_address']);
+                    $('.print_store_telephone').text(response.data['store_telephone']);
+                    $('.print_store_alternativephone').text(response.data['store_alternativephone']);
+                    $('.print_store_email').text(response.data['store_email']);
+                    $('.print_store_gst').text(response.data['branch_gstin_number']);
+                    $('.print_store_name').text(response.data['branch_name']);
+                    $('.display-currency').text(currency);
+                    $('#setting_status').val("Yes");
+                    PosnicPro.local.set("country_setting", response.data.country);
+                    PosnicPro.local.set('countryid', response.data['country_id']);
+                    PosnicPro.local.set('countryname', '');
+                    PosnicPro.local.set('statename', '');
+                    PosnicPro.local.set('countryname', response.data['country']);
+                    PosnicPro.local.set('statename', response.data['state']);
+                    PosnicPro.local.set('dateformatset', response.data['clientdate']);
+                    PosnicPro.local.set('setdateformat', response.data['serverdate']);
+                    PosnicPro.local.set('timezone', response.data['time_zone']);
+                    PosnicPro.local.set('timeformat', response.data['time_format']);
+                    PosnicPro.local.set('currencySign', currency);
+                    $(".branch-name").text(response.data['branch_name']);
+                    PosnicPro.local.set('branchname', response.data['branch_name']);
+                    PosnicPro.local.set('branchemail', response.data['store_email']);
+                    PosnicPro.local.set('branchphone', response.data['store_telephone']);
+                    PosnicPro.local.set('branchaddress', response.data['store_address']);
+                    PosnicPro.local.set('branchgstin', response.data['branch_gstin_number'] || '');
+                    
+                    // Store general settings including hardware_weight_machine_enable
+                    var generalSettings = {
+                        hardware_weight_machine_enable: response.data['hardware_weight_machine_enable'] || false,
+                        till_lock_enable: response.data['till_lock_enable'] || false,
+                        till_lock_idle_minutes: response.data['till_lock_idle_minutes'] || 0,
+                        staff_shifts_enable: response.data['staff_shifts_enable'] !== false,
+                        staff_tips_enable: response.data['staff_tips_enable'] === true,
+                        staff_roster_enable: response.data['staff_roster_enable'] !== false,
+                        cash_register_enable: response.data['cash_register_enable'] !== false,
+                        module_tax_enable: response.data['module_tax_enable'] !== false,
+                        module_credit_enable: response.data['module_credit_enable'] !== false,
+                        module_marketing_enable: response.data['module_marketing_enable'] !== false,
+                        module_messaging_enable: response.data['module_messaging_enable'] !== false,
+                        module_channels_enable: response.data['module_channels_enable'] !== false,
+                        module_online_ordering_enable: response.data['module_online_ordering_enable'] !== false,
+                        module_kiosk_enable: response.data['module_kiosk_enable'] !== false,
+                        module_captain_enable: response.data['module_captain_enable'] !== false,
+                        module_mobile_pos_enable: response.data['module_mobile_pos_enable'] === true,
+                        module_delivery_partners_enable: response.data['module_delivery_partners_enable'] !== false,
+                        module_webshop_enable: response.data['module_webshop_enable'] !== false,
+                        module_recyclebin_enable: response.data['module_recyclebin_enable'] !== false,
+                        module_demo_data_enable: response.data['module_demo_data_enable'] !== false,
+                        module_themes_enable: response.data['module_themes_enable'] !== false,
+                    ai_enabled: response.data['ai_enabled'] !== false,
+                        module_cashbook_enable: response.data['module_cashbook_enable'] !== false,
+                        quick_sale_enable: response.data['quick_sale_enable'] !== false,
+                        quotes_enable: response.data['quotes_enable'] !== false,
+                        invoices_enable: response.data['invoices_enable'] !== false,
+                        custom_charges_enable: response.data['custom_charges_enable'] === true,
+                        first_run_done: PosnicPro.features.keepFirstRunFlag(response.data),
+                        first_run_decided: PosnicPro.features.keepFirstRunFlag(response.data, 'first_run_decided')
+                    };
+                    PosnicPro.local.set('general_settings', JSON.stringify(generalSettings));
+                    PosnicPro.shiftWidget.applyEnabled();
+                    
+                    let branchRecord = [];
+                    branchRecord.push({ name: response.data['branch_name'], phone: response.data['store_telephone'], email: response.data['store_email'], address: response.data['store_address'], image: response.data['branch_image'] });
+                    db.customerDisplay.put({ id: '2', 'clear': 'no', 'get': 'no', branch: branchRecord });
+                    PosnicPro.commonDate();
+                    $('.hide_indian_gst').hide();
+                    $('.indian-gstr').hide();
+                    PosnicPro.local.set('gst_action', 'disable');
+                    if (response.data['country'] === 'India') {
+                        $('.hide_indian_gst').show();
+                        $('.indian-gstr').show();
+                        if ($('#indian_gst').val() === 'gst_on') {
+                            $('.disable_indian_gst').show();
+                            PosnicPro.local.set('gst_action', 'enable');
+                        } else {
+                            $('.disable_indian_gst').hide();
+                            PosnicPro.local.set('gst_action', 'disable');
+                        }
+                    } else {
+                        $('.hide_indian_gst').hide();
+                        $('.indian-gstr').hide();
+                        PosnicPro.local.set('gst_action', 'disable');
+                    }
+                    PosnicPro.settings.applyTaxProfile();
+                    PosnicPro.settings.taxSystemLoad();
+                    loader.find(".loadingSpinner:first").remove();
+                    // Saved from the Branch edit page: back to the list.
+                    if (target) {
+                        hasher.setHash('branches');
+                        PosnicPro.branches.branchesTable('branches');
+                    }
+                }
+                PosnicPro.alert(response.type, response.message);
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+            return false;
+        }
+    },
+    emailPhpStoreSettings: function () {
+        if (PosnicPro.validateEmail($('#smtp_php_mail').val())) {
+            var loader = $(".loader-view-mail");
+            $("<div class='loadingSpinner'></div>").appendTo(loader);
+            var params = {
+                url: 'setting/updatePhpEmailSetting',
+                data: JSON.stringify(PosnicPro.getFormData($('#php_setting_add')))
+            };
+            PosnicPro.put(params, function (response) {
+                if (response.type === 'success') {
+                    PosnicPro.alert(response.type, response.message);
+                    $('#setting_status').val("Yes");
+                    loader.find(".loadingSpinner:first").remove();
+                } else {
+                    PosnicPro.alert(response.type, response.message);
+                }
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+            return false;
+        }
+    },
+    way2smsSettings: function () {
+        var loader = $(".loader-view-sms");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        var params = {
+            url: 'setting/updateWay2SmsSetting',
+            data: JSON.stringify(PosnicPro.getFormData($('#sms_setting')))
+        };
+        PosnicPro.put(params, function (response) {
+            PosnicPro.alert(response.type, response.message);
+            loader.find(".loadingSpinner:first").remove();
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+        return false;
+    },
+    textlocalsmsSettings: function () {
+        var loader = $(".loader-view-sms");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        var params = {
+            url: 'setting/updateTextLocalSmsSetting',
+            data: JSON.stringify(PosnicPro.getFormData($('#textlocal_setting')))
+        };
+        PosnicPro.put(params, function (response) {
+            PosnicPro.alert(response.type, response.message);
+            loader.find(".loadingSpinner:first").remove();
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+        return false;
+    },
+    getDefaultCustomerDetails: function (customer) {
+        var params = {
+            url: 'setting/getDefaultCustomer',
+            data: { data: { customer: customer } }
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                $('#default_customer').append('<option value="' + response.data['customer_id'] + '">' + response.data['customer_name'] + '</option>');
+                PosnicPro.local.set('defaultcustomer', JSON.stringify(response.data['customer']));
+                $('.default-customer-id').val(response.data['customer_id']);
+                $('.default-customer-name').val(response.data['customer_name']);
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    getDefaultSupplierDetails: function (supplier) {
+        var params = {
+            url: 'setting/getDefaultSupplier',
+            data: { data: { supplier: supplier } }
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                $('#default_supplier').append('<option value="' + response.data['supplier_id'] + '">' + response.data['supplier_name'] + '</option>');
+                PosnicPro.local.set('defaultsupplier', JSON.stringify(response.data['supplier']));
+                $('.default-supplier-id').val(response.data['supplier_id']);
+                $('.default-supplier-name').val(response.data['supplier_name']);
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    /*To display the setting details*/
+    viewSettings: function (id) {
+        var params = {
+            url: 'branches/getOneStore',
+            data: 'id=' + id
+        };
+        $('#footer_print,#header_print').html('').text('');
+        PosnicPro.settings._printDocs = { header: '', footer: '' };
+        if (PosnicPro.settings._editorsReady) { $('#footer_print,#header_print').summernote('code', ''); }
+        let loader = $(".loader-table-setting");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                loader.find(".loadingSpinner:first").remove();
+                var data = response.data;
+                let country_id = data.country_id;
+                PosnicPro.local.set('countryid', country_id);
+                PosnicPro.settings.loadSelectSettingState(country_id);
+                PosnicPro.record_id = id;
+                PosnicPro.roundoff = data.roundOff;
+                // Hidden when the module is off OR nothing is configured.
+                (data.cash_register_enable === false || data.register.length === 0)
+                    ? $('.cashRegisterModule').css('display', 'none')
+                    : $('.cashRegisterModule').css('display', 'block');
+                $('#id').val(PosnicPro.record_id);
+                $('#razor_key').text(data.razorKey);
+                $('#razor_url').text(data.razorUrl);
+                $('#store_name').val(data.branch_name);
+                $('#store_address').val(data.store_address);
+                $('#address').val(data.address);
+                $('#store_email').val(data.store_email);
+                $('#store_telephone').val(data.store_telephone);
+                $('#store_alternativephone').val(data.store_alternativephone);
+                $('#place').val(data.place);
+                $('#city').val(data.city);
+                $('#pincode').val(data.pincode);
+                $('#website').val(data.website);
+                $('#languge').val(data.languge);
+                $('#printing_address').val(data.printing_address);
+                $('#smtp_username').val(data.smtp_username);
+                $('#smtp_hostname').val(data.smtp_hostname);
+                $('#smtp_password').val(data.smtp_password);
+                $('#smtp_port').val(data.smtp_port);
+                $('.from_mail').val(data.from_mail);
+                $('#smtp_php_to_mail').val(data.to_mail);
+                $('#sms_type').val(data.smstype);
+                $('#notification_value').val(data.notification_range);
+                localStorage.setItem("notificationrange", data.notification_range);
+                $('#serverdate').val(data.server_dateformat);
+                $('#dateText').val(data.dateformat_text);
+                // Credentials no longer come back from the server (S4), so these
+                // load empty by design; markSavedSecrets below says which are set.
+                $('#way2sms_api').val(data.way2sms_api || '');
+                $('#way2sms_userid').val(data.way2sms_userid || '');
+                $('#way2sms_password').val(data.way2sms_password || '');
+                $('#textlocal_sender').val(data.textlocal_sender);
+                $('#textlocal_api').val(data.textlocal_api || '');
+                $('#sales_prefix').val(data.sales_prefix || 'S');
+                /* WHEN THE BILL NUMBER STARTS AGAIN. Empty is off, which is
+                   what a branch that has never been asked reads as, and what
+                   every shop did before this existed. The month only means
+                   anything for a financial year, so it is hidden otherwise. */
+                $('#bill_number_reset').val(
+                    ['financial', 'calendar'].indexOf(String(data.bill_number_reset || '')) > -1
+                        ? String(data.bill_number_reset)
+                        : ''
+                );
+                PosnicPro.settings.fillFinancialYearMonths();
+                $('#bill_number_fy_start_month').val(String(Number(data.bill_number_fy_start_month) || 4));
+                PosnicPro.settings.showFinancialYearMonth();
+                $('#email_smtp_host').val(data.email_smtp_host || '');
+                $('#email_smtp_port').val(data.email_smtp_port || '');
+                $('#email_smtp_secure').prop('checked', data.email_smtp_secure === true || data.email_smtp_secure === 'true');
+                $('#email_smtp_username').val(data.email_smtp_username || '');
+                $('#email_smtp_password').val(data.email_smtp_password || '');
+                $('#email_smtp_from').val(data.email_smtp_from || '');
+                PosnicPro.settings.markSavedSecrets(data.secrets_configured);
+                $('#quote_default_payment_method').val(data.quote_default_payment_method || '');
+                $('#quote_default_bank_details').val(data.quote_default_bank_details || '');
+                $('#quote_default_terms').val(data.quote_default_terms || '');
+                $('#quote_default_signature').val(data.quote_default_signature || '');
+                PosnicPro.local.set('quotesignature', data.quote_default_signature || '');
+                /* Invoices (INVOICING_MODULE_DESIGN): prefix, credit days, terms. The
+                   terms are cached for the A4 receipt too, which already reads
+                   invoice_terms and until now found nothing there. */
+                $('#invoice_prefix').val(data.invoice_prefix || 'INV-');
+                $('#invoice_due_days').val(data.invoice_due_days !== undefined && data.invoice_due_days !== null && data.invoice_due_days !== '' ? data.invoice_due_days : 30);
+                $('#invoice_terms').val(data.invoice_terms || '');
+                PosnicPro.local.set('invoice_terms', data.invoice_terms || '');
+                if (data.quote_default_signature) {
+                    $('#quote_signature_thumb').attr('src', data.quote_default_signature).show();
+                    $('#quote_signature_clear').show();
+                } else {
+                    $('#quote_signature_thumb').hide();
+                    $('#quote_signature_clear').hide();
+                }
+                $('#receiving_prefix').val(data.receiving_prefix || 'P');
+                $('#allow_sale_date_edit').prop('checked', data.allow_sale_date_edit !== 'false' && data.allow_sale_date_edit !== false);
+                PosnicPro.local.set('allow_sale_date_edit', (data.allow_sale_date_edit === 'false' || data.allow_sale_date_edit === false) ? 'false' : 'true');
+                const dbValue = data.sms_auto_send_time; // Replace with your actual database value
+                let [time, period] = dbValue.split(' '); // Split into time and AM/PM
+                let [hour, minute] = time.split(':'); // Split into hour and minute
+
+                hour = parseInt(hour, 10);
+                if (period === 'PM' && hour < 12) {
+                    hour += 12;
+                } else if (period === 'AM' && hour === 12) {
+                    hour = 0; // Midnight case
+                }
+                const formattedTime = hour.toString().padStart(2, '0') + ':' + minute;
+                $("#sms_auto_send_time").val(formattedTime);
+                $("#sms_auto_send_period").val(data.sms_auto_send_time);
+                $("#sms_retry_period option[value='" + data.sms_retry_period + "']").prop("selected", true);
+                $("#sms_max_retries option[value='" + data.sms_max_retries + "']").prop("selected", true);
+                $("#print_type option[value='" + data.print_type + "']").prop("selected", true);
+                /* One unless the shop said otherwise: a branch saved before
+                   this existed has no value, and must keep printing once. */
+                var bill_copies = Number(data.bill_print_copies) > 0 ? Number(data.bill_print_copies) : 1;
+                $("#bill_print_copies option[value='" + bill_copies + "']").prop("selected", true);
+                let print_size = (typeof (data.print_size) !== "undefined" && data.print_size !== null) ? data.print_size : 'receipt_medium';
+                $("#print_size option[value='" + print_size + "']").prop("selected", true);
+                PosnicPro.local.set('printing_size', print_size);
+                let print_character = (typeof (data.print_character) !== "undefined" && data.print_character !== null) ? data.print_character : 'default';
+                $("#print_character option[value='" + print_character + "']").prop("selected", true);
+                PosnicPro.local.set('printing_max_char', print_character);
+                
+                // Module On/Off switches (checkboxes since the toggles-only
+                // rebuild). ON unless explicitly false, except tips (opt-in)
+                // and the hardware/PIN switches which shipped off.
+                $('#hardware_weight_machine_enable').prop('checked', data.hardware_weight_machine_enable === true);
+                $('#till_lock_enable').prop('checked', data.till_lock_enable === true);
+                $('#till_lock_idle_minutes').val(String(data.till_lock_idle_minutes || 0));
+                /*
+                 * `?? 1`, NOT `|| 1`. Zero is a real answer here - it means no
+                 * limit - and `||` would quietly turn a shop that deliberately
+                 * allows any number of orders per table back into a shop that
+                 * allows one, every time this screen loaded.
+                 */
+                PosnicPro.settings.showTableOrderLimit(data.table_order_limit ?? 1);
+                $('#staff_shifts_enable').prop('checked', data.staff_shifts_enable !== false);
+                $('#staff_tips_enable').prop('checked', data.staff_tips_enable === true);
+                $('#staff_roster_enable').prop('checked', data.staff_roster_enable !== false);
+                $('#cash_register_enable').prop('checked', data.cash_register_enable !== false);
+                $('#module_tax_enable').prop('checked', data.module_tax_enable !== false);
+                $('#module_credit_enable').prop('checked', data.module_credit_enable !== false);
+                $('#module_marketing_enable').prop('checked', data.module_marketing_enable !== false);
+                $('#module_messaging_enable').prop('checked', data.module_messaging_enable !== false);
+                $('#module_online_ordering_enable').prop('checked', data.module_online_ordering_enable !== false);
+                $('#module_kiosk_enable').prop('checked', data.module_kiosk_enable !== false);
+                $('#module_captain_enable').prop('checked', data.module_captain_enable !== false);
+                $('#module_mobile_pos_enable').prop('checked', data.module_mobile_pos_enable === undefined ? data.mobile_pos?.enabled === true : data.module_mobile_pos_enable === true);
+                $('#module_delivery_partners_enable').prop('checked', data.module_delivery_partners_enable !== false);
+                $('#module_webshop_enable').prop('checked', data.module_webshop_enable !== false);
+                $('#module_recyclebin_enable').prop('checked', data.module_recyclebin_enable !== false);
+                $('#module_demo_data_enable').prop('checked', data.module_demo_data_enable !== false);
+                /* What it was BEFORE anybody touched it. Turning demo data
+                   back on is the only case that needs the server, and off->on
+                   cannot be told from on->on without this. */
+                PosnicPro.settings._demoWasOn = data.module_demo_data_enable !== false;
+                $('#module_themes_enable').prop('checked', data.module_themes_enable !== false);
+                /* AI assistance. !== false like its neighbours: absent means
+                   on, which is what offOnly stores. */
+                $('#ai_enabled').prop('checked', data.ai_enabled !== false);
+                $('#pl_include_cashbook').prop('checked', data.pl_include_cashbook !== false);
+                $('#module_cashbook_enable').prop('checked', data.module_cashbook_enable !== false);
+                $('#quick_sale_enable').prop('checked', data.quick_sale_enable !== false);
+                $('#quotes_enable').prop('checked', data.quotes_enable !== false);
+                $('#invoices_enable').prop('checked', data.invoices_enable !== false);
+                $('#custom_charges_enable').prop('checked', data.custom_charges_enable === true);
+
+                // Store general settings including hardware_weight_machine_enable
+                var generalSettings = {
+                    hardware_weight_machine_enable: data.hardware_weight_machine_enable || false,
+                    till_lock_enable: data.till_lock_enable || false,
+                    till_lock_idle_minutes: data.till_lock_idle_minutes || 0,
+                    table_order_limit: data.table_order_limit ?? 1,
+                    staff_shifts_enable: data.staff_shifts_enable !== false,
+                    staff_tips_enable: data.staff_tips_enable === true,
+                    staff_roster_enable: data.staff_roster_enable !== false,
+                    cash_register_enable: data.cash_register_enable !== false,
+                    module_tax_enable: data.module_tax_enable !== false,
+                    module_credit_enable: data.module_credit_enable !== false,
+                    module_marketing_enable: data.module_marketing_enable !== false,
+                    module_messaging_enable: data.module_messaging_enable !== false,
+                    module_channels_enable: data.module_channels_enable !== false,
+                    module_online_ordering_enable: data.module_online_ordering_enable !== false,
+                    module_kiosk_enable: data.module_kiosk_enable !== false,
+                    module_captain_enable: data.module_captain_enable !== false,
+                    module_mobile_pos_enable: data.module_mobile_pos_enable === true,
+                    module_delivery_partners_enable: data.module_delivery_partners_enable !== false,
+                    module_webshop_enable: data.module_webshop_enable !== false,
+                    module_recyclebin_enable: data.module_recyclebin_enable !== false,
+                    module_demo_data_enable: data.module_demo_data_enable !== false,
+                    module_themes_enable: data.module_themes_enable !== false,
+                    ai_enabled: data.ai_enabled !== false,
+                    module_cashbook_enable: data.module_cashbook_enable !== false,
+                    quick_sale_enable: data.quick_sale_enable !== false,
+                    quotes_enable: data.quotes_enable !== false,
+                    invoices_enable: data.invoices_enable !== false,
+                    custom_charges_enable: data.custom_charges_enable === true,
+                    first_run_done: PosnicPro.features.keepFirstRunFlag(data),
+                    first_run_decided: PosnicPro.features.keepFirstRunFlag(data, 'first_run_decided')
+                };
+                PosnicPro.local.set('general_settings', JSON.stringify(generalSettings));
+                PosnicPro.shiftWidget.applyEnabled();
+                PosnicPro.settings.applyModuleNav();
+                
+                $('.display-branch-name').html(data.branch_name);
+                $('.display-tax-value').html(data.tax_percentage);
+                $('.display-tax-text').html(data.tax_percentage);
+                $('.display-discount-amount-text').html(data.discount_amount);
+                $('.display-discount-amount-value').val(data.discount_amount);
+                $('.display-discount-percentage-text').html(data.discount_percentage);
+                $('.display-discount-percentage-value').val(data.discount_percentage);
+                PosnicPro.local.set('setting-discount-amount', data.discount_amount);
+                PosnicPro.local.set('currencySign', data.currency_type);
+                PosnicPro.local.set('setting-discount-percentage', data.discount_percentage);
+                (data.discount_amount === '0') ? data.discount_percentage : data.discount_amount;
+                var image_path = (data.logo !== "store.png") ? data.logo : 'static/images/default/' + data.logo;
+                $('#previewing,#store_image').attr('src', image_path);
+                $('#setting_logo_value').val(data.logo);
+/*
+ * READ WHAT THE SERVER ACTUALLY STORES.
+ *
+ * This said `data.kiosk[0]`. The field was renamed to `online_ordering` - and
+ * from an Array-of-one to an object - because one reader treated it as an
+ * array and another as an object, which refused every order ever placed. The
+ * WRITE was moved; this read was not.
+ *
+ * So `data.kiosk` was undefined, kioskData became {}, and every storefront
+ * setting on this tab came back empty no matter what the shop had saved. The
+ * owner's words: "it forgot what i saved last time". Worse than forgetting -
+ * collect() then read those empty boxes, so opening the tab and pressing Save
+ * wrote the blanks back over the stored mode, pause and opening hours.
+ *
+ * Nothing failed. An absent field reads as {} and {} reads as "not set".
+ */
+var kioskData =
+    data.online_ordering && typeof data.online_ordering === 'object'
+        ? data.online_ordering
+        /* The old array shape, for a response from a server that predates the
+           rename. Harmless to keep and cheap to be wrong about. */
+        : (data.kiosk && data.kiosk.length > 0) ? data.kiosk[0] : {};
+
+// Extract values with fallback to empty strings
+var store_id = kioskData.store_id || "";
+$("#kioskstore_id").val(store_id);
+/* Draw the shop's two addresses for the id that just arrived.
+   .val() fires no event, so the 'input change' handler that keeps them
+   current while somebody types never runs here - and a person who opened
+   #/settings/onlineordering directly would see an empty box where their
+   own /order and /menu links should be, until they typed in it. */
+if (PosnicPro.settings.storefrontLinks) { PosnicPro.settings.storefrontLinks(); }
+
+PosnicPro.settings.onlineOrdering.load(kioskData);
+
+// ----- Kiosk printers: build rows from array -----
+var printers = [];
+
+// Prefer new array field from DB
+if ($.isArray(kioskData.printer_names) && kioskData.printer_names.length) {
+    printers = kioskData.printer_names;
+} else if (kioskData.printer_name) {
+    // Backward‑compat: old single value
+    printers = [kioskData.printer_name];
+}
+
+// Find wrapper and template row
+var $wrapper = $('.printer-wrapper .printer-fields');
+if ($wrapper.length) {
+    var $template = $wrapper.find('.printer-input:first').clone(true);
+
+    // Clear all existing rows
+    $wrapper.empty();
+
+    // If no data, still show one empty row
+    if (!printers.length) {
+        printers = [''];
+    }
+
+    $.each(printers, function (idx, name) {
+        var $row = $template.clone(true);
+
+        var $input = $row.find('input');
+        $input
+            .attr('id', 'printer_name_' + idx)
+            .attr('name', 'printer_name[' + idx + ']')
+            .val(name || '');
+
+        $wrapper.append($row);
+    });
+
+    // Only last row shows "+" button
+    var $rows = $wrapper.find('.printer-input');
+    $rows.find('.add-printer-field').hide();
+    $rows.last().find('.add-printer-field').show();
+}
+                var logo = kioskData.logo || "";
+                var banner = kioskData.banner || "";
+                var homebanner = kioskData.homebanner || "";
+                var advertisement = kioskData.advertisement || "";
+
+                // Default kiosk images for each slot, used only when
+                // there is no saved image URL in the kiosk data.
+                var defaultHomeBanner = 'static/images/kiosk-default/home.png';
+                var defaultLogo = 'static/images/kiosk-default/logo.png';
+                var defaultBanner = 'static/images/kiosk-default/banner.jpg';
+                var defaultAdvertisement = 'static/images/kiosk-default/banner1.jpg';
+
+                var payment_cod = kioskData.payment_cod === 'true' || kioskData.payment_cod === true;
+                var payment_razorpay = kioskData.payment_razorpay === 'true' || kioskData.payment_razorpay === true;
+                var payment_number = kioskData.payment_number === 'true' || kioskData.payment_number === true;
+                // Set checkbox status
+                $('#payment_cod').prop('checked', payment_cod);
+                $('#payment_razorpay').prop('checked', payment_razorpay);
+                $('#payment_number').prop('checked', payment_number);
+                /* Where a UPI payment goes. Text, not a switch. */
+                $('#payment_upi_id').val(kioskData.payment_upi_id || '');
+                $('#payment_upi_name').val(kioskData.payment_upi_name || '');
+
+                /*
+                 * DEFERRED, not loaded. These previews live in a pane most
+                 * sessions never open, and two of the default images are
+                 * 1.6MB artwork - assigning src here made EVERY boot (the
+                 * sale screen included) download 3.2MB it would never show.
+                 * Lighthouse read it as the page's biggest cache line. The
+                 * kiosk pill promotes data-defer-src to src on first open.
+                 */
+                var deferPreview = function (sel, src) {
+                    var $img = $(sel);
+                    if ($('#v-pills-kioskmachine').hasClass('active')) {
+                        $img.attr('src', src).css('display', 'block');
+                    } else {
+                        $img.attr('data-defer-src', src).css('display', 'block');
+                    }
+                };
+                deferPreview('#preview_logo', logo || defaultLogo);
+                deferPreview('#preview_banner', banner || defaultBanner);
+                deferPreview('#preview_homebanner', homebanner || defaultHomeBanner);
+                deferPreview('#preview_advertisement', advertisement || defaultAdvertisement);
+
+                $('#indian_gst option[value="' + data.indian_gst + '"]').attr("selected", true);
+                $('#branch_gstin_number').val(data.branch_gstin_number);
+                (data.sales_sms === true) ? $('#sales_sms').prop("checked", true).attr('checked', 'checked') : $('#sales_sms').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.auto_sms === true) ? $('#auto_sms').prop("checked", true).attr('checked', 'checked') : $('#auto_sms').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.roundOff === true) ? $('#decimal_Round').prop("checked", true).attr('checked', 'checked') : $('#decimal_Round').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.printall === true) ? $('#printall').prop("checked", true).attr('checked', 'checked') : $('#printall').prop("checked", false).attr('unchecked', 'unchecked');
+                //                (data.print_logo === true) ? $('#printall').attr('checked', 'checked') : $('#printall').attr('unchecked', 'unchecked');
+
+                if (data.keyboard_view === true) {
+                    $('#keyboard_view').prop("checked", true).attr('checked', 'checked');
+                    PosnicPro.local.set('keyboard_view', 'true');
+                    keyboard_view();
+                } else {
+                    $('#keyboard_view').prop("checked", false).attr('unchecked', 'unchecked');
+                    PosnicPro.local.set('keyboard_view', 'false');
+                    keyboard_view();
+                }
+                PosnicPro.local.set('balance_view', 'true');
+                if (data.customer_checkbox === true) {
+                    $("#default_customer_enable_disable").prop("checked", true);
+                    PosnicPro.local.set('default_customer_enable_disable', "true");
+                    $('#default_customer').removeAttr('disabled');
+                    $(".customer-text-disable").css("color", '#20a83b');
+                    $(".customer-text-enable").css("color", '#141d46');
+                } else {
+                    $("#default_customer_enable_disable").prop("checked", false);
+                    PosnicPro.local.set('default_customer_enable_disable', "false");
+                    $('#default_customer').attr('disabled', 'disabled');
+                    $(".customer-text-disable").css("color", '#141d46');
+                    $(".customer-text-enable").css("color", '#20a83b');
+                }
+
+                if (data.supplier_checkbox === true) {
+                    $("#default_supplier_enable_disable").prop("checked", true);
+                    PosnicPro.local.set('default_supplier_enable_disable', "true");
+                    $('#default_supplier').removeAttr('disabled');
+                    $(".supplier-text-disable").css("color", '#20a83b');
+                    $(".supplier-text-enable").css("color", '#141d46');
+                } else {
+                    $("#default_supplier_enable_disable").prop("checked", false);
+                    PosnicPro.local.set('default_supplier_enable_disable', "false");
+                    $('#default_supplier').attr('disabled', 'disabled');
+                    $(".supplier-text-disable").css("color", '#141d46');
+                    $(".supplier-text-enable").css("color", '#20a83b');
+                }
+
+                if (data.tax_checkbox === true) {
+                    $("#default_tax_enable_disable").prop("checked", true);
+                    PosnicPro.local.set('default_tax_enable_disable', "true");
+                    $('#tax_percentage').removeAttr('disabled');
+                    $(".tax-text-disable").css("color", '#20a83b');
+                    $(".tax-text-enable").css("color", '#141d46');
+                } else {
+                    $("#default_tax_enable_disable").prop("checked", false);
+                    PosnicPro.local.set('default_tax_enable_disable', "false");
+                    $('#tax_percentage').attr('disabled', 'disabled');
+                    $(".tax-text-disable").css("color", '#141d46');
+                    $(".tax-text-enable").css("color", '#20a83b');
+                }
+                let print_url = (typeof (data.print_url) !== "undefined" && data.print_url !== null) ? data.print_url : false;
+                (print_url === true) ? $('#print_url').prop("checked", true).attr('checked', 'checked') : $('#print_url').prop("checked", false).attr('unchecked', 'unchecked');
+                PosnicPro.local.set('print_url', print_url);
+                // the old pencil editor is gone; its stale local key with it
+                PosnicPro.local.set('inline_sale', 'disable');
+                if (data.sale_quick_edit_enable !== false) {
+                    $('#sale_quick_edit').prop("checked", true).attr('checked', 'checked');
+                    PosnicPro.local.set('sale_quick_edit', 'enable');
+                } else {
+                    $('#sale_quick_edit').prop("checked", false).attr('unchecked', 'unchecked');
+                    PosnicPro.local.set('sale_quick_edit', 'disable');
+                }
+                if (data.enable_multi_payment === true) {
+                    $('#enable_multi_payment').prop("checked", true).attr('checked', 'checked');
+                    PosnicPro.local.set('enable_multi_payment', 'enable');
+                } else {
+                    $('#enable_multi_payment').prop("checked", false).attr('unchecked', 'unchecked');
+                    PosnicPro.local.set('enable_multi_payment', 'disable');
+                }
+                var $kotLi = $('#view_kot_page').closest('li');
+                var $kotOrderLi = $('#view_kotorder_page').closest('li');
+                var $kotHistoryLi = $('#view_kothistory_page').closest('li');
+                var $kotReportLi = $('#viewkotreport_page').closest('li');
+                var $newSaleLi = $('#view_touchsales_page').closest('li');
+                if (data.table_options === true) {
+                    $('#table_options').prop("checked", true).attr('checked', 'checked');
+                    PosnicPro.local.set('table_options', 'enable');
+                    $kotLi.show();
+                    $kotOrderLi.show();
+                    $kotHistoryLi.show();
+                    $kotReportLi.show();
+                    $newSaleLi.hide();
+                    $('#image_sidebar_newsale').hide();
+                    PosnicPro.applyKotVisibility(true);
+                } else {
+                    $('#table_options').prop("checked", false).attr('unchecked', 'unchecked');
+                    PosnicPro.local.set('table_options', 'disable');
+                    PosnicPro.applyKotVisibility(false);
+                    $kotLi.hide();
+                    $kotOrderLi.hide();
+                    $kotHistoryLi.hide();
+                    $kotReportLi.hide();
+                    $newSaleLi.show();
+                }
+
+                (data.stock_management === true) ? $('#stock_management').prop("checked", true).attr('checked', 'checked') : $('#stock_management').removeAttr('checked');
+                (data.stock_management_log === true) ? $('#stock_log_management').prop("checked", true).attr('checked', 'checked') : $('#stock_log_management').removeAttr('checked');
+                (data.sales_mail === true) ? $('#sales_mail').prop("checked", true).attr('checked', 'checked') : $('#sales_mail').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.customer_print === true) ? $('#customer_print').prop("checked", true).attr('checked', 'checked') : $('#customer_print').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.print_logoimg === true) ? $('#print_logoimg').prop("checked", true).attr('checked', 'checked') : $('#print_logoimg').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.print_sale_notes === true) ? $('#print_sale_notes').prop("checked", true).attr('checked', 'checked') : $('#print_sale_notes').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.whatsapp_receipt === true) ? $('#whatsapp_receipt').prop("checked", true).attr('checked', 'checked') : $('#whatsapp_receipt').prop("checked", false).attr('unchecked', 'unchecked');
+                /*
+                 * What the bill carries, beyond the dishes and the total.
+                 *
+                 * ABSENT MEANS OFF, and that is deliberate rather than a
+                 * default that happened. A shop that has never seen this card
+                 * keeps the bill it prints today; one that wants the hotel
+                 * bill turns a row on. `=== true` reads a missing setting as
+                 * off, which is the direction that cannot surprise anybody.
+                 */
+                (data.bill_print_table === true) ? $('#bill_print_table').prop("checked", true).attr('checked', 'checked') : $('#bill_print_table').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.bill_print_dine_type === true) ? $('#bill_print_dine_type').prop("checked", true).attr('checked', 'checked') : $('#bill_print_dine_type').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.bill_print_covers === true) ? $('#bill_print_covers').prop("checked", true).attr('checked', 'checked') : $('#bill_print_covers').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.bill_print_steward === true) ? $('#bill_print_steward').prop("checked", true).attr('checked', 'checked') : $('#bill_print_steward').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.bill_print_total_qty === true) ? $('#bill_print_total_qty').prop("checked", true).attr('checked', 'checked') : $('#bill_print_total_qty').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.bill_print_source === true) ? $('#bill_print_source').prop("checked", true).attr('checked', 'checked') : $('#bill_print_source').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.bill_print_session === true) ? $('#bill_print_session').prop("checked", true).attr('checked', 'checked') : $('#bill_print_session').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.bill_print_hsn === true) ? $('#bill_print_hsn').prop("checked", true).attr('checked', 'checked') : $('#bill_print_hsn').prop("checked", false).attr('unchecked', 'unchecked');
+                (data.bill_print_fssai === true) ? $('#bill_print_fssai').prop("checked", true).attr('checked', 'checked') : $('#bill_print_fssai').prop("checked", false).attr('unchecked', 'unchecked');
+                $('#branch_fssai_number').val(data.branch_fssai_number || '');
+                if (data.country === 'India') {
+                    $('.branch-gstin-hide-show').show();
+                    $('.hide_indian_gst').show();
+                    if (data.indian_gst === 'gst_on') {
+                        $('.disable_indian_gst').show();
+                        PosnicPro.local.set('gst_action', 'enable');
+                    } else {
+                        $('.disable_indian_gst').hide();
+                        PosnicPro.local.set('gst_action', 'disable');
+                    }
+                } else {
+                    $('.branch-gstin-hide-show').hide();
+                    $('.hide_indian_gst').hide();
+                    PosnicPro.local.set('gst_action', 'disable');
+                }
+                PosnicPro.settings.applyTaxProfile();
+
+                $('#setting_country,#customer_country,#supplier_country,#branch_country').val(data.country);
+                $('#client_dateformat').val(data.client_dateformat);
+                $('#dateformat_text').val(data.dateformat_text);
+                $('#server_dateformat').val(data.server_dateformat);
+                PosnicPro.local.set("dateformatset", data.client_dateformat);
+                var settingStateOPtion = '<option id="' + data.state + '" value="' + data.state + '" selected>' + data.state + '</option>';
+                $('#setting_state,#customer_state,#supplier_state,#branch_state').html(settingStateOPtion);
+                $('#storedate').val(data.client_dateformat).trigger('change.select2');
+                $('#storetime').val(data.time_format).trigger('change.select2');
+                PosnicPro.local.set('timeformat', data.time_format);
+                $('#currency').val(data.currency_text);
+                PosnicPro.local.set('timezone', data.time_zone);
+                $("#time_zone").val(data.time_zone).trigger("change");
+                localStorage.setItem("payment_gateway", 'false');
+                $('.qr_btn').hide();
+                $('#payment_gateway').prop("checked", false).attr('unchecked', 'unchecked');
+                if (data.payment_gateway['status'] === 'true') {
+                    localStorage.setItem("payment_gateway", 'true');
+                    $('.qr_btn').show();
+                    $('#payment_gateway').prop("checked", true).attr('checked', 'checked');
+                }
+                $('#site_key,#secret_key').val('');
+                $('#site_key').val(data.payment_gateway['key']);
+                $('#secret_key').val(data.payment_gateway['secret']);
+
+                if (data.phonepe_payment_gateway) {
+                    $('#phonepe_merchant_id').val(data.phonepe_payment_gateway['merchantId']);
+                    $('#phonepe_salt_key').val(data.phonepe_payment_gateway['saltKey']);
+                } else {
+                    $('#phonepe_merchant_id').val('');
+                    $('#phonepe_salt_key').val('');
+                }
+
+                var viewcurrencyOPtion = "";
+                $.each(data.currency_value, function (key, value) {
+                    $('#currencyText').val(value.currency_sign);
+                    $('#currencyTextname').val(value.currency_text);
+                    $("#currency_type option:selected").remove();
+                    $('#currency_type').find('option').remove();
+                    if (data.currency_type === value.currency_text) {
+                        viewcurrencyOPtion += "<option id=" + data.currency_type + '" value="' + data.currency_type + '">Text( ' + data.currency_type + ' )</option>' +
+                            " <option id=" + value.currency_sign + '" value="' + value.currency_sign + '">Symbol( ' + value.currency_sign + ' )</option>';
+                    } else {
+                        viewcurrencyOPtion += "<option id=" + value.currency_text + '" value="' + value.currency_text + '">Text( ' + value.currency_text + ' )</option>' +
+                            " <option id=" + data.currency_type + '" value="' + data.currency_type + '">Symbol( ' + data.currency_type + ' )</option>';
+                    }
+
+                });
+                $('#currency_type').append(viewcurrencyOPtion);
+                $('#currency_type').val(data.currency_type).trigger('change.select2');
+                $('.display-currency').html(data.currency_type);
+                $('#setting_status').val("Yes");
+                if (data.country !== 'India') {
+                    $('.indian-Gst').css({ "display": "none" });
+                }
+                var discountamountradionbutton = $('#discount_amount').val();
+                if (discountamountradionbutton > 0) {
+                    $("#radio_discount_amount").prop('checked', 'checked');
+                    $('#discount_percentage').attr('disabled', 'disabled').addClass('bg-white').hide();
+                    $('#discount_amount').removeAttr('disabled', 'disabled').show();
+                } else {
+                    $("#radio_discount_percentage").prop('checked', 'checked');
+                    $('#discount_amount').attr('disabled', 'disabled').addClass('bg-white').hide();
+                    $('#discount_percentage').removeAttr('disabled', 'disabled').show();
+                }
+                /*Call For get Default Customer SupplierDtails*/
+                PosnicPro.settings.getDefaultCustomerDetails(data.default_customer);
+                PosnicPro.settings.getDefaultSupplierDetails(data.default_supplier);
+                /*Set Default Tax*/
+                if (data.default_tax) { 
+                    $("#tax_percentage").val(data.default_tax).trigger("change");
+                    PosnicPro.local.set('default_tax_id', data.default_tax);
+                }
+                if ((data.branch_gstin_number !== "undefined" && data.branch_gstin_number !== "")) {
+                    $('.gst_hide_show').show();
+                } else {
+                    $('.gst_hide_show').hide();
+                }
+                $('#setting_image_value').val('');
+
+                $('.import-print').html('');
+                if (data.regular_body_print != null) {
+                    $('.import-print').html(data.regular_body_print);
+                } else {
+                    $('.import-print').append(data.print_a4html);
+                }
+
+                if (data.thermal_body_print != null) {
+                    $('.import-standard-print').html(data.thermal_body_print);
+                } else {
+                    $('.import-standard-print').append(data.print_standard_html);
+                }
+
+                var controls = [
+                    'lineitem_hsn',
+                    'lineitem_price',
+                    'lineitem_qty',
+                    'lineitem_tax',
+                    'lineitem_total',
+                    'print_qty',
+                    'print_roundoff'
+                ];
+                var defaultControlValue = 'on';
+                if (data.print_controls != null) {
+                    $(controls).each(function (key, controlKey) {
+                        PosnicPro.local.set(controlKey, data.print_controls.a4[controlKey]);
+                    });
+                    PosnicPro.local.set('receiving_title', data.print_controls['receiving_title']);
+                    PosnicPro.local.set('receiving_return_title', data.print_controls['receiving_return_title']);
+                    PosnicPro.local.set('sale_title', data.print_controls['sale_title']);
+                    PosnicPro.local.set('sale_return_title', data.print_controls['sale_return_title']);
+                } else {
+                    $(controls).each(function (key, controlKey) {
+                        PosnicPro.local.set(controlKey, defaultControlValue);
+                    });
+                    PosnicPro.local.set('receiving_title', "<span style=\"font-size: 14px !important; font-weight: 900;\"><lang class='lang_purchase_invoice'>Purchase Invoice</lang></span>");
+                    PosnicPro.local.set('receiving_return_title', "<span style=\"font-size: 14px !important; font-weight: 900;\"><lang class='lang_purchase_return_invoice'>Purchase Return Invoice</lang></span>");
+                    PosnicPro.local.set('sale_title', "<span style=\"font-size: 14px !important; font-weight: 900;\"><lang class='lang_sales_receipt_2'>Sales Receipt</lang></span>");
+                    PosnicPro.local.set('sale_return_title', "<span style=\"font-size: 14px !important; font-weight: 900;\"><lang class='lang_sales_return_receipt'>Sales Return Receipt</lang></span>");
+                }
+
+                // SET, never append: the old append-at-response after a
+                // clear-at-request duplicated the content once per
+                // overlapping load - eight Config opens read
+                // "Thank you for shopping...!" eight times over.
+                let headerContent = (data.header_print !== '') ? data.header_print : '';
+                $('#header_print').html('').append(headerContent);
+                var htmlHeaderView = $('#header_print').text();
+                PosnicPro.settings._printDocs.header = htmlHeaderView;
+                if (PosnicPro.settings._editorsReady) { $('#header_print').summernote('code', htmlHeaderView); }
+                $('.header-content').text(htmlHeaderView);
+
+                let footerContent = (data.footer_print !== '') ? data.footer_print : 'Thank you for shopping...!';
+                $('#footer_print').html('').append(footerContent);
+                var htmlView = $('#footer_print').text();
+                PosnicPro.settings._printDocs.footer = htmlView;
+                if (PosnicPro.settings._editorsReady) { $('#footer_print').summernote('code', htmlView); }
+                $('.footer-content').text(htmlView);
+
+                /* Kept locally because the print path reads them at print
+                   time, on a page that may never have opened Settings. */
+                PosnicPro.settings.applyReceiptFooter({
+                    footer_image: data.footer_image || '',
+                    footer_qr_url: data.footer_qr_url,
+                    footer_image_caption: data.footer_image_caption
+                });
+                if (PosnicPro.receiptDesignerEditor) PosnicPro.receiptDesignerEditor.load(data);
+                if (PosnicPro.printSettings) PosnicPro.printSettings.mount(data);
+                if (PosnicPro.kotPrint) PosnicPro.kotPrint.loadSettings();
+
+                $('.print_store_name').text(data.branch_name);
+                $('.print_store_gst').text(data.branch_gstin_number);
+                $('.print_store_address').text(data.printing_address);
+                $('.print_store_city').text(data.city);
+                $('.print_store_email').text(data.store_email);
+                $('.print_store_telephone').text(data.store_telephone);
+                $('.print_store_alternativephone').text('');
+                if (data.store_alternativephone !== null && data.store_alternativephone !== undefined && data.store_alternativephone.trim() !== "") {
+                    $('.print_store_alternativephone').text(data.store_alternativephone);
+                }
+                $('.print_store_country').text(data.country);
+                $('.print_store_state').text(data.state);
+                $('.print_store_pincode').text(data.pincode);
+                $("#receiving_tax option[value='" + data.tax_percentage + "']").prop("selected", true);
+                PosnicPro.local.set("country_value", data.country);
+                PosnicPro.local.set("country_setting", data.country);
+                PosnicPro.local.set("state_setting", data.state);
+                $('#setting_country').val(data.country).trigger('change.select2');
+                let stateId = $("#setting_country option[value='" + data.country + "']").data("setting-id");
+                PosnicPro.local.set("currency_setting", data.currency);
+                $('#currency_setting').val(data.currency_text).trigger('change.select2');
+                let $test = $('.email-input:parent');
+                $('.add-email-field', $test).hide();
+                $.each(data.email_fields, function (key, value) {
+                    $('.email-wrapper .email-fields .email-input:nth-child(n+2)').remove();
+                    $.each(value.email_address, function (index, value) {
+                        var i = 0;
+                        $('.email-wrapper').each(function () {
+                            i++;
+                            var $wrapper = $('.email-fields', this);
+                            $('.email-input:first-child', $wrapper).clone(true).appendTo($wrapper).find('input').attr('id', 'emailaddress[' + i + ']').attr('name', 'emailaddress[' + i + ']').removeClass('edit-email-class').val(value.email);
+                        });
+                    });
+                    let $newtest = $('.email-input:last-child');
+                    $('.add-email-field', $newtest).show();
+                    $('.email-wrapper .email-fields .email-input:nth-child(1)').remove();
+                    $('#report_type').val(value.report_type).trigger('change.select2');
+                    $('#send_mail').val(value.send_mail).trigger('change.select2');
+                    $('.error').remove();
+                    var $firstChild = $('.email-input:first-child');
+                    $('.add-email-field', $firstChild).show();
+                });
+                PosnicPro.stocklogs.viewLowStockDashboard();
+                PosnicPro.getBranchDropdownOption();
+                PosnicPro.denom.denomTable();
+                PosnicPro.tableOrders.tableOrdersTable();
+                /* Razorpay can only be offered once the shop's key is stored.
+                   The switch was simply greyed out, which tells a shopkeeper
+                   nothing about why or where to fix it - so the reason shows
+                   with it. See lang_razorpay_needs_key in the markup. */
+                var hasGatewayKey = !!(data.payment_gateway
+                    && typeof data.payment_gateway.key === 'string'
+                    && data.payment_gateway.key.trim() !== '');
+                $('#payment_razorpay').prop('disabled', !hasGatewayKey);
+                $('#razorpay_needs_key').toggle(!hasGatewayKey);
+
+                //var countryDetail = $('#setting_country').select2("data");
+                //PosnicPro.settings.loadSelectSettingState(countryDetail[0].element.attributes['data-setting-id'].value);
+            } else {
+                $('#setting_status').val("No");
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    resetEditButton: function (id) {
+        var branch_id = PosnicPro.local.get('branch_id_set');
+        PosnicPro.settings.viewSettings(branch_id);
+    },
+    resetEmailSetting: function () {
+        var params = {
+            url: 'branches/resetEmailSetting',
+            data: {}
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                let $test = $('.email-input:parent');
+                $('.add-email-field', $test).hide();
+                $.each(response.data, function (key, value) {
+                    $('.email-wrapper .email-fields .email-input:nth-child(n+2)').remove();
+                    $.each(value.email_address, function (index, value) {
+                        var i = 0;
+                        $('.email-wrapper').each(function () {
+                            i++;
+                            var $wrapper = $('.email-fields', this);
+                            $('.email-input:first-child', $wrapper).clone(true).appendTo($wrapper).find('input').attr('id', 'emailaddress[' + i + ']').attr('name', 'emailaddress[' + i + ']').removeClass('edit-email-class').val(value.email);
+                        });
+                    });
+                    let $newtest = $('.email-input:last-child');
+                    $('.add-email-field', $newtest).show();
+                    $('.email-wrapper .email-fields .email-input:nth-child(1)').remove();
+                    $('#report_type').val(value.report_type).trigger('change.select2');
+                    $('#send_mail').val(value.send_mail).trigger('change.select2');
+                    $('.error').remove();
+                    var $firstChild = $('.email-input:first-child');
+                    $('.add-email-field', $firstChild).show();
+                });
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+
+    },
+    resetPaymentGateway: function () {
+        var params = {
+            url: 'branches/resetPaymentGateway',
+            data: {}
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                $('#site_key').val(response.data['key']);
+                $('#secret_key').val(response.data['secret']);
+                (response.data['status'] === 'true') ? $('#payment_gateway').prop("checked", true).attr('checked', 'checked')
+                    : $('#payment_gateway').prop("checked", false).attr('unchecked', 'unchecked');
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+
+    },
+    resetPhonepePaymentGateway: function () {
+        var params = {
+            url: 'branches/resetPhonepePaymentGateway',
+            data: {}
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                $('#phonepe_merchant_id').val(response.data['merchantId']);
+                $('#phonepe_salt_key').val(response.data['saltKey']);
+                (response.data['status'] === 'true') ? $('#phonepe_payment_gateway').prop("checked", true).attr('checked', 'checked')
+                    : $('#phonepe_payment_gateway').prop("checked", false).attr('unchecked', 'unchecked');
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+
+    },
+    verifyViewDangerZoneConfirmed: function () {
+        var regexPassword = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{5,20}$/;
+        var password = $('#verifyPassword').val();
+        if (password !== '' && (regexPassword.test(password))) {
+            var params = {
+                url: 'users/userVerify',
+                data: { password: password }
+            };
+            PosnicPro.get(params, function (response) {
+                if (response.type === 'success') {
+                    $('#verifyPassword').val('');
+                    PosnicPro.settings.getAllCollection();
+                } else {
+                    $('#danger_zone').hide();
+                    $('#dangerZone').show();
+                }
+                PosnicPro.alert(response.type, response.message);
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+        }
+    },
+    emailSetting: function () {
+
+        var email = $(".email_list")
+            .map(function () {
+                return $(this).val();
+            }).get();
+        var emailValues = {
+            email_value: email
+        }
+        var formData = PosnicPro.getFormData($('#email_add'));
+        var loader = $(".loader-view-emailsetting");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        var params = {
+            url: 'setting/emailSetting',
+            data: JSON.stringify(Object.assign(formData, emailValues))
+        };
+        PosnicPro.put(params, function (response) {
+            if (response.type === 'success') {
+                PosnicPro.alert(response.type, response.message);
+                loader.find(".loadingSpinner:first").remove();
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+        return false;
+    },
+    /*
+     * Online ordering: what the page is for, whether it is paused, and when it
+     * is open.
+     *
+     * All three ride on the kiosk account form, so they save through the door
+     * that already existed rather than a new endpoint. The server normalises
+     * everything again - this is a form, not a validator.
+     */
+    onlineOrdering: {
+        /*
+         * Labels as <lang> markup, not t(), the same as
+         * PosnicPro.dashboard.SETUP_CARDS.
+         *
+         * This object is built when the module loads. A t() call here runs
+         * while PosnicPro is still being assembled, so the name is not bound
+         * yet and the rest of the file never executes - the outage
+         * tests/i18n.test.js was written for. It is wrong even where it does
+         * not throw, because it resolves before any pack has arrived and
+         * freezes English into the object. The rows are drawn as HTML, so the
+         * observer translates them on screen instead.
+         */
+        DAYS: [
+            { key: 'mon', label: '<lang class="lang_monday">Monday</lang>' },
+            { key: 'tue', label: '<lang class="lang_tuesday">Tuesday</lang>' },
+            { key: 'wed', label: '<lang class="lang_wednesday">Wednesday</lang>' },
+            { key: 'thu', label: '<lang class="lang_thursday">Thursday</lang>' },
+            { key: 'fri', label: '<lang class="lang_friday">Friday</lang>' },
+            { key: 'sat', label: '<lang class="lang_saturday">Saturday</lang>' },
+            { key: 'sun', label: '<lang class="lang_sunday">Sunday</lang>' }
+        ],
+
+        /* Minutes past midnight is what the server stores; the inputs are
+           <input type="time">, which speaks "HH:MM". */
+        toClock: function (minutes) {
+            if (minutes === null || minutes === undefined || minutes === '') return '';
+            if (typeof minutes === 'string') return minutes;
+            var n = Number(minutes);
+            if (!isFinite(n)) return '';
+            var h = Math.floor(n / 60) % 24;
+            var m = Math.trunc(n) % 60;
+            return ('0' + h).slice(-2) + ':' + ('0' + m).slice(-2);
+        },
+
+        /*
+         * Two windows a day, because that is the shape of a working day here:
+         * lunch and dinner. One pair per day cannot express it, and a shop
+         * that needs three can say so and we will widen the row - the stored
+         * format is already a list.
+         */
+        renderGrid: function (hours) {
+            var self = PosnicPro.settings.onlineOrdering;
+            var $grid = $('#kiosk_hours_grid');
+            if (!$grid.length) return;
+
+            var html = '';
+            self.DAYS.forEach(function (day) {
+                var windows = (hours && hours[day.key]) || [];
+                var first = windows[0] || {};
+                var second = windows[1] || {};
+                html +=
+                    '<div class="form-row align-items-center mb-1" data-day="' + day.key + '">' +
+                    /* label already carries its own <lang> markup */
+                    '<div class="col-3">' + day.label + '</div>' +
+                    '<div class="col-2"><input type="time" class="form-control form-control-sm kiosk-hours-open" data-slot="0" value="' + self.toClock(first.open) + '"></div>' +
+                    '<div class="col-2"><input type="time" class="form-control form-control-sm kiosk-hours-close" data-slot="0" value="' + self.toClock(first.close) + '"></div>' +
+                    '<div class="col-2"><input type="time" class="form-control form-control-sm kiosk-hours-open" data-slot="1" value="' + self.toClock(second.open) + '"></div>' +
+                    '<div class="col-2"><input type="time" class="form-control form-control-sm kiosk-hours-close" data-slot="1" value="' + self.toClock(second.close) + '"></div>' +
+                    '</div>';
+            });
+            $grid.html(html);
+        },
+
+        /** Show what a pause is doing, in words, with the time it lifts. */
+        /**
+         * Draw the one true state, and show only the buttons that apply to it.
+         *
+         * `changed` marks this as somebody's click rather than what the server
+         * said. A pause is stored with the rest of the form, so the kitchen can
+         * press "Stop taking orders", see the screen change, walk away and have
+         * orders still arriving. Saying so where the button is beats a toast
+         * that has already faded.
+         */
+        renderPause: function (pausedUntil, changed) {
+            var $status = $('#kiosk_pause_status');
+            if (!$status.length) return;
+            $('#kiosk_paused_until').val(pausedUntil || '');
+
+            var at = pausedUntil ? new Date(pausedUntil) : null;
+            var paused = !!(at && !isNaN(at.getTime()) && at.getTime() > Date.now());
+
+            if (paused) {
+                $status
+                    .removeClass('badge-success')
+                    .addClass('badge-danger')
+                    .text(
+                        PosnicPro.i18n.t('lang_online_ordering_paused_until', 'Paused until') + ' ' +
+                        at.toLocaleString()
+                    );
+            } else {
+                $status
+                    .removeClass('badge-danger')
+                    .addClass('badge-success')
+                    .text(PosnicPro.i18n.t('lang_online_ordering_accepting', 'Accepting orders.'));
+            }
+
+            /* Pausing is offered while accepting; resuming while paused. A
+               Resume button on a shop that never stopped undoes nothing. */
+            $('#kiosk_pause_actions').toggle(!paused);
+            $('#kiosk_resume_actions').toggle(paused);
+            $('#kiosk_pause_unsaved').toggle(!!changed);
+        },
+
+        /** Toggle the controls that only mean something when taking orders. */
+        syncMode: function () {
+            /*
+             * Always ordering. The "can customers order from this page"
+             * dropdown is gone: /order takes orders and /menu shows the menu,
+             * both live whenever online ordering is on, and a shop that wants
+             * to stop taking orders presses the button for that. The name
+             * stays so the callers that wire hours to it need not change.
+             */
+            var ordering = true;
+            $('.kiosk-ordering-only').toggle(ordering);
+            var hours = ordering && $('#kiosk_hours_enable').is(':checked');
+            $('#kiosk_hours_grid').toggle(hours);
+            /* The sentence explaining the grid goes with the grid. */
+            $('#kiosk_hours_help').toggle(hours);
+        },
+
+        load: function (kioskData) {
+            var self = PosnicPro.settings.onlineOrdering;
+            var data = kioskData || {};
+
+
+            var hours = data.hours || null;
+            $('#kiosk_hours_enable').prop('checked', !!hours);
+            self.renderGrid(hours);
+            self.renderPause(data.paused_until || '');
+
+            /*
+             * HOW THE FOOD TRAVELS, as this shop last saved it.
+             *
+             * An absent list is a shop that has never been asked, and it is
+             * drawn unticked rather than pre-filled with the default. A
+             * default shown as a choice reads as a decision somebody made,
+             * and the next person to look would have no way to tell the two
+             * apart. The help text under it says what nothing ticked means.
+             */
+            var travels = Array.isArray(data.fulfilment) ? data.fulfilment : [];
+            $('.fulfilment-box').each(function () {
+                $(this).prop('checked', travels.indexOf(String($(this).val())) > -1);
+            });
+
+            /*
+             * The table is hidden for a shop with the Restaurant module off,
+             * because ticking it there would do nothing: the server strips
+             * dine_in from a retail shop's list whatever the document says,
+             * and a control that cannot take effect is worse than no control.
+             */
+            var restaurant = String(PosnicPro.local.get('table_options') || '')
+                .trim()
+                .toLowerCase();
+            var runsTables = ['true', 'enable', 'enabled', '1', 'on', 'yes'].indexOf(restaurant) > -1;
+            $('#fulfilment_dine_in_row').toggle(runsTables);
+
+            self.syncMode();
+        },
+
+        /**
+         * The form's answer, in the shape the API stores.
+         *
+         * `hours: null` when the schedule is switched off, which is how a shop
+         * says "always open" - distinct from a week with every day empty,
+         * which would shut it forever.
+         */
+        collect: function () {
+            var self = PosnicPro.settings.onlineOrdering;
+            /* Sent as 'order' on every save, on purpose. A shop saved as
+               'menu' under the old dropdown heals to the two-page model the
+               first time it presses Save, and the server's reader keeps a
+               known word rather than whatever a missing element answers. */
+            var mode = 'order';
+            var out = {
+                mode: mode,
+                paused_until: $('#kiosk_paused_until').val() || null
+            };
+
+            /*
+             * HOW THE FOOD TRAVELS.
+             *
+             * Only when the boxes are on screen: a form that never drew them
+             * must not post an empty list and wipe what a shop chose. The
+             * group endpoint rule, applied to this form.
+             *
+             * An empty tick list is sent as an empty array on purpose, which
+             * the server reads as "no answer" and falls back to the default
+             * for the shop's kind. That is the difference between a shop that
+             * has chosen nothing and one that has chosen nothing YET, and the
+             * server is the only place that knows which kind of shop it is.
+             */
+            if ($('.fulfilment-box').length) {
+                out.fulfilment = $('.fulfilment-box:checked')
+                    .map(function () { return String($(this).val() || ''); })
+                    .get()
+                    .filter(Boolean);
+            }
+
+            if (mode === 'menu' || !$('#kiosk_hours_enable').is(':checked')) {
+                out.hours = null;
+                return out;
+            }
+
+            var hours = {};
+            $('#kiosk_hours_grid [data-day]').each(function () {
+                var $row = $(this);
+                var windows = [];
+                $row.find('.kiosk-hours-open').each(function () {
+                    var slot = $(this).data('slot');
+                    var open = $(this).val();
+                    var close = $row.find('.kiosk-hours-close[data-slot="' + slot + '"]').val();
+                    if (open && close) windows.push({ open: open, close: close });
+                });
+                hours[$row.data('day')] = windows;
+            });
+            out.hours = hours;
+            return out;
+        }
+    },
+
+    kioskAccountSettings: function () {
+        const storeId = $('#kioskstore_id').val().trim();
+        // const secretKey = $('#kiosksecret_key').val().trim();
+        const loader = $(".loader-view-kiosksetting");
+
+        // Clear old loader if exists
+        loader.find(".loadingSpinner").remove();
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+
+        // Basic frontend validation
+        const isValid = /^[A-Za-z0-9]{3,6}$/.test(storeId);
+        if (!isValid) {
+            loader.find(".loadingSpinner").remove();
+            PosnicPro.alert('error', PosnicPro.i18n.t('lang_store_id_and_secret_key_must_be_3_6_letter', 'Store ID and Secret Key must be 3-6 letters/numbers only'));
+            return false;
+        }
+
+        const data = $.extend({
+            store_id: storeId,
+            // secret_key: secretKey
+        }, PosnicPro.settings.onlineOrdering.collect());
+
+        const params = {
+            url: 'setting/kioskAccountSettings',
+            data: JSON.stringify(data)
+        };
+
+        PosnicPro.put(params, function (response) {
+            loader.find(".loadingSpinner").remove();
+
+            if (response.type === 'success') {
+                /* Stored, so the "not saved yet" marker beside the pause
+                   buttons has nothing left to warn about. */
+                $('#kiosk_pause_unsaved').hide();
+                PosnicPro.alert('success', response.message || 'Settings saved');
+            } else {
+                PosnicPro.alert('error', response.message || 'Could not save settings. Please try again.');
+            }
+        }, function (xhr) {
+            loader.find(".loadingSpinner").remove();
+
+            try {
+                const response = JSON.parse(xhr.responseText);
+                PosnicPro.alert(response.type || 'error', response.message || 'Unexpected server error');
+            } catch (e) {
+                PosnicPro.alert('error', PosnicPro.i18n.t('lang_something_went_wrong_please_try_again', 'Something went wrong. Please try again.'));
+            }
+        });
+
+        return false;
+    },
+    kioskPrinterSettings: function () {
+        // collect all printer_name[*] values
+        const printers = $('input[name^="printer_name["]')
+            .map(function () {
+                return $.trim($(this).val());
+            })
+            .get()
+            .filter(function (v, idx, arr) {
+                return v !== '' && arr.indexOf(v) === idx;   // remove empty + duplicates
+            });
+
+        const loader = $(".loader-view-kioskprintersetting");
+
+        loader.find(".loadingSpinner").remove();
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+
+        const data = {
+            printer_names: printers        // <-- ARRAY
+        };
+
+        const params = {
+            url: 'setting/kioskPrinterSettings',
+            data: JSON.stringify(data)
+        };
+
+        PosnicPro.put(params, function (response) {
+            loader.find(".loadingSpinner").remove();
+
+            if (response.type === 'success') {
+                PosnicPro.alert('success', response.message || 'Settings saved');
+            } else {
+                PosnicPro.alert('error', response.message || 'Could not save settings. Please try again.');
+            }
+        }, function (xhr) {
+            loader.find(".loadingSpinner").remove();
+
+            try {
+                const response = JSON.parse(xhr.responseText);
+                PosnicPro.alert(response.type || 'error', response.message || 'Unexpected server error');
+            } catch (e) {
+                PosnicPro.alert('error', PosnicPro.i18n.t('lang_something_went_wrong_please_try_again', 'Something went wrong. Please try again.'));
+            }
+        });
+    },
+    verifyDeleteCollections: function () {
+        var regexPassword = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{5,20}$/;
+        if ((regexPassword.test($('#verify_password').val()))) {
+            var password = ($('#verify_password').val() !== '') ? $('#verify_password').val() : $('#user_verify_password').val();
+            var params = {
+                url: 'users/userVerify',
+                data: { password: password }
+            };
+            PosnicPro.get(params, function (response) {
+                if (response.type === 'success') {
+                    $('.hideconfirm').show();
+                    PosnicPro.collectionDeleteConfirmed();
+                }
+                PosnicPro.alert(response.type, response.message);
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+        }
+    },
+    changeInputFieldsValueBackupTable: function (index) {
+        var field_name = $('#backuptablelist :selected').val();
+        $('.hide-recyclebin').hide();
+        $('.' + field_name + '-recyclebin').show().prop('selected', 'selected');
+        $('.' + field_name + '-recyclebin').attr('selected', 'selected');
+        var module = $(index).data('id');
+        var field_name = $('#view_' + module + '_fields :selected').text();
+        if (module === 'recycle_bin' && typeof field_name === 'string') {
+            field_name = field_name.replace(/\s+/g, ' ').trim();
+            $('#view_' + module + '_input').prop('placeholder', 'Enter ' + field_name);
+            ($(index).val() === 'branches') ? $('#hide_branch_recyclebin,#Select_backup_Branch').hide() : $('#hide_branch_recyclebin,#Select_backup_Branch').show();
+        }
+        $('#view_' + module + '_input').prop('placeholder', 'Enter ' + field_name);
+        ($(index).val() === 'branches') ? $('#hide_branch_recyclebin,#Select_backup_Branch').hide() : $('#hide_branch_recyclebin,#Select_backup_Branch').show();
+    },
+    printDetail: function () {
+        var id = PosnicPro.local.get('sid');
+        PosnicPro.get('users/' + id, function (response) {
+            if (response.type === 'success') {
+                var data = response.data;
+                $.each(data.preference, function (key, val) {
+                    $("#print_type option[value='" + val + "']").prop("selected", true);
+                });
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        });
+    },
+    settingImageReadURL: function (e) {
+        $("#file").css("color", "green");
+        $('#previewing').attr('src', e.target.result);
+        $('#previewing').attr('width', '200px');
+        $('#previewing').attr('height', '200px');
+    },
+    /*
+     * Module On/Off for another branch (M4): the selector edits any branch
+     * of this shop without switching sessions. Remote editing deliberately
+     * rides a SEPARATE save path: the full updateCommonSetting collects the
+     * whole settings surface plus a dozen session side effects (localStorage,
+     * KOT visibility, blob rebuilds), all of which belong to the branch you
+     * are logged into, not the one you are editing.
+     */
+    _featuresDirty: false,
+    _moduleToggleIds: [
+        'staff_shifts_enable', 'staff_tips_enable', 'staff_roster_enable',
+        'cash_register_enable', 'till_lock_enable',
+        'module_tax_enable', 'module_credit_enable', 'module_marketing_enable',
+        'module_messaging_enable',
+        'module_online_ordering_enable', 'module_kiosk_enable', 'module_captain_enable', 'module_mobile_pos_enable',
+        'module_delivery_partners_enable', 'module_webshop_enable',
+        /* Derived from the five above, but still saved: the reports that span
+           channels read it. */
+        'module_channels_enable',
+        'module_recyclebin_enable', 'module_themes_enable', 'module_cashbook_enable',
+        'module_demo_data_enable',
+        'quick_sale_enable',
+        'quotes_enable',
+        'invoices_enable',
+        'custom_charges_enable',
+        'pl_include_cashbook',
+        /* AI assistance. The provider and key live on its own page; this is
+           only the switch, which is all a Features card may carry. */
+        'ai_enabled',
+    ],
+    initModulesBranchSelect: function () {
+        var $sel = $('#modules_branch_select');
+        if (!$sel.length) { return; }
+        var sessionBranch = PosnicPro.local.get('branch_id_set');
+        var options = $('#branch_name option').filter(function () {
+            return $(this).val() && $(this).val() !== 'addbranch';
+        });
+        if (options.length < 2) { $('#modules_branch_wrap').hide(); return; }
+        $sel.empty();
+        options.each(function () {
+            var v = $(this).val();
+            var label = $(this).text();
+            var isSession = String(v) === String(sessionBranch);
+            $sel.append(new Option(label + (isSession ? ' (this till)' : ''), v, false, isSession));
+        });
+        $('#modules_branch_wrap').show();
+    },
+    _modulesRemoteBranch: function () {
+        var v = $('#modules_branch_select').val();
+        var sessionBranch = PosnicPro.local.get('branch_id_set');
+        return v && String(v) !== String(sessionBranch) ? v : null;
+    },
+    modulesBranchChanged: function () {
+        var remote = PosnicPro.settings._modulesRemoteBranch();
+        if (!remote) {
+            $('#modules_remote_note').hide();
+            // Back home: the server is the truth for this till's switches.
+            PosnicPro.settings.viewSettings();
+            return;
+        }
+        PosnicPro.get('setting/branchModules?branch_id=' + encodeURIComponent(remote), function (response) {
+            var d = response && response.data;
+            if (!d || !d.modules) { PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_load_that_branch', 'Could not load that branch')); return; }
+            PosnicPro.settings._moduleToggleIds.forEach(function (key) {
+                if (d.modules[key] !== undefined) {
+                    $('#' + key).prop('checked', d.modules[key] === true);
+                }
+            });
+            PosnicPro.settings.refreshModuleCards();
+            $('#modules_remote_note span').text(
+                'Editing ' + (d.branch_name || 'another branch') + ' - saving here changes THAT branch only; this till is untouched.'
+            );
+            $('#modules_remote_note').show();
+        }, function () {
+            PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_load_that_branch', 'Could not load that branch'));
+        });
+    },
+    saveModulesTab: function () {
+        var remote = PosnicPro.settings._modulesRemoteBranch();
+        if (!remote) {
+            PosnicPro.settings.updateCommonSetting('Feature switches saved');
+            return;
+        }
+        // Toggles only + the endpoint's validation satisfiers (ignored by
+        // the server's remote path, which writes the toggle map and nothing
+        // else). NO session side effects, NO local caches, NO gating.
+        var payload = { target_branch_id: remote };
+        PosnicPro.settings._moduleToggleIds.forEach(function (key) {
+            payload[key] = $('#' + key).is(':checked') ? 'true' : 'false';
+        });
+        payload.sales_prefix = $('#sales_prefix').val() || 'SAL';
+        payload.receiving_prefix = $('#receiving_prefix').val() || 'REC';
+        var branchLabel = $('#modules_branch_select option:selected').text();
+        PosnicPro.put({
+            url: 'setting/updateCommonSettings',
+            data: JSON.stringify(payload)
+        }, function (response) {
+            if (response.type === 'success') {
+                PosnicPro.settings._featuresDirty = false;
+                PosnicPro.settings.syncDemoDataAfterSave();
+                PosnicPro.alert('success', 'Features saved for ' + branchLabel);
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function () {
+            PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_save_that_branch', 'Could not save that branch'));
+        });
+    },
+    applyReceiptFooter: function (data) {
+        if (!data || data.footer_image === undefined) { return; }
+        PosnicPro.local.set('footer_image', data.footer_image || '');
+        PosnicPro.local.set('footer_image_caption', data.footer_image_caption || '');
+        PosnicPro.settings._footerImagePicked = false;
+        $('#footer_qr_url').val(data.footer_qr_url || '');
+        $('#footer_image_caption').val(data.footer_image_caption || '');
+        $('#footer_image_value').val(data.footer_image || '');
+        $('#footer_image_thumb').attr('src', data.footer_image || '').toggle(!!data.footer_image);
+        $('#footer_image_clear').toggle(!!data.footer_image);
+    },
+    /* successLabel: what the toast says on success - each Save button names
+       its own act ("Module switches saved") instead of the generic server
+       line, which reads the same from four different screens. */
+    updateCommonSetting: function (successLabel) {
+        var loader = $(".loader-view-mystore");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        var taxDetail = $("#tax_percentage").select2("data");
+        /*
+         * A branch with no taxes configured has an empty select - reading
+         * [0].element of nothing threw here and the PUT never fired: the
+         * Save button spun forever (owner report). Empty tax is a valid
+         * state; the id reads below all go through this helper.
+         */
+        var _taxId = (taxDetail && taxDetail[0] && taxDetail[0].element
+            && taxDetail[0].element.attributes['data-tax-id'])
+            ? taxDetail[0].element.attributes['data-tax-id'].value : '';
+        /* The editors are optional; the documents are not. */
+        var footerDoc = PosnicPro.settings._editorsReady
+            ? $('#footer_print').summernote('code') : PosnicPro.settings._printDocs.footer;
+        var headerDoc = PosnicPro.settings._editorsReady
+            ? $('#header_print').summernote('code') : PosnicPro.settings._printDocs.header;
+        var content = $('textarea[name="footer_print"]').html(footerDoc);
+        var contentHeader = $('textarea[name="header_print"]').html(headerDoc);
+        var params = {
+            url: 'setting/updateCommonSettings',
+            data: JSON.stringify({
+                default_customer: $('#customers_default_value').val(),
+                default_supplier: $('#suppliers_default_value').val(),
+                default_tax: _taxId,
+                notification_value: $('#notification_value').val(),
+                discount_percentage: $('#discount_percentage').val(),
+                discount_amount: $('#discount_amount').val(),
+                sales_prefix: $('#sales_prefix').val(),
+                bill_number_reset: $('#bill_number_reset').val() || '',
+                bill_number_fy_start_month: $('#bill_number_fy_start_month').val() || '4',
+                email_smtp_host: $('#email_smtp_host').val() || '',
+                email_smtp_port: $('#email_smtp_port').val() || '',
+                email_smtp_secure: $('#email_smtp_secure').is(':checked') ? 'true' : 'false',
+                email_smtp_username: $('#email_smtp_username').val() || '',
+                email_smtp_password: $('#email_smtp_password').val() || '',
+                email_smtp_from: $('#email_smtp_from').val() || '',
+                quote_default_payment_method: $('#quote_default_payment_method').val() || '',
+                quote_default_bank_details: $('#quote_default_bank_details').val() || '',
+                quote_default_terms: $('#quote_default_terms').val() || '',
+                quote_default_signature: $('#quote_default_signature').val() || '',
+                receiving_prefix: $('#receiving_prefix').val(),
+                allow_sale_date_edit: ($('#allow_sale_date_edit').is(":checked")) ? 'true' : 'false',
+                indian_gst: $('#indian_gst').val(),
+                branch_gstin_number: $('#branch_gstin_number').val(),
+                print_type: $('#print_type').val(),
+                bill_print_copies: $('#bill_print_copies').val(),
+                print_size: $('#print_size').val(),
+                print_character: $('#print_character').val(),
+                header_print: contentHeader.html(),
+                footer_print: content.html(),
+                /* The address and the line above it go every time; they are
+                   short. An uploaded picture goes ONLY when somebody just
+                   picked a file - it is a data URL, and posting a few
+                   hundred KB on a form that is saved constantly is waste.
+                   The server keeps the stored one when this is absent. */
+                footer_qr_url: $('#footer_qr_url').val() || '',
+                footer_image_caption: $('#footer_image_caption').val() || '',
+                ...(PosnicPro.settings._footerImagePicked
+                    ? { footer_image: $('#footer_image_value').val() || '' }
+                    : {}),
+                stock_log_management: ($('#stock_log_management').is(":checked")) ? 'true' : 'false',
+                stock_management: ($('#stock_management').is(":checked")) ? 'true' : 'false',
+                printall: ($('#printall').is(":checked")) ? 'true' : 'false',
+                roundOff: ($('#decimal_Round').is(":checked")) ? 'true' : 'false',
+                receipt_barcode: ($('#receipt_barcode').is(":checked")) ? 'true' : 'false',
+                sales_sms: ($('#sales_sms').is(":checked")) ? 'true' : 'false',
+                auto_sms: ($('#auto_sms').is(":checked")) ? 'true' : 'false',
+                sales_mail: ($('#sales_mail').is(":checked")) ? 'true' : 'false',
+                customer_print: ($('#customer_print').is(":checked")) ? 'true' : 'false',
+                print_url: ($('#print_url').is(":checked")) ? 'true' : 'false',
+                print_logoimg: ($('#print_logoimg').is(":checked")) ? 'true' : 'false',
+                print_sale_notes: ($('#print_sale_notes').is(":checked")) ? 'true' : 'false',
+                bill_print_table: ($('#bill_print_table').is(":checked")) ? 'true' : 'false',
+                bill_print_dine_type: ($('#bill_print_dine_type').is(":checked")) ? 'true' : 'false',
+                bill_print_covers: ($('#bill_print_covers').is(":checked")) ? 'true' : 'false',
+                bill_print_steward: ($('#bill_print_steward').is(":checked")) ? 'true' : 'false',
+                bill_print_total_qty: ($('#bill_print_total_qty').is(":checked")) ? 'true' : 'false',
+                bill_print_source: ($('#bill_print_source').is(":checked")) ? 'true' : 'false',
+                bill_print_session: ($('#bill_print_session').is(":checked")) ? 'true' : 'false',
+                bill_print_hsn: ($('#bill_print_hsn').is(":checked")) ? 'true' : 'false',
+                bill_print_fssai: ($('#bill_print_fssai').is(":checked")) ? 'true' : 'false',
+                branch_fssai_number: $('#branch_fssai_number').val(),
+                keyboard_view: ($('#keyboard_view').is(":checked")) ? 'true' : 'false',
+                whatsapp_receipt: ($('#whatsapp_receipt').is(":checked")) ? 'true' : 'false',
+                balance_view: true,
+                customer_checkbox: ($('#default_customer_enable_disable').is(":checked")) ? 'true' : 'false',
+                supplier_checkbox: ($('#default_supplier_enable_disable').is(":checked")) ? 'true' : 'false',
+                tax_checkbox: ($('#default_tax_enable_disable').is(":checked")) ? 'true' : 'false',
+                sale_quick_edit_enable: ($('#sale_quick_edit').is(":checked")) ? 'true' : 'false',
+                enable_multi_payment: ($('#enable_multi_payment').is(":checked")) ? 'true' : 'false',
+                table_options: ($('#table_options').is(":checked")) ? 'true' : 'false',
+                enable_notification_reminders: ($('#enable_notification_reminders').is(":checked")) ? 'true' : 'false',
+                enable_email_reminders: ($('#enable_email_reminders').is(":checked")) ? 'true' : 'false',
+                enable_sms_reminders: ($('#enable_sms_reminders').is(":checked")) ? 'true' : 'false',
+                enable_sms_auto_send: ($('#enable_sms_auto_send').is(":checked")) ? 'true' : 'false',
+                sms_auto_send_time: $('#sms_auto_send_period').val(),
+                sms_retry_period: $('#sms_retry_period').val(),
+                sms_max_retries: $('#sms_max_retries').val(),
+                hardware_weight_machine_enable: $('#hardware_weight_machine_enable').is(':checked'),
+                till_lock_enable: $('#till_lock_enable').is(':checked') ? 'true' : 'false',
+                till_lock_idle_minutes: $('#till_lock_idle_minutes').val() || '0',
+                table_order_limit: PosnicPro.settings.tableOrderLimitValue(),
+                staff_shifts_enable: $('#staff_shifts_enable').is(':checked') ? 'true' : 'false',
+                staff_tips_enable: $('#staff_tips_enable').is(':checked') ? 'true' : 'false',
+                staff_roster_enable: $('#staff_roster_enable').is(':checked') ? 'true' : 'false',
+                cash_register_enable: $('#cash_register_enable').is(':checked') ? 'true' : 'false',
+                module_tax_enable: $('#module_tax_enable').is(':checked') ? 'true' : 'false',
+                module_credit_enable: $('#module_credit_enable').is(':checked') ? 'true' : 'false',
+                module_marketing_enable: $('#module_marketing_enable').is(':checked') ? 'true' : 'false',
+                module_messaging_enable: $('#module_messaging_enable').is(':checked') ? 'true' : 'false',
+                /* Derived, not switched: on when the shop uses any channel
+                   at all. The reports that span channels read it. */
+                module_channels_enable: ($('#module_online_ordering_enable').is(':checked') || $('#module_kiosk_enable').is(':checked') || $('#module_captain_enable').is(':checked') || $('#module_delivery_partners_enable').is(':checked') || $('#module_webshop_enable').is(':checked')) ? 'true' : 'false',
+                module_online_ordering_enable: $('#module_online_ordering_enable').is(':checked') ? 'true' : 'false',
+                module_kiosk_enable: $('#module_kiosk_enable').is(':checked') ? 'true' : 'false',
+                module_captain_enable: $('#module_captain_enable').is(':checked') ? 'true' : 'false',
+                module_mobile_pos_enable: $('#module_mobile_pos_enable').is(':checked') ? 'true' : 'false',
+                module_delivery_partners_enable: $('#module_delivery_partners_enable').is(':checked') ? 'true' : 'false',
+                module_webshop_enable: $('#module_webshop_enable').is(':checked') ? 'true' : 'false',
+                module_recyclebin_enable: $('#module_recyclebin_enable').is(':checked') ? 'true' : 'false',
+                module_demo_data_enable: $('#module_demo_data_enable').is(':checked') ? 'true' : 'false',
+                module_themes_enable: $('#module_themes_enable').is(':checked') ? 'true' : 'false',
+                ai_enabled: $('#ai_enabled').is(':checked') ? 'true' : 'false',
+                pl_include_cashbook: $('#pl_include_cashbook').is(':checked') ? 'true' : 'false',
+                module_cashbook_enable: $('#module_cashbook_enable').is(':checked') ? 'true' : 'false',
+                quick_sale_enable: $('#quick_sale_enable').is(':checked') ? 'true' : 'false',
+                quotes_enable: $('#quotes_enable').is(':checked') ? 'true' : 'false',
+                invoices_enable: $('#invoices_enable').is(':checked') ? 'true' : 'false',
+                custom_charges_enable: $('#custom_charges_enable').is(':checked') ? 'true' : 'false',
+            })
+        };
+        PosnicPro.put(params, function (response) {
+            if (response.type === 'success') {
+                /*
+                 * SAVES PATCH; they do not repaint the world.
+                 *
+                 * Owner: "every save of form, some refresh is happening...
+                 * whenever i save or close all get refreshed. i think its
+                 * lazy coding." This handler used to run every block below
+                 * unconditionally - menu rebuilds, a low-stock FETCH, the
+                 * keyboard re-init, KOT show/hide - on every save of any
+                 * field. Each block now runs only when the value it exists
+                 * FOR actually changed, measured against what was in force
+                 * before this save.
+                 */
+                var was = {
+                    general: PosnicPro.local.get('general_settings') || '',
+                    table_options: PosnicPro.local.get('table_options') || '',
+                    keyboard: PosnicPro.local.get('keyboard_view') || '',
+                    gst: PosnicPro.local.get('gst_action') || '',
+                    notification: localStorage.getItem('notificationrange') || ''
+                };
+                PosnicPro.settings._featuresDirty = false;
+                PosnicPro.settings.syncDemoDataAfterSave();
+                let htmlView = $('#footer_print').text();
+                PosnicPro.settings.applyReceiptFooter(response.data);
+                $('.footer-content').text(htmlView);
+                let htmlHeaderView = $('#header_print').text();
+                $('.header-content').text(htmlHeaderView);
+                if (_taxId) {
+                    $(".items_tax").val(_taxId).trigger("change");
+                    PosnicPro.local.set('default_tax_id', _taxId);
+                }
+                var roundOff = ($('#decimal_Round').is(":checked")) ? true : false;
+                PosnicPro.roundoff = roundOff;
+                if (_taxId) { $("#tax_percentage").val(_taxId).trigger("change"); }
+                var print_value = $('#print_type').val(); 
+                PosnicPro.local.set('print_type', print_value);
+                PosnicPro.local.set('printing_size', $('#print_size').val());
+                PosnicPro.local.set('printing_max_char', $('#print_character').val());
+                PosnicPro.local.set('print_url', response.data.url);
+                PosnicPro.settings.getDefaultCustomerDetails(response.data.customer);
+                PosnicPro.settings.getDefaultSupplierDetails(response.data.supplier);
+                var discount_percentage = $('#discount_percentage').val();
+                var discount_amount = $('#discount_amount').val();
+                PosnicPro.local.set('setting-discount-amount', discount_amount);
+                PosnicPro.local.set('setting-discount-percentage', discount_percentage);
+                var gstNow = $('#indian_gst').val() === 'gst_on' ? 'enable' : 'disable';
+                if (gstNow !== was.gst) {
+                    PosnicPro.local.set('gst_action', gstNow);
+                    $('.indian-gstr').toggle(gstNow === 'enable');
+                }
+
+if ($("#sale_quick_edit").is(":checked")) {
+                    PosnicPro.local.set('sale_quick_edit', 'enable');
+                } else {
+                    PosnicPro.local.set('sale_quick_edit', 'disable');
+                }
+                if ($("#enable_multi_payment").is(":checked")) {
+                    PosnicPro.local.set('enable_multi_payment', 'enable');
+                } else {
+                    PosnicPro.local.set('enable_multi_payment', 'disable');
+                }
+                /* The whole restaurant-menu rebuild, only when the switch
+                   actually flipped. */
+                var tableNow = $("#table_options").is(":checked") ? 'enable' : 'disable';
+                if (tableNow !== was.table_options) {
+                    PosnicPro.local.set('table_options', tableNow);
+                    var kotOn = tableNow === 'enable';
+                    PosnicPro.applyKotVisibility(kotOn);
+                    $('#view_kot_page,#view_kotorder_page,#view_kothistory_page,#viewkotreport_page')
+                        .closest('li').toggle(kotOn);
+                    $('#view_touchsales_page').closest('li').toggle(!kotOn);
+                    if (kotOn) { $('#image_sidebar_newsale').hide(); }
+                    $('#kot_menu').toggle(kotOn);
+                }
+
+                /* Rebuilding the on-screen keyboard is visible work; a save
+                   that did not touch the switch does not pay for it. */
+                var keyboardNow = $("#keyboard_view").is(":checked") ? 'true' : 'false';
+                if (keyboardNow !== was.keyboard) {
+                    PosnicPro.local.set('keyboard_view', keyboardNow);
+                    keyboard_view();
+                }
+
+                PosnicPro.local.set('balance_view', 'true');
+                ($('#default_customer_enable_disable').is(":checked")) ? PosnicPro.local.set('default_customer_enable_disable', "true") : PosnicPro.local.set('default_customer_enable_disable', "false");
+                ($('#default_supplier_enable_disable').is(":checked")) ? PosnicPro.local.set('default_supplier_enable_disable', "true") : PosnicPro.local.set('default_supplier_enable_disable', "false");
+                ($('#default_tax_enable_disable').is(":checked")) ? PosnicPro.local.set('default_tax_enable_disable', "true") : PosnicPro.local.set('default_tax_enable_disable', "false");
+                /* The low-stock refresh is a network FETCH - the one thing a
+                   save must never do for a value that did not move. */
+                var notificationNow = String($('#notification_value').val() || '');
+                if (notificationNow !== was.notification) {
+                    localStorage.setItem("notificationrange", notificationNow);
+                    PosnicPro.bellFeed.setLowStock(notificationNow);
+                    PosnicPro.stocklogs.viewLowStockDashboard();
+                }
+                
+                // Save the Module On/Off state to localStorage (checkboxes
+                // since the toggles-only rebuild).
+                var generalSettings = {
+                    hardware_weight_machine_enable: $('#hardware_weight_machine_enable').is(':checked'),
+                    till_lock_enable: $('#till_lock_enable').is(':checked'),
+                    till_lock_idle_minutes: parseInt($('#till_lock_idle_minutes').val(), 10) || 0,
+                    table_order_limit: parseInt(PosnicPro.settings.tableOrderLimitValue(), 10),
+                    staff_shifts_enable: $('#staff_shifts_enable').is(':checked'),
+                    staff_tips_enable: $('#staff_tips_enable').is(':checked'),
+                    staff_roster_enable: $('#staff_roster_enable').is(':checked'),
+                    cash_register_enable: $('#cash_register_enable').is(':checked'),
+                    module_tax_enable: $('#module_tax_enable').is(':checked'),
+                    module_credit_enable: $('#module_credit_enable').is(':checked'),
+                    module_marketing_enable: $('#module_marketing_enable').is(':checked'),
+                    module_messaging_enable: $('#module_messaging_enable').is(':checked'),
+                    module_channels_enable: $('#module_online_ordering_enable').is(':checked') || $('#module_kiosk_enable').is(':checked') || $('#module_captain_enable').is(':checked') || $('#module_delivery_partners_enable').is(':checked') || $('#module_webshop_enable').is(':checked'),
+                    module_online_ordering_enable: $('#module_online_ordering_enable').is(':checked'),
+                    module_kiosk_enable: $('#module_kiosk_enable').is(':checked'),
+                    module_captain_enable: $('#module_captain_enable').is(':checked'),
+                    module_mobile_pos_enable: $('#module_mobile_pos_enable').is(':checked'),
+                    module_delivery_partners_enable: $('#module_delivery_partners_enable').is(':checked'),
+                    module_webshop_enable: $('#module_webshop_enable').is(':checked'),
+                    module_recyclebin_enable: $('#module_recyclebin_enable').is(':checked'),
+                    module_demo_data_enable: $('#module_demo_data_enable').is(':checked'),
+                    module_themes_enable: $('#module_themes_enable').is(':checked'),
+                    module_cashbook_enable: $('#module_cashbook_enable').is(':checked'),
+                    quotes_enable: $('#quotes_enable').is(':checked'),
+                    invoices_enable: $('#invoices_enable').is(':checked'),
+                    custom_charges_enable: $('#custom_charges_enable').is(':checked'),
+                    quick_sale_enable: $('#quick_sale_enable').is(':checked'),
+                    /* No field on this form - carried over, never re-decided. */
+                    first_run_done: PosnicPro.features.keepFirstRunFlag(),
+                    first_run_decided: PosnicPro.features.keepFirstRunFlag(null, 'first_run_decided')
+                };
+                var generalNow = JSON.stringify(generalSettings);
+                PosnicPro.local.set('general_settings', generalNow);
+                /* Menus rebuild only when a SWITCH moved - the string is the
+                   diff. A save of a prefix or a phone number leaves every
+                   menu exactly where the eye left it. */
+                if (generalNow !== was.general) {
+                    // Show or hide the header clock button to match, right away.
+                    PosnicPro.shiftWidget.applyEnabled();
+                    // Config's own left menu follows the switches immediately -
+                    // the feedback loop that teaches "this switch shapes my app".
+                    PosnicPro.settings.applyModuleNav();
+                    PosnicPro.applyModuleSidebar();
+                    // Register menu follows the module toggle the same way.
+                    if (!$('#cash_register_enable').is(':checked')) {
+                        $('.cashRegisterModule').css('display', 'none');
+                    } else {
+                        $('.cashRegisterModule').css('display', 'block');
+                        // Re-enabling must also re-arm the sale-screen gate: the
+                        // disable path parks branch_has_no_registers='true' to
+                        // stand the gate down, so clear it here.
+                        PosnicPro.local.set('branch_has_no_registers', '');
+                    }
+                }
+            }
+            PosnicPro.alert(response.type,
+                (response.type === 'success' && successLabel) ? successLabel : response.message);
+            loader.find(".loadingSpinner:first").remove();
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    /*
+     * Config's left menu shows only the modules the shop runs (Module
+     * On/Off). Reads the cached general_settings blob - both the load and
+     * save paths refresh the blob before calling this. A group header with
+     * nothing visible under it hides too (an empty RESTAURANT header was
+     * exactly the clutter the module system exists to remove).
+     */
+    /*
+     * Core Settings tabs: the ones that do not fit the card width fold into
+     * the More dropdown on the right. Re-run on show and resize; items are
+     * restored first so the measurement is honest.
+     */
+    coreTabsOverflow: function () {
+        var bar = $('#core_settings_tabs');
+        if (!bar.length || !bar.is(':visible')) { return; }
+        var more = bar.find('.core-tabs-more');
+        var menu = more.find('.core-tabs-more-menu').empty();
+        var items = bar.children('.nav-item').not(more);
+        items.removeClass('d-none');
+        more.addClass('d-none');
+        var avail = bar.width() - 90; // room for the More toggle
+        var used = 0;
+        var overflowed = [];
+        items.each(function () {
+            used += $(this).outerWidth(true);
+            if (used > avail) { overflowed.push(this); }
+        });
+        if (!overflowed.length) { return; }
+        more.removeClass('d-none');
+        $.each(overflowed, function (i, li) {
+            var $a = $(li).children('a');
+            $(li).addClass('d-none');
+            $('<a class="dropdown-item" href="javascript:void(0)"></a>')
+                .text($a.text().trim())
+                .on('click', function () { $a.tab('show'); })
+                .appendTo(menu);
+        });
+    },
+    /* ON cards vivid, OFF cards greyed - the state must read before the
+       labels do. Driven by each card's main switch. */
+    refreshModuleCards: function () {
+        var on = 0, total = 0;
+        $('#v-pills-modules .module-card').each(function () {
+            var $main = $(this).find('.module-card-head input.custom-control-input').first();
+            var off = !$main.is(':checked');
+            $(this).toggleClass('is-off', off);
+            total += 1;
+            if (!off) { on += 1; }
+        });
+        /* The page's own headline: how much of Posnic this shop has switched
+           on. A number and a bar, because "14 of 23" is read faster than
+           fourteen chips are counted. */
+        $('#fg_on_count').text(on);
+        $('#fg_total_count').text(total);
+        $('#fg_meter_bar').css('width', total ? Math.round(on * 100 / total) + '%' : '0%');
+        /* And per group, so a heading says "2 / 4" before a card is read. */
+        $('#v-pills-modules .module-group').each(function () {
+            var n = $(this).find('.module-card').length;
+            var k = $(this).find('.module-card:not(.is-off)').length;
+            $(this).find('[data-fg-count]').html('<b>' + k + '</b> / ' + n)
+                .toggleClass('is-none', k === 0);
+        });
+        PosnicPro.settings.applyModuleVisibility();
+    },
+    applyModuleNav: function () {
+        PosnicPro.settings.refreshModuleCards();
+        var s = {};
+        try { s = JSON.parse(PosnicPro.local.get('general_settings') || '{}'); } catch (e) { /* defaults */ }
+        var on = function (k) { return s[k] !== false; };
+
+        $('#v-pills-taxmodule-tab').toggle(on('module_tax_enable'));
+        $('#v-pills-credit-tab').toggle(on('module_credit_enable'));
+        $('#v-pills-marketingmodule-tab').toggle(on('module_marketing_enable'));
+        $('#v-pills-messagingmodule-tab').toggle(on('module_messaging_enable'));
+        // One pill per channel, each on its own feature switch - the same
+        // rule the Manage sidebar uses, so the two rails never disagree.
+        $('#v-pills-onlineordering-tab').toggle(on('module_online_ordering_enable'));
+        $('#v-pills-kioskmachine-tab').toggle(on('module_kiosk_enable'));
+        $('#v-pills-captainapp-tab').toggle(on('module_captain_enable'));
+        $('#v-pills-deliverypartners-tab').toggle(on('module_delivery_partners_enable'));
+        $('#v-pills-webshop-tab').toggle(on('module_webshop_enable'));
+        $('#v-pills-recyclebin-tab').toggle(on('module_recyclebin_enable'));
+        $('#v-pills-theme-tab').toggle(on('module_themes_enable'));
+        $('#v-pills-demodata-tab').toggle(on('module_demo_data_enable'));
+        $('#v-pills-quotes-tab').toggle(on('quotes_enable'));
+        $('#v-pills-invoices-tab').toggle(on('invoices_enable'));
+        if (PosnicPro.printSettings) PosnicPro.printSettings.features(s);
+        $('#v-pills-tillpin-tab').toggle(s.till_lock_enable === true);
+        $('#v-pills-cashregister-tab').toggle(on('cash_register_enable'));
+        $('#v-pills-cashbook-tab').toggle(on('module_cashbook_enable'));
+        $('#v-pills-workforce-tab').toggle(on('staff_shifts_enable'));
+        // The header and main sidebar follow the same truth at the same
+        // moment - every path that refreshes Config refreshes everywhere.
+        PosnicPro.applyModuleSidebar();
+        PosnicPro.settings.coreTabsOverflow();
+        $('#v-pills-tableorder-tab').toggle(PosnicPro.local.get('table_options') === 'enable');
+
+        $('#v-pills-tab .settings-nav-group').each(function () {
+            var visible = $(this).nextUntil('.settings-nav-group').filter('a.nav-link').filter(function () {
+                return $(this).css('display') !== 'none';
+            }).length;
+            $(this).toggle(visible > 0);
+        });
+    },
+    changeBranch: function (branch_no) {
+        if (branch_no === 'addbranch') {
+            var branch_id_set = PosnicPro.local.get('branch_id_set');
+            $("#branch_name option[value='" + branch_id_set + "']").prop("selected", "selected");
+            hasher.setHash('branches/new/addbranch');
+        } else {
+            var params = {
+                url: 'users/changeBranch',
+                data: JSON.stringify({ branch_no: branch_no })
+            };
+            PosnicPro.post(params, function (response) {
+                /* 'success', lowercase. This compared against 'Success' for
+                   years, so the server switched the session's branch while
+                   the client updated NOTHING - settings kept showing the old
+                   branch against the new branch's session. */
+                if (response.type === 'success') {
+                    $("#branch_name option[value='" + branch_no + "']").prop("selected", "selected");
+                    PosnicPro.local.set("branch_id_set", branch_no);
+                    if (PosnicPro.sales && PosnicPro.sales.itemCache) {
+                        PosnicPro.sales.itemCache.clear();
+                    }
+                    PosnicPro.settings.viewSettings(branch_no);
+                }
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+        }
+    },
+    getRestoreAccess: function () {
+        var module = $('#backuptablelist :selected').val();
+        var restore = PosnicPro[module + "_checkbox"];
+        if (restore.length > 0) {
+            $('#restoreModal').modal('show');
+            $('.restoreCountValue').html(restore.length);
+        } else {
+            PosnicPro.alert('warning', PosnicPro.i18n.t('lang_select_at_least_one_row', 'Select at least one row.'));
+        }
+    },
+    setRestoreAccess: function () {
+        var module = $('#backuptablelist :selected').val();
+        var restore = PosnicPro[module + "_checkbox"];
+        var arr = [];
+        var obj = {};
+        $(restore).each(function (key, id) {
+            obj = id;
+            arr.push(obj);
+        });
+        var params = {
+            url: 'setting/restoreBackup',
+            data: JSON.stringify({ data: arr })
+        };
+        PosnicPro.post(params, function (response) {
+            if (response.type === 'success') {
+                PosnicPro.settings.settingsTable();
+            }
+            $('#restoreModal').modal('hide');
+            $('.restoreCountValue').html('');
+            $('.showing-hide-show-' + module).hide();
+            PosnicPro[module + "_checkbox"] = [];
+            PosnicPro.alert(response.type, response.message);
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    listBranchName: function (id) {
+        var params = {
+            url: 'users/changeBranch',
+            data: JSON.stringify({ branch_no: id })
+        };
+        PosnicPro.post(params, function (response) {
+            if (response.type === 'success') {
+                $("#v-pills-dashboard-tab,#v-pills-sales-tab,#v-pills-inventory-tab,#v-pills-purchase-tab,#v-pills-customer-tab,#v-pills-report-tab,#v-pills-manage-tab,#v-pills-branch-tab").removeClass("active");
+                PosnicPro.getBranchTaxList();
+                PosnicPro.local.set("branch_id_set", id);
+                // Cached items carry the OLD branch's stock and pricing.
+                if (PosnicPro.sales && PosnicPro.sales.itemCache) {
+                    PosnicPro.sales.itemCache.clear();
+                }
+                //PosnicPro.users.emptyRegisterbrachListuser(id);
+                var branchOption = [];
+                branchOption.push(id);
+                let data = response.data;
+                $('.display-current-branch').select2('val', [branchOption]);
+                PosnicPro.local.set('branchname', data.branch_name);
+                PosnicPro.local.set('branchemail', data.branch_email);
+                PosnicPro.local.set('branchphone', data.branch_phone);
+                PosnicPro.local.set('branchaddress', data.branch_address);
+                PosnicPro.local.set('branchimage', data.branch_logo);
+                var branchRecord = [];
+                branchRecord.push({ name: data.branch_name, phone: data.branch_phone, email: data.branch_email, address: data.branch_address, image: data.branch_logo });
+                db.customerDisplay.put({ id: '2', 'clear': 'no', 'get': 'no', branch: branchRecord });
+                var userid = PosnicPro.local.get('userid');
+                db.currentbranch.put({ id: '1', branch_id: id, branch_name: data.branch_name, user_id: userid });
+                PosnicPro.settings.viewSettings(id);
+                PosnicPro.items.itemClearForm();
+                PosnicPro.categories.categoryClearForm();
+                PosnicPro.variants.variantClearForm();
+                PosnicPro.suppliers.supplierClearForm();
+                PosnicPro.customers.customerClearForm();
+                PosnicPro.tax.taxClearForm();
+                PosnicPro.taxgroup.taxgroupClearForm();
+                PosnicPro.users.userClearForm();
+                PosnicPro.branches.branchClearform();
+                PosnicPro.expenses.expenseClearForm();
+                PosnicPro.sales.clear.cartItems();
+                PosnicPro.receivings.resetReceivingsForm();
+                setLocalValue();
+                
+                // Check if there's an open register for this branch in database
+                var registerParams = {
+                    url: 'branches/userRegisterBranchSelect',
+                    data: {id: id}
+                };
+                PosnicPro.get(registerParams, function (registerResponse) {
+                    if (registerResponse.type === 'success' && registerResponse.data.open_register && registerResponse.data.open_register.register_status === 'Opened') {
+                        // Load existing open register
+                        PosnicPro.local.set('cash_register_id', registerResponse.data.open_register.cash_register_id);
+                        PosnicPro.local.set('register_id', registerResponse.data.open_register.register_id);
+                        PosnicPro.local.set('register_name', registerResponse.data.open_register.register_name);
+                        PosnicPro.local.set('userRegisterStatus', 'Open');
+                        PosnicPro.local.set('branch_has_no_registers', '');
+                        
+                        db.currentregister.put({
+                            id: '1', 
+                            register_id: registerResponse.data.open_register.register_id, 
+                            register_name: registerResponse.data.open_register.register_name, 
+                            register_status: 'open'
+                        });
+                        
+                        PosnicPro.alert('success', 'Branch changed - Continuing with open register: ' + registerResponse.data.open_register.register_name);
+                    } else {
+                        // No open register - clear register data
+                        PosnicPro.local.set('userRegisterStatus', 'Closed');
+                        PosnicPro.local.set('cash_register_id', '');
+                        PosnicPro.local.set('register_id', '');
+                        PosnicPro.local.set('register_name', '');
+                        PosnicPro.local.set('branch_has_no_registers', '');
+                        
+                        db.currentregister.put({id: '1', register_id: '', register_name: '', register_status: 'close'});
+                        
+                        PosnicPro.alert('success', PosnicPro.i18n.t('lang_branch_changed_please_select_a_register_be', 'Branch changed - Please select a register before creating sales'));
+                    }
+                });
+                
+                PosnicPro.stocklogs.viewLowStockDashboard();
+                PosnicPro.sales.itemsMenu.onlineProductList();
+                $("#dashboardModule a").addClass('active');
+                $("#view_config_page").removeClass('active');
+                $("#v-pills-dashboard-tab").addClass('active');
+                $("#v-pills-dashboard-tab").addClass('active show');
+                hasher.setHash('branches');
+                PosnicPro.alert('success', PosnicPro.i18n.t('lang_branch_changed', 'Branch changed'));
+            }
+            return false;
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    removePopupBranchImage: function () {
+        $('#deleteImagePopup').modal('show');
+    },
+    removeBranchImage: function () {
+        var image_value = $('#setting_logo_value').val();
+        var params = {
+            url: 'setting/branchImageDelete',
+            data: JSON.stringify({ data: image_value })
+        };
+        PosnicPro.delete(params, function (response) {
+            if (response.type === 'success') {
+                var image_path = 'static/images/default/store.png';
+                $('#previewing,#store_image').attr('src', image_path);
+                $('#setting_image_value').val('');
+                $('#deleteImagePopup').modal('hide');
+            }
+            PosnicPro.alert(response.type, response.message);
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    defaultCustomerData: function (checked) {
+        if (checked) {
+            $("#default_customer_enable_disable").prop("checked", true);
+            $('#default_customer').removeAttr('disabled');
+            $(".customer-text-disable").css("color", '#20a83b');
+            $(".customer-text-enable").css("color", '#141d46');
+        } else {
+            $("#default_customer_enable_disable").prop("checked", false);
+            $('#default_customer').attr('disabled', 'disabled');
+            $(".customer-text-disable").css("color", '#141d46');
+            $(".customer-text-enable").css("color", '#20a83b');
+        }
+    },
+    defaultSupplierData: function (checked) {
+        if (checked) {
+            $("#default_supplier_enable_disable").prop("checked", true);
+            $('#default_supplier').removeAttr('disabled');
+            $(".supplier-text-disable").css("color", '#20a83b');
+            $(".supplier-text-enable").css("color", '#141d46');
+        } else {
+            $("#default_supplier_enable_disable").prop("checked", false);
+            $('#default_supplier').attr('disabled', 'disabled');
+            $(".supplier-text-disable").css("color", '#141d46');
+            $(".supplier-text-enable").css("color", '#20a83b');
+        }
+    },
+    defaultTaxData: function (checked) {
+        if (checked) {
+            $("#default_tax_enable_disable").prop("checked", true);
+            $('#tax_percentage').removeAttr('disabled');
+            $(".tax-text-disable").css("color", '#20a83b');
+            $(".tax-text-enable").css("color", '#141d46');
+        } else {
+            $("#default_tax_enable_disable").prop("checked", false);
+            $('#tax_percentage').attr('disabled', 'disabled');
+            $(".tax-text-disable").css("color", '#141d46');
+            $(".tax-text-enable").css("color", '#20a83b');
+        }
+    },
+        /*
+     * Reference data loads ONCE. Countries, currencies and timezones do not
+     * change during a session, yet these ran on every navigation - refetching
+     * and rebuilding ~1,100 <option> nodes for forms the user may never open,
+     * and overlapping calls appended duplicates that never went away
+     * (measured: +400 timezone, +246 country x4 selects, +193 currency
+     * options across four navigation cycles). Pass true to force a reload.
+     */
+loadSelectSettingCountry: function (force) {
+        /* Flag FIRST and unconditionally: the leak was two navigations
+            racing inside the in-flight window, both passing a guard that
+            asked whether options existed yet - they did not, so both
+            fetched and both appended, forever. */
+        if (!force && PosnicPro.settings._refLoaded.country) { return; }
+        PosnicPro.settings._refLoaded.country = true;
+        var countrySelect = $('.setCountry');
+        var params = {
+            url: 'setting/getJSONCountry',
+            data: { name: 'countries' }
+        };
+        PosnicPro.get(params, function (response) {
+            countrySelect.empty();
+            suggestions: $.map(response.data['countries'], function (dataItem) {
+                var option;
+                option += '<option value="' + dataItem.value + '" data-setting-id="' + dataItem.id + '">' + dataItem.value + ' </option>';
+                countrySelect.append(option).select2();
+            });
+            countrySelect.val(PosnicPro.local.get("country_setting")).trigger('change.select2');
+        }, function (xhr) {
+            /* a failed fetch must not lock the list out for the session */
+            PosnicPro.settings._refLoaded.country = false;
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    loadSelectSettingState: function (id) {
+        var stateSelect = $('#setting_state');
+        var params = {
+            url: 'setting/getJSONState',
+            data: { id: id }
+        };
+        PosnicPro.get(params, function (response) {
+            stateSelect.empty();
+            suggestions: $.map(response.data['stateJsonArray'], function (dataItem) {
+                var options;
+                options += '<option value="' + dataItem + '">' + dataItem + ' </option>';
+                stateSelect.append(options).trigger('change');
+            });
+            if (PosnicPro.local.get("country_setting") === PosnicPro.local.get("country_value")) {
+                stateSelect.val(PosnicPro.local.get('state_setting')).trigger('change.select2');
+            } else {
+                $('#setting_state option:eq(0)').prop('selected', true);
+            }
+            (PosnicPro.settings.store_telephone || { setCountry: function () {} }).setCountry(response.data['countrySortName']);
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+        /*
+     * Reference data loads ONCE. Countries, currencies and timezones do not
+     * change during a session, yet these ran on every navigation - refetching
+     * and rebuilding ~1,100 <option> nodes for forms the user may never open,
+     * and overlapping calls appended duplicates that never went away
+     * (measured: +400 timezone, +246 country x4 selects, +193 currency
+     * options across four navigation cycles). Pass true to force a reload.
+     */
+loadSelectSettingCurrency: function (force) {
+        if (!force && PosnicPro.settings._refLoaded.currency) { return; }
+        PosnicPro.settings._refLoaded.currency = true;
+        var currencySelect = $('#currency_setting');
+        var params = {
+            url: 'setting/getJSONCurrency'
+        };
+        PosnicPro.get(params, function (response) {
+            currencySelect.empty();
+            suggestions: $.map(response.data['currency'], function (dataItem) {
+                var option;
+                option += '<option value="' + dataItem.value + '" data-currency-id="' + dataItem.id + '" data-currency-text="' + dataItem.text + '" data-currency-symbol="' + dataItem.symbol + '">' + dataItem.value + ' </option>';
+                currencySelect.append(option).trigger('change');
+            });
+            currencySelect.val(PosnicPro.local.get("currency_setting")).trigger('change.select2');
+            currencySelect.trigger({
+                type: 'select2:select',
+                params: {
+                    data: response
+                }
+            }).on('select2:select', function (e) {
+                let data = e.params.data;
+                $('#currencyText').val(data.element.attributes['data-currency-symbol'].value);
+                $('#currencyTextname').val(data.element.attributes['data-currency-text'].value);
+                var currencyDataOPtion = "";
+                $('#currency_type').empty();
+                currencyDataOPtion += "<option id=" + data.element.attributes['data-currency-text'].value + '" value="' + data.element.attributes['data-currency-text'].value + '" selected>Text( ' + data.element.attributes['data-currency-text'].value + ' )</option>' +
+                    " <option id=" + data.element.attributes['data-currency-symbol'].value + '" value="' + data.element.attributes['data-currency-symbol'].value + '">Symbol( ' + data.element.attributes['data-currency-symbol'].value + ' )</option>';
+                $('#currency_type').append(currencyDataOPtion);
+            });
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    /*
+     * Reference data loads ONCE. Countries, currencies and timezones do not
+     * change during a session, yet these ran on every navigation - refetching
+     * and rebuilding ~1,100 <option> nodes for forms the user may never open,
+     * and overlapping calls appended duplicates that never went away
+     * (measured: +400 timezone, +246 country x4 selects, +193 currency
+     * options across four navigation cycles). Pass true to force a reload.
+     */
+    timeZone: function (force) {
+        if (!force && PosnicPro.settings._refLoaded.timezone) { return; }
+        PosnicPro.settings._refLoaded.timezone = true;
+        var timezoneSelect = $('#time_zone');
+        var params = {
+            url: 'setting/getJSONTimeZone'
+        };
+        PosnicPro.get(params, function (response) {
+            timezoneSelect.empty();
+            suggestions: $.map(response.data, function (dataItem) {
+                var options;
+                options += '<option value="' + dataItem.text + '" data-timezone-name="' + dataItem.text + '">' + dataItem.value + ' </option>';
+                timezoneSelect.append(options).trigger('change');
+            });
+            let timezone = PosnicPro.timeZone();
+            timezoneSelect.val(timezone).trigger('change.select2');
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    paymentKey: function () {
+        var loader = $(".loader-qrsetting");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        var params = {
+            url: 'setting/paymentsKey',
+            data: JSON.stringify({
+                key: $('#site_key').val(),
+                secret: $('#secret_key').val(),
+                status: ($('#payment_gateway').is(":checked")) ? 'true' : 'false'
+            })
+        };
+        PosnicPro.post(params, function (response) {
+            if (response.type === 'success') {
+                /* A key has just been saved, so the switch it gates can come
+                   back. This had it backwards and disabled Razorpay on the one
+                   event that should have enabled it. */
+                $('#payment_razorpay').prop('disabled', false);
+                $('#razorpay_needs_key').hide();
+                localStorage.setItem("payment_gateway", response.data);
+                (response.data === 'true') ? $('.qr_btn').show() : $('.qr_btn').hide();
+                loader.find(".loadingSpinner:first").remove();
+            } else {
+                /* The key was not stored, so nothing gates open. The old code
+                   enabled Razorpay here - offering a customer a gateway the
+                   shop has no working key for. */
+                $('#payment_razorpay').prop('disabled', true).prop('checked', false);
+                $('#razorpay_needs_key').show();
+            }
+            PosnicPro.alert(response.type, response.message);
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    toggleInputs: function () {
+        const isChecked = $('#enable_sms_auto_send').is(':checked');
+        $('#sms_auto_send_time, #sms_retry_period, #sms_max_retries').prop('disabled', !isChecked);
+
+    },
+
+    phonepePaymentKey: function () {
+        var loader = $(".loader-qrsetting");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        var params = {
+            url: 'setting/phonepepaymentsKey',
+            data: JSON.stringify({
+                merchantId: $('#phonepe_merchant_id').val(),
+                saltKey: $('#phonepe_salt_key').val(),
+                status: ($('#phonepe_payment_gateway').is(":checked")) ? 'true' : 'false'
+            })
+        };
+        PosnicPro.post(params, function (response) {
+            if (response.type === 'success') {
+                PosnicPro.alert(response.type, response.message);
+                loader.find(".loadingSpinner:first").remove();
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+
+    }
+};
+PosnicPro.tax = {
+    triggerModules: function () {
+        PosnicPro.showAddModal('tax');
+        $('#tax_id').val('');
+            $('#tax-heading').text(PosnicPro.i18n.t('lang_new_title', 'Add'));
+            $('#tax_text_change').text(PosnicPro.i18n.t('lang_save_title', 'Save'));
+        var loader = $(".loader-tax");
+        loader.find(".loadingSpinner:first").remove();
+        $('#tax_reset').show();
+        $('.tax_edit_reset').hide();
+    },
+    triggerTaxEdit: function (id) {
+        var module = $('#setting_tax_edit_' + id);
+        PosnicPro.showAddModal('tax');
+        $('#tax_id').val(id);
+        $('#tax_name').val(module.data('taxname'));
+        $('#tax_value').val(module.data('taxvalue'));
+        $('#tax-heading').text(PosnicPro.i18n.t('lang_action_edit', 'Edit'));
+            $('#tax-heading').text(PosnicPro.i18n.t('lang_action_edit', 'Edit'));
+            $('#tax_text_change').text(PosnicPro.i18n.t('lang_updatebtn_title', 'Update'));
+        $('#tax_reset').hide();
+        $('.tax_edit_reset').show();
+        $('.tax_edit_reset').attr("id", id);
+        $('.mobile_tooltip').tooltip('hide');
+    },
+    triggerTaxDelete: function (id) {
+        var module = $('#setting_tax_delete_' + id);
+        $('#tax_id').val(id);
+        $('#tax_name').val(module.data('taxname'));
+        $('#tax_value').val(module.data('taxvalue'));
+        PosnicPro.tax.deleteTaxData(id);
+    },
+    taxTable: function () {
+        var loader = $(".loader-table-tax");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        PosnicPro.HideSideBarModal();
+        var table = $('#view_tax');
+        var data = {
+            tax_group: 'no'
+        };
+        var params = {
+            url: 'setting/getTaxAll',
+            data: data
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+
+                table.children('tbody').text('');
+                data = response.data;
+                let currency = PosnicPro.local.get('currencySign');
+                for (var i = 0; i < data.length; i++) {
+                    let row = data[i];
+                    let edit = '<a href="#/settings/tax/' + row.tax_id + '/edit" id="setting_tax_edit_' + row.tax_id + '" data-toggle="tooltip" title="Edit Tax" data-t-title="lang_edit_tax" class="btn btn-primary-rgba mb-1 mr-1 mobile_tooltip" data-module = "branch" data-access = "write" data-taxname="' + row.tax_name + '" data-taxvalue="' + row.tax_value + '" ><i class="feather icon-edit"></i></a>';
+                    let deleted = '<a href="#/settings/tax/' + row.tax_id + '/delete" id="setting_tax_delete_' + row.tax_id + '" data-toggle="tooltip" title="Delete Tax" data-t-title="lang_delete_tax" class="btn btn-danger-rgba mb-1 mr-1 mobile_tooltip" data-module = "branch" data-access = "delete" data-taxname="' + row.tax_name + '" data-taxvalue="' + row.tax_value + '" ><i class="feather icon-trash"></i></a>';
+                    let trow = '<tr> <td scope="row" width="10%">' + (i + 1) + '</td>  <td width="40%">' + row.tax_name + '</td> <td width="10%" class="text-right">' + currency + '&nbsp;<span class="number">' + row.tax_value + '</span></td><td width="40%" class="text-center">' + edit + ' ' + deleted + '</td> </tr>';
+                    $('#view_tax').children('tbody').append(trow);
+                }
+                $('span.number').number(true, 2);
+                loader.find(".loadingSpinner:first").remove();
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    addTaxRates: function () {
+        if ($('#tax_name').val() !== '' && $('#tax_value').val() !== '') {
+            var loader = $(".loader-tax");
+            $("<div class='loadingSpinner'></div>").appendTo(loader);
+            var params = {
+                url: 'setting/addTax',
+                data: JSON.stringify(PosnicPro.getFormData($('#tax_add_form')))
+            };
+            PosnicPro.post(params, function (response) {
+                if (response.type === 'success') {
+                    $("#tax_add_form").trigger("reset");
+                    $('#tax_name').focus();
+                    PosnicPro.tax.taxTable();
+                    PosnicPro.getBranchTaxList();
+                    hasher.setHash('settings');
+                    loader.find(".loadingSpinner:first").remove();
+                }
+                PosnicPro.alert(response.type, response.message);
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+        }
+    },
+    editTaxRates: function () {
+        var loader = $(".loader-tax");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        var params = {
+            url: 'setting/editTax',
+            data: JSON.stringify(PosnicPro.getFormData($('#tax_add_form')))
+        };
+        PosnicPro.put(params, function (response) {
+            if (response.type === 'success') {
+                PosnicPro.tax.taxTable();
+                PosnicPro.getBranchTaxList();
+                $(".infobar-settings-sidebar-overlay").css({ "background": "transparent", "position": "initial" });
+                $("#infobar-settings-sidebar-tax").removeClass("sidebarshow");
+                hasher.setHash('settings');
+            }
+            loader.find(".loadingSpinner:first").remove();
+            PosnicPro.alert(response.type, response.message);
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+        $('.mobile_tooltip').tooltip('hide');
+    },
+    resetEditButton: function (id) {
+        PosnicPro.tax.triggerTaxEdit(id);
+    },
+    deleteTaxData: function (id) {
+        if (PosnicPro.deleteConfirmation) {
+            PosnicPro.callbackRegistry = {};
+            PosnicPro.delete('setting/deleteTax?id=' + id, function (response) {
+                if (response.type === 'success') {
+                    PosnicPro.deleteConfirmation = false;
+                    $("#tax_add_form").trigger("reset");
+                    PosnicPro.tax.taxTable();
+                    PosnicPro.getBranchTaxList();
+                    $(".infobar-settings-sidebar-overlay").css({ "background": "transparent", "position": "initial" });
+                    $("#infobar-settings-sidebar-tax").removeClass("sidebarshow");
+                    hasher.setHash('settings');
+                }
+                PosnicPro.alert(response.type, response.message);
+            });
+        } else {
+            PosnicPro.callbackRegistry = {
+                name: 'deleteTaxData',
+                arguments: id
+            };
+            $('#delete_tax_modal').modal('show');
+            $('#show_hide_tax').show();
+            $('#show_hide_taxgroup').hide();
+        }
+        $('.mobile_tooltip').tooltip('hide');
+    },
+    /*delete tax confirmation*/
+    deleteTaxConfirmed: function () {
+        $('#delete_tax_modal').modal('hide');
+        PosnicPro.deleteConfirmation = true;
+        window['PosnicPro']['tax']['' + PosnicPro.callbackRegistry.name](PosnicPro.callbackRegistry.arguments);
+    },
+    taxClearForm: function () {
+        $("#tax_add_form").trigger("reset");
+        $('.error_tax').css('display', 'none');
+    }
+
+};
+PosnicPro.denom = {
+    triggerModules: function () {
+        PosnicPro.showAddModal('denomcash');
+        $('#denom_id').val('');
+            $('#denom-heading').text(PosnicPro.i18n.t('lang_new_title', 'Add'));
+            $('#denom_text_change').text(PosnicPro.i18n.t('lang_save_title', 'Save'));
+        var loader = $(".loader-tax");
+        loader.find(".loadingSpinner:first").remove();
+        $('#denom_reset').show();
+        $('.denom_edit_reset').hide();
+    },
+    triggerTaxEdit: function (id) {
+        var module = $('#setting_denom_edit_' + id);
+        PosnicPro.showAddModal('denomcash');
+        $('#denom_id').val(id);
+        $('#denom_value').val(module.data('denomvalue'));
+        $('#tax-heading').text(PosnicPro.i18n.t('lang_action_edit', 'Edit'));
+            $('#denom-heading').text(PosnicPro.i18n.t('lang_action_edit', 'Edit'));
+            $('#denom_text_change').text(PosnicPro.i18n.t('lang_updatebtn_title', 'Update'));
+        $('#denom_reset').hide();
+        $('.denom_edit_reset').show();
+        $('.denom_edit_reset').attr("id", id);
+        $('.mobile_tooltip').tooltip('hide');
+    },
+    triggerTaxDelete: function (id) {
+        PosnicPro.denom.deleteDenomField(id);
+    },
+    denomTable: function () {
+        var loader = $(".loader-table-tax");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        PosnicPro.HideSideBarModal();
+        var table = $('#view_denom');
+        var params = {
+            url: 'setting/getDenomAll'
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                table.children('tbody').text('');
+                var data = response.data;
+                let currency = PosnicPro.local.get('currencySign');
+                // Reset cached sale denomination list before repopulating
+                if (PosnicPro.sales) {
+                    PosnicPro.sales.SaleDenomination = [];
+                }
+                for (var i = 0; i < data.length; i++) {
+                    let row = data[i];
+                    let edit = '<a href="#/settings/denom/' + row.denom_id + '/edit" id="setting_denom_edit_' + row.denom_id + '" data-toggle="tooltip" title="Edit Denom" data-t-title="lang_edit_denom" class="btn btn-primary-rgba mobile_tooltip mb-1 mr-1" data-module = "branch" data-access = "write" data-denomvalue="' + row.denom_value + '" ><i class="feather icon-edit"></i></a>';
+                    let deleted = '<a href="#/settings/denom/' + row.denom_id + '/delete" id="setting_denom_delete_' + row.denom_id + '" data-toggle="tooltip" title="Delete Denom" data-t-title="lang_delete_denom" class="btn btn-danger-rgba mobile_tooltip mb-1 mr-1" data-module = "branch" data-access = "delete" data-denomvalue="' + row.denom_value + '" ><i class="feather icon-trash"></i></a>';
+                    let trow = '<tr> <td scope="row" width="10%">' + (i + 1) + '</td><td width="10%" class="text-right">' + currency + '&nbsp;<span class="number">' + row.denom_value + '</span></td><td width="40%" class="text-center">' + edit + ' ' + deleted + '</td> </tr>';
+                    $('#view_denom').children('tbody').append(trow);
+                    PosnicPro.sales.SaleDenomination[i] = {
+                        id: row.denom_id,
+                        amount: row.denom_value
+                    };
+
+                }
+                $('span.number').number(true, 2);
+                loader.find(".loadingSpinner:first").remove();
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    addDenomField: function () {
+        if ($('#denom_value').val() !== '') {
+            var loader = $(".loader-tax");
+            $("<div class='loadingSpinner'></div>").appendTo(loader);
+            var params = {
+                url: 'setting/addDenomData',
+                data: JSON.stringify(PosnicPro.getFormData($('#denom_add_form')))
+            };
+            PosnicPro.post(params, function (response) {
+                if (response.type === 'success') {
+                    PosnicPro.denom.denomClearForm();
+                    PosnicPro.denom.denomTable();
+                    hasher.setHash('settings');
+                    loader.find(".loadingSpinner:first").remove();
+                }
+                PosnicPro.alert(response.type, response.message);
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+        }
+    },
+    editDenomField: function () {
+        var loader = $(".loader-tax");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        var params = {
+            url: 'setting/editDenomForm',
+            data: JSON.stringify(PosnicPro.getFormData($('#denom_add_form')))
+        };
+        PosnicPro.put(params, function (response) {
+            if (response.type === 'success') {
+                PosnicPro.denom.denomTable();
+                PosnicPro.getBranchTaxList();
+                $(".infobar-settings-sidebar-overlay").css({ "background": "transparent", "position": "initial" });
+                $("#infobar-settings-sidebar-tax").removeClass("sidebarshow");
+                hasher.setHash('settings');
+            }
+            loader.find(".loadingSpinner:first").remove();
+            PosnicPro.alert(response.type, response.message);
+            $('.mobile_tooltip').tooltip('hide');
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    deleteDenomField: function (id) {
+        if (PosnicPro.deleteConfirmation) {
+            PosnicPro.callbackRegistry = {};
+            PosnicPro.delete('setting/deleteDenom?id=' + id, function (response) {
+                if (response.type === 'success') {
+                    PosnicPro.deleteConfirmation = false;
+                    $("#denom_add_form").trigger("reset");
+                    PosnicPro.denom.denomTable();
+                    PosnicPro.getBranchTaxList();
+                    $(".infobar-settings-sidebar-overlay").css({ "background": "transparent", "position": "initial" });
+                    $("#infobar-settings-sidebar-tax").removeClass("sidebarshow");
+                    hasher.setHash('settings');
+                }
+                PosnicPro.alert(response.type, response.message);
+            });
+        } else {
+            PosnicPro.callbackRegistry = {
+                name: 'deleteDenomField',
+                arguments: id
+            };
+            $('#delete_denom_modal').modal('show');
+        }
+        $('.mobile_tooltip').tooltip('hide');
+    },
+    deleteDenomConfirmed: function () {
+        $('#delete_denom_modal').modal('hide');
+        PosnicPro.deleteConfirmation = true;
+        window['PosnicPro']['denom']['' + PosnicPro.callbackRegistry.name](PosnicPro.callbackRegistry.arguments);
+    },
+    denomClearForm: function () {
+        $("#denom_add_form").trigger("reset");
+    },
+    resetEditButton: function (id) {
+        PosnicPro.denom.triggerTaxEdit(id);
+    }
+
+};
+
+PosnicPro.tableOrders = {
+    currentPage: 1,
+    perPage: 10,
+    totalItems: 0,
+    totalPages: 0,
+    allData: [],
+    
+    showAdd: function () {
+        PosnicPro.tableOrders.triggerModules();
+    },
+    triggerModules: function () {
+        PosnicPro.showAddModal('tableorder');
+        $('#tableorder_id').val('');
+            $('#tableorder-heading').text(PosnicPro.i18n.t('lang_new_title', 'Add'));
+            $('#tableorder_text_change').text(PosnicPro.i18n.t('lang_save_title', 'Save'));
+        var loader = $(".loader-tax");
+        loader.find(".loadingSpinner:first").remove();
+        $('#tableorder_reset').show();
+        $('.tableorder_edit_reset').hide();
+    },
+    triggerTaxEdit: function (id) {
+        var module = $('#setting_tableorder_edit_' + id);
+        PosnicPro.showAddModal('tableorder');
+        $('#tableorder_id').val(id);
+        $('#tableorder_value').val(module.data('tableordervalue'));
+            $('#tableorder-heading').text(PosnicPro.i18n.t('lang_action_edit', 'Edit'));
+            $('#tableorder_text_change').text(PosnicPro.i18n.t('lang_updatebtn_title', 'Update'));
+        $('#tableorder_reset').hide();
+        $('.tableorder_edit_reset').show();
+        $('.tableorder_edit_reset').attr("id", id);
+        $('.mobile_tooltip').tooltip('hide');
+    },
+    triggerTaxDelete: function (id) {
+        PosnicPro.tableOrders.deleteTableOrderField(id);
+    },
+    tableOrdersTable: function () {
+        var loader = $(".loader-table-tableorder");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        PosnicPro.HideSideBarModal();
+        var table = $('#view_tableorder');
+        var params = {
+            url: 'setting/getTableOrderAll'
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                PosnicPro.tableOrders.allData = response.data;
+                PosnicPro.tableOrders.totalItems = response.data.length;
+                PosnicPro.tableOrders.perPage = parseInt($('#view_tableorder_per_page').val()) || 10;
+                PosnicPro.tableOrders.renderPage();
+                loader.find(".loadingSpinner:first").remove();
+            } else {
+                PosnicPro.alert(response.type, response.message);
+                loader.find(".loadingSpinner:first").remove();
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+            loader.find(".loadingSpinner:first").remove();
+        });
+    },
+    
+    renderPage: function() {
+        var table = $('#view_tableorder');
+        table.children('tbody').text('');
+        
+        var perPage = PosnicPro.tableOrders.perPage;
+        var currentPage = PosnicPro.tableOrders.currentPage;
+        var totalItems = PosnicPro.tableOrders.totalItems;
+        var data = PosnicPro.tableOrders.allData;
+        
+        // Calculate pagination values
+        var totalPages = Math.ceil(totalItems / perPage);
+        PosnicPro.tableOrders.totalPages = totalPages;
+        
+        var startIndex = (currentPage - 1) * perPage;
+        var endIndex = Math.min(startIndex + perPage, totalItems);
+        
+        // Update pagination info
+        $('#view_tableorder_showing_from').text(totalItems > 0 ? startIndex + 1 : 0);
+        $('#view_tableorder_showing_to').text(endIndex);
+        $('#view_tableorder_total').text(totalItems);
+        
+        // Render table rows for current page
+        for (var i = startIndex; i < endIndex; i++) {
+            let row = data[i];
+            let edit = '<a href="#/settings/tableorder/' + row.tableorder_id + '/edit" id="setting_tableorder_edit_' + row.tableorder_id + '" data-toggle="tooltip" title="Edit Table Order" data-t-title="lang_edit_table_order" class="btn btn-primary-rgba mobile_tooltip mb-1 mr-1" data-module="branch" data-access="write" data-tableordervalue="' + row.tableorder_value + '" ><i class="feather icon-edit"></i></a>';
+            let deleted = '<a href="#/settings/tableorder/' + row.tableorder_id + '/delete" id="setting_tableorder_delete_' + row.tableorder_id + '" data-toggle="tooltip" title="Delete Table Order" data-t-title="lang_delete_table_order" class="btn btn-danger-rgba mobile_tooltip mb-1 mr-1" data-module="branch" data-access="delete" data-tableordervalue="' + row.tableorder_value + '" ><i class="feather icon-trash"></i></a>';
+            let trow = '<tr><td scope="row" width="10%">' + (i + 1) + '</td><td width="10%" class="text-right">' + row.tableorder_value + '</td><td width="40%" class="text-center">' + edit + ' ' + deleted + '</td></tr>';
+            table.children('tbody').append(trow);
+        }
+        
+        // Store tables list for sales module
+        PosnicPro.sales.tablesList = data.map(function(row) {
+            return {
+                id: row.tableorder_id,
+                tableNumber: row.tableorder_value
+            };
+        });
+        
+        // Update pagination buttons
+        PosnicPro.tableOrders.updatePaginationButtons();
+        
+        // Initialize tooltips
+        $('[data-toggle="tooltip"]').tooltip();
+        $('span.number').number(true, 2);
+    },
+    
+    updatePaginationButtons: function() {
+        var currentPage = PosnicPro.tableOrders.currentPage;
+        var totalPages = PosnicPro.tableOrders.totalPages;
+        
+        // Update prev/next button states
+        if (currentPage <= 1) {
+            $('#tableorder_prev_page').addClass('disabled');
+        } else {
+            $('#tableorder_prev_page').removeClass('disabled');
+        }
+        
+        if (currentPage >= totalPages) {
+            $('#tableorder_next_page').addClass('disabled');
+        } else {
+            $('#tableorder_next_page').removeClass('disabled');
+        }
+        
+        // Generate page number buttons
+        var pagination = $('#view_tableorder_pagination');
+        pagination.find('.page-number').remove();
+        
+        var maxButtons = 5;
+        var startPage = Math.max(1, currentPage - Math.floor(maxButtons / 2));
+        var endPage = Math.min(totalPages, startPage + maxButtons - 1);
+        
+        if (endPage - startPage < maxButtons - 1) {
+            startPage = Math.max(1, endPage - maxButtons + 1);
+        }
+        
+        for (var i = startPage; i <= endPage; i++) {
+            var activeClass = (i === currentPage) ? 'active' : '';
+            var pageBtn = '<li class="page-item page-number ' + activeClass + '">' +
+                          '<a class="page-link" href="javascript:void(0)" onclick="PosnicPro.tableOrders.goToPage(' + i + ')">' + i + '</a>' +
+                          '</li>';
+            $(pageBtn).insertBefore('#tableorder_next_page');
+        }
+    },
+    
+    changePerPage: function() {
+        PosnicPro.tableOrders.perPage = parseInt($('#view_tableorder_per_page').val());
+        PosnicPro.tableOrders.currentPage = 1;
+        PosnicPro.tableOrders.renderPage();
+    },
+    
+    previousPage: function() {
+        if (PosnicPro.tableOrders.currentPage > 1) {
+            PosnicPro.tableOrders.currentPage--;
+            PosnicPro.tableOrders.renderPage();
+        }
+    },
+    
+    nextPage: function() {
+        if (PosnicPro.tableOrders.currentPage < PosnicPro.tableOrders.totalPages) {
+            PosnicPro.tableOrders.currentPage++;
+            PosnicPro.tableOrders.renderPage();
+        }
+    },
+    
+    goToPage: function(page) {
+        if (page >= 1 && page <= PosnicPro.tableOrders.totalPages) {
+            PosnicPro.tableOrders.currentPage = page;
+            PosnicPro.tableOrders.renderPage();
+        }
+    },
+    addTableOrderField: function () {
+        if ($('#tableorder_value').val() !== '') {
+            var loader = $(".loader-tax");
+            $("<div class='loadingSpinner'></div>").appendTo(loader);
+            var params = {
+                url: 'setting/addTableOrderData',
+                data: JSON.stringify(PosnicPro.getFormData($('#tableorder_add_form')))
+            };
+            PosnicPro.post(params, function (response) {
+                if (response.type === 'success') {
+                    PosnicPro.tableOrders.tableOrdersClearForm();
+                    PosnicPro.tableOrders.currentPage = 1;
+                    PosnicPro.tableOrders.tableOrdersTable();
+                    hasher.setHash('settings');
+                    loader.find(".loadingSpinner:first").remove();
+                }
+                PosnicPro.alert(response.type, response.message);
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+        }
+    },
+    editTableOrderField: function () {
+        var loader = $(".loader-tax");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        var params = {
+            url: 'setting/editTableOrderForm',
+            data: JSON.stringify(PosnicPro.getFormData($('#tableorder_add_form')))
+        };
+        PosnicPro.put(params, function (response) {
+            if (response.type === 'success') {
+                PosnicPro.tableOrders.tableOrdersTable();
+                $(".infobar-settings-sidebar-overlay").css({ "background": "transparent", "position": "initial" });
+                $("#infobar-settings-sidebar-tableorder").removeClass("sidebarshow");
+                hasher.setHash('settings');
+            }
+            loader.find(".loadingSpinner:first").remove();
+            PosnicPro.alert(response.type, response.message);
+            $('.mobile_tooltip').tooltip('hide');
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    deleteTableOrderField: function (id) {
+        if (PosnicPro.deleteConfirmation) {
+            PosnicPro.callbackRegistry = {};
+            PosnicPro.delete('setting/deleteTableOrder?id=' + id, function (response) {
+                if (response.type === 'success') {
+                    PosnicPro.deleteConfirmation = false;
+                    $("#tableorder_add_form").trigger("reset");
+                    PosnicPro.tableOrders.currentPage = 1;
+                    PosnicPro.tableOrders.tableOrdersTable();
+                    $(".infobar-settings-sidebar-overlay").css({ "background": "transparent", "position": "initial" });
+                    $("#infobar-settings-sidebar-tableorder").removeClass("sidebarshow");
+                    hasher.setHash('settings');
+                }
+                PosnicPro.alert(response.type, response.message);
+            });
+        } else {
+            PosnicPro.callbackRegistry = {
+                name: 'deleteTableOrderField',
+                arguments: id
+            };
+            $('#delete_table_order_modal').modal('show');
+        }
+        $('.mobile_tooltip').tooltip('hide');
+    },
+    deleteTableOrderConfirmed: function () {
+        $('#delete_table_order_modal').modal('hide');
+        PosnicPro.deleteConfirmation = true;
+        window['PosnicPro']['tableOrders']['' + PosnicPro.callbackRegistry.name](PosnicPro.callbackRegistry.arguments);
+    },
+    tableOrdersClearForm: function () {
+        $("#tableorder_add_form").trigger("reset");
+    },
+    resetEditButton: function (id) {
+        PosnicPro.tableOrders.triggerTaxEdit(id);
+    }
+
+};
+
+PosnicPro.tableorder = PosnicPro.tableOrders;
+
+PosnicPro.payment = {
+    triggerModules: function () {
+        PosnicPro.showAddModal('payment');
+        $('.payment_id').val('');
+            $('#payment-heading').text(PosnicPro.i18n.t('lang_new_title', 'Add'));
+            $('#payment_text_change').text(PosnicPro.i18n.t('lang_save_title', 'Save'));
+        var loader = $(".loader-tax");
+        loader.find(".loadingSpinner:first").remove();
+        $('#payment_reset').show();
+        $('.payment_edit_reset').hide();
+    },
+    triggerTaxEdit: function (id) {
+        var module = $('#setting_payment_edit_' + id);
+        PosnicPro.showAddModal('payment');
+        $('.payment_id').val(id);
+        $('#payment_value').val(module.data('paymentvalue'));
+        $('#tax-heading').text(PosnicPro.i18n.t('lang_action_edit', 'Edit'));
+            $('#payment-heading').text(PosnicPro.i18n.t('lang_action_edit', 'Edit'));
+            $('#payment_text_change').text(PosnicPro.i18n.t('lang_updatebtn_title', 'Update'));
+        $('#payment_reset').hide();
+        $('.payment_edit_reset').show();
+        $('.payment_edit_reset').attr("id", id);
+        $('.mobile_tooltip').tooltip('hide');
+    },
+    triggerTaxDelete: function (id) {
+        PosnicPro.payment.deletePaymentField(id);
+    },
+    paymentTable: function () {
+        PosnicPro.configPaymentType = [];
+        var loader = $(".loader-table-tax");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        var table = $('#view_payment');
+        var params = {
+            url: 'setting/getPaymentAll'
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                table.children('tbody').text('');
+                var data = response.data;
+                for (var i = 0; i < data.length; i++) {
+                    let row = data[i];
+                    let edit = '<a href="#/settings/payment/' + row.payment_id + '/edit" id="setting_payment_edit_' + row.payment_id + '" data-toggle="tooltip" title="Edit Payment" data-t-title="lang_edit_payment" class="btn btn-primary-rgba mobile_tooltip mb-1 mr-1" data-module = "branch" data-access = "write" data-paymentvalue="' + row.payment_value + '" ><i class="feather icon-edit"></i></a>';
+                    let deleted = '<a href="#/settings/payment/' + row.payment_id + '/delete" id="setting_payment_delete_' + row.payment_id + '" data-toggle="tooltip" title="Delete Payment" data-t-title="lang_delete_payment" class="btn btn-danger-rgba mobile_tooltip mb-1 mr-1" data-module = "branch" data-access = "delete" data-paymentvalue="' + row.payment_value + '" ><i class="feather icon-trash"></i></a>';
+                    let trow = '<tr> <td scope="row" width="10%">' + (i + 1) + '</td><td width="10%" class="text-right">' + row.payment_value + '</td><td width="40%" class="text-center">' + edit + ' ' + deleted + '</td> </tr>';
+                    $('#view_payment').children('tbody').append(trow);
+                    PosnicPro.configPaymentType[i] = {
+                        payment_value: row.payment_value
+                    };
+                }
+                // Only refresh payment UI if we're on the sales page
+                var currentHash = window.location.hash;
+                if (currentHash && currentHash.includes('sales')) {
+                    const multi_payment = PosnicPro.sales.EditRecentSaleParams.multi_payment || {};
+                    var enableMulti = (PosnicPro.local.get('enable_multi_payment') === 'enable' || Object.keys(multi_payment).length !== 0);
+                    if (enableMulti) {
+                        PosnicPro.sales.showMultiPaymentMode();
+                    } else {
+                        PosnicPro.sales.showPaymentMode();
+                    }
+                }
+                $('span.number').number(true, 2);
+                loader.find(".loadingSpinner:first").remove();
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    addPaymentField: function () {
+        if ($('#payment_value').val() !== '') {
+            var loader = $(".loader-tax");
+            $("<div class='loadingSpinner'></div>").appendTo(loader);
+            var params = {
+                url: 'setting/addPaymentData',
+                data: JSON.stringify(PosnicPro.getFormData($('#payment_add_form')))
+            };
+            PosnicPro.post(params, function (response) {
+                if (response.type === 'success') {
+                    PosnicPro.payment.paymentTable();
+                    PosnicPro.payment.paymentClearForm();
+
+                    /*
+                     * STAY OPEN, READY FOR THE NEXT ONE.
+                     *
+                     * A shop setting up its payment methods enters several in
+                     * a row - Cash, UPI, Card, Zomato - and the panel closed
+                     * itself after each one, so every entry cost a reopen.
+                     * Owner: "also dont close after save. lets ready to
+                     * insert new. if user wants, then he can close or press
+                     * esc."
+                     *
+                     * The form is already cleared above, so the cursor goes
+                     * back to the name box and typing continues. Closing is
+                     * the Close button or Escape, both of which the person
+                     * chooses - see the Escape handler in PosnicPro.js.
+                     */
+                    $('#payment_value').val('').trigger('focus');
+
+                    loader.find(".loadingSpinner:first").remove();
+                }
+                PosnicPro.alert(response.type, response.message);
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+        }
+    },
+    editPaymentField: function () {
+        var loader = $(".loader-tax");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        var params = {
+            url: 'setting/editPaymentForm',
+            data: JSON.stringify(PosnicPro.getFormData($('#payment_add_form')))
+        };
+        PosnicPro.put(params, function (response) {
+            if (response.type === 'success') {
+                PosnicPro.payment.paymentClearForm();
+                PosnicPro.payment.paymentTable();
+                $(".infobar-settings-sidebar-overlay").css({ "background": "transparent", "position": "initial" });
+                $("#infobar-settings-sidebar-tax").removeClass("sidebarshow");
+                hasher.setHash('settings');
+            }
+            loader.find(".loadingSpinner:first").remove();
+            PosnicPro.alert(response.type, response.message);
+            $('.mobile_tooltip').tooltip('hide');
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    deletePaymentField: function (id) {
+        if (PosnicPro.deleteConfirmation) {
+            PosnicPro.callbackRegistry = {};
+            PosnicPro.delete('setting/deletePayment?id=' + id, function (response) {
+                if (response.type === 'success') {
+                    PosnicPro.deleteConfirmation = false;
+                    PosnicPro.payment.paymentTable();
+                    $(".infobar-settings-sidebar-overlay").css({ "background": "transparent", "position": "initial" });
+                    $("#infobar-settings-sidebar-tax").removeClass("sidebarshow");
+                    hasher.setHash('settings');
+                }
+                PosnicPro.alert(response.type, response.message);
+            });
+        } else {
+            PosnicPro.callbackRegistry = {
+                name: 'deletePaymentField',
+                arguments: id
+            };
+            $('#delete_payment_modal').modal('show');
+        }
+        $('.mobile_tooltip').tooltip('hide');
+    },
+    deletePaymentConfirmed: function () {
+        $('#delete_payment_modal').modal('hide');
+        PosnicPro.deleteConfirmation = true;
+        window['PosnicPro']['payment']['' + PosnicPro.callbackRegistry.name](PosnicPro.callbackRegistry.arguments);
+    },
+    paymentClearForm: function () {
+        $("#payment_add_form").trigger("reset");
+    },
+    resetEditButton: function (id) {
+        PosnicPro.payment.triggerTaxEdit(id);
+    }
+};
+
+PosnicPro.taxgroup = {
+    triggerModules: function () {
+        $('#taxgroup-heading').text(PosnicPro.i18n.t('lang_new_title', 'Add'));
+        PosnicPro.showAddModal('taxgroup');
+        $('#taxgroup_id').val('');
+        //        $('#taxgroup_text_change').text(PosnicPro.i18n.t('lang_save_title', 'Save'));
+        $('#taxgroup_text_change').text(PosnicPro.i18n.t('lang_save_title', 'Save'));
+        $('#taxgroup_reset').show();
+        $('.taxgroup_edit_reset').hide();
+        var loader = $(".loader-taxgroup");
+        loader.find(".loadingSpinner:first").remove();
+        var table = $('#list_tax_rates');
+        var data = {
+            tax_group: 'no'
+        };
+        var params = {
+            url: 'setting/getTaxAll',
+            data: data
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                data = response.data;
+                table.children('tbody').html('');
+                for (var i = 0; i < data.length; i++) {
+                    var row = data[i];
+                    var trow = '<tr><td><input type="checkbox" class="tax_rates" name="tax_rates[' + row.tax_id + ']" data-taxid="' + row.tax_id + '" data-taxname="' + row.tax_name + '" data-taxvalue="' + row.tax_value + '"></td><td>' + row.tax_name + '</td><td>' + row.tax_value + '</td></tr>';
+                    table.children('tbody').append(trow);
+                }
+
+            }
+        });
+    },
+    triggerTaxEdit: function (id) {
+        $('#taxgroup-heading').text(PosnicPro.i18n.t('lang_action_edit', 'Edit'));
+        PosnicPro.showAddModal('taxgroup');
+        $('#taxgroup_id').val(id);
+        //        $('#taxgroup_text_change').text(PosnicPro.i18n.t('lang_refresh_title', 'Update'));
+        $('#taxgroup_text_change').text(PosnicPro.i18n.t('lang_updatebtn_title', 'Update'));
+        var loader = $(".loader-taxgroup");
+        loader.find(".loadingSpinner:first").remove();
+        $('#taxgroup_reset').hide();
+        $('.taxgroup_edit_reset').show();
+        $('.taxgroup_edit_reset').attr("id", id);
+        var table = $('#list_tax_rates');
+        var data = {
+            tax_id: id
+        };
+        var params = {
+            url: 'setting/getTaxGroup',
+            data: data
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                $('#taxgroup_name').val(response.data.name);
+                data = response.data.getall;
+                table.children('tbody').html('');
+                for (var i = 0; i < data.length; i++) {
+                    var row = data[i];
+                    var trow = '<tr><td><input type="checkbox" id="tax_checked_id_' + row.tax_id + '" class="tax_rates" name="tax_rates[' + row.tax_id + ']" data-taxid="' + row.tax_id + '" data-taxname="' + row.tax_name + '" data-taxvalue="' + row.tax_value + '"></td><td>' + row.tax_name + '</td><td>' + row.tax_value + '</td></tr>';
+                    table.children('tbody').append(trow);
+                }
+                var checkedid = response.data.checked;
+                $(document).ready(function () {
+                    for (var i = 0; i < checkedid.length; i++) {
+                        var row = checkedid[i];
+                        $('#tax_checked_id_' + row.checked_tax).prop('checked', true);
+                        $('.mobile_tooltip').tooltip('hide');
+                    }
+                });
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    resetEditButton: function (id) {
+        PosnicPro.taxgroup.triggerTaxEdit(id);
+    },
+    triggerTaxDelete: function (id) {
+        PosnicPro.record_id = id;
+        PosnicPro.taxgroup.deleteTaxGroupData(id);
+    },
+    taxgroupTable: function () {
+        var loader = $(".loader-table-taxgroup");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        PosnicPro.HideSideBarModal();
+        var table = $('#view_taxgroup');
+        var data = {
+            tax_group: 'yes'
+        };
+        var params = {
+            url: 'setting/getTaxAll',
+            data: data
+        };
+        PosnicPro.get(params, function (response) {
+            if (response.type === 'success') {
+                table.children('tbody').text('');
+                data = response.data;
+                let currency = PosnicPro.local.get('currencySign');
+                for (var i = 0; i < data.length; i++) {
+                    let row = data[i];
+                    let edit = '<a href="#/settings/taxgroup/' + row.tax_id + '/edit" id="setting_taxgroup_edit_' + row.tax_id + '" data-toggle="tooltip" title="Edit Tax" data-t-title="lang_edit_tax" class="btn btn-primary-rgba mobile_tooltip mb-1 mr-1" data-module = "branch" data-access = "write"><i class="feather icon-edit"></i></a>';
+                    let deleted = '<a href="#/settings/taxgroup/' + row.tax_id + '/delete" id="setting_taxgroup_delete_' + row.tax_id + '" data-toggle="tooltip" title="Delete Tax" data-t-title="lang_delete_tax" class="btn btn-danger-rgba mobile_tooltip mb-1 mr-1" data-module = "branch" data-access = "delete"><i class="feather icon-trash"></i></a>';
+                    let trow = '<tr> <td scope="row" width="10%">' + (i + 1) + '</td>  <td width="40%">' + row.tax_name + '</td> <td width="10%" class="text-right">' + currency + '&nbsp;<span class="number">' + row.tax_value + '</span></td><td width="40%" class="text-center">' + edit + ' ' + deleted + '</td> </tr>';
+                    table.children('tbody').append(trow);
+                }
+                $('span.number').number(true, 2);
+                loader.find(".loadingSpinner:first").remove();
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    addTaxgroupRates: function () {
+        if ($('#taxgroup_name').val() !== '') {
+            var loader = $(".loader-taxgroup");
+            $("<div class='loadingSpinner'></div>").appendTo(loader);
+            var taxData = [];
+            var el = $('.tax_rates');
+            for (var i = 0; i < el.length; i++) {
+                if ($(el[i]).is(":checked")) {
+                    var taxid = $(el[i]).data("taxid");
+                    var taxname = $(el[i]).data("taxname");
+                    var taxvalue = $(el[i]).data("taxvalue");
+                    taxData.push({ tax_id: taxid, tax_name: taxname, tax_value: taxvalue });
+                }
+            }
+
+            var params = {
+                url: 'setting/addTaxGroup',
+                data: JSON.stringify({
+                    tax_id: $('#taxgroup_id').val(),
+                    tax_name: $('#taxgroup_name').val(),
+                    tax_fields: taxData
+                })
+            };
+            PosnicPro.post(params, function (response) {
+                if (response.type === 'success') {
+                    $("#taxgroup_add_form").trigger("reset");
+                    $('#taxgroup_name').focus();
+                    PosnicPro.taxgroup.taxgroupTable();
+                    PosnicPro.getBranchTaxList();
+                    hasher.setHash('settings');
+                    loader.find(".loadingSpinner:first").remove();
+                }
+                PosnicPro.alert(response.type, response.message);
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+        }
+    },
+    editTaxgroupRates: function () {
+        var loader = $(".loader-taxgroup");
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+        var taxData = [];
+        var el = $('.tax_rates');
+        for (var i = 0; i < el.length; i++) {
+            if ($(el[i]).is(":checked")) {
+                var taxid = $(el[i]).data("taxid");
+                var taxname = $(el[i]).data("taxname");
+                var taxvalue = $(el[i]).data("taxvalue");
+                taxData.push({ tax_id: taxid, tax_name: taxname, tax_value: taxvalue });
+            }
+        }
+
+        var params = {
+            url: 'setting/editTaxGroup',
+            data: JSON.stringify({
+                tax_id: $('#taxgroup_id').val(),
+                tax_name: $('#taxgroup_name').val(),
+                tax_fields: taxData
+            })
+        };
+        PosnicPro.put(params, function (response) {
+            if (response.type === 'success') {
+                PosnicPro.taxgroup.taxgroupTable();
+                PosnicPro.getBranchTaxList();
+                $(".infobar-settings-sidebar-overlay").css({ "background": "transparent", "position": "initial" });
+                $("#infobar-settings-sidebar-taxgroup").removeClass("sidebarshow");
+                hasher.setHash('settings');
+            }
+            loader.find(".loadingSpinner:first").remove();
+            PosnicPro.alert(response.type, response.message);
+        }, function (xhr) {
+            var response = jQuery.parseJSON(xhr.responseText);
+            PosnicPro.alert(response.type, response.message);
+        });
+    },
+    deleteTaxGroupData: function (id) {
+        if (PosnicPro.deleteConfirmation) {
+            PosnicPro.callbackRegistry = {};
+            PosnicPro.delete('setting/deleteTaxGroup?id=' + id, function (response) {
+                if (response.type === 'success') {
+                    PosnicPro.deleteConfirmation = false;
+                    PosnicPro.taxgroup.taxgroupTable();
+                    PosnicPro.getBranchTaxList();
+                    $(".infobar-settings-sidebar-overlay").css({ "background": "transparent", "position": "initial" });
+                    $("#infobar-settings-sidebar-taxgroup").removeClass("sidebarshow");
+                    hasher.setHash('settings');
+                }
+                PosnicPro.alert(response.type, response.message);
+            });
+        } else {
+            PosnicPro.callbackRegistry = {
+                name: 'deleteTaxGroupData',
+                arguments: id
+            };
+            $('#delete_tax_modal').modal('show');
+            $('#show_hide_tax').hide();
+            $('#show_hide_taxgroup').show();
+        }
+        $('.mobile_tooltip').tooltip('hide');
+    },
+    /*delete tax confirmation*/
+    deleteTaxConfirmed: function () {
+        $('#delete_tax_modal').modal('hide');
+        PosnicPro.deleteConfirmation = true;
+        window['PosnicPro']['taxgroup']['' + PosnicPro.callbackRegistry.name](PosnicPro.callbackRegistry.arguments);
+    },
+    taxgroupClearForm: function () {
+        $("#taxgroup_add_form").trigger("reset");
+        $('.error_taxgroup').css('display', 'none');
+    }
+};
+
+PosnicPro.kiosk = {
+    // Function to handle file input change and preview
+    handleFileChange: function (inputId, previewId) {
+        $("#" + inputId).change(function () {
+            var file = this.files[0];
+            var fileSize = file.size;
+            var validExtensions = ['gif', 'jpg', 'png', 'jpeg', 'bmp'];
+            var fileName = file.name;
+            var fileNameExt = fileName.substr(fileName.lastIndexOf('.') + 1).toLowerCase();
+
+            if (fileSize < 5242880) { // 5MB limit
+                if ($.inArray(fileNameExt, validExtensions) === -1) {
+                    $("#" + inputId).val(''); // Clear the input
+                    PosnicPro.alert('error', "Only these file types are accepted: " + validExtensions.join(', '));
+                } else {
+                    // Show image preview
+                    var reader = new FileReader();
+                    reader.onload = function (e) {
+                        $("#" + previewId).attr("src", e.target.result).show();
+                    };
+                    reader.readAsDataURL(file);
+                }
+            } else {
+                $("#" + inputId).val(''); // Clear the input
+                PosnicPro.alert('error', PosnicPro.i18n.t('lang_file_size_should_be_less_than_5mb', 'File size should be less than 5MB!'));
+            }
+        });
+    },
+    submitKioskImages: function () {
+        var logoValue = $('#kiosk_logo').val();
+        var bannerValue = $('#kiosk_banner').val();
+        var homeBannerValue = $('#kiosk_homebanner').val();
+        var advertisementValue = $('#kiosk_advertisement').val();
+
+        if (logoValue || bannerValue || homeBannerValue || advertisementValue) {
+            var loader = $(".loader-view-kioskimage");
+            $("<div class='loadingSpinner'></div>").appendTo(loader);
+            var formData = new FormData(document.getElementById("kiosk_settings_form"));
+
+            PosnicPro.requestImage('POST', "setting/updateKioskImages", formData, false, function (response) {
+                if (response.type === 'success') {
+                    // Update the image preview dynamically based on the response data
+                    if (response.data.logo) {
+                        $('#preview_logo').attr('src', response.data.logo).show();
+                    }
+                    if (response.data.banner) {
+                        $('#preview_banner').attr('src', response.data.banner).show();
+                    }
+                    if (response.data.homebanner) {
+                        $('#preview_homebanner').attr('src', response.data.homebanner).show();
+                    }
+                    if (response.data.advertisement) {
+                        $('#preview_advertisement').attr('src', response.data.advertisement).show();
+                    }
+
+                    PosnicPro.alert('success', response.message);
+                } else {
+                    PosnicPro.alert(response.type, response.message);
+                }
+                loader.find(".loadingSpinner:first").remove();
+            });
+        }
+    },
+    removeImage: function (type) {
+        let imageUrl = "";
+
+        if (type === "logo") {
+            imageUrl = $("#preview_logo").attr("src");
+        } else if (type === "banner") {
+            imageUrl = $("#preview_banner").attr("src");
+        } else if (type === "advertisement") {
+            imageUrl = $("#preview_advertisement").attr("src");
+        } else {
+            imageUrl = $("#preview_homebanner").attr("src");
+        }
+
+        // Check if an actual image URL is there before deleting
+        if (imageUrl) {
+            var params = {
+                url: 'setting/branchImageDelete',
+                data: JSON.stringify({ data: image_value })
+            };
+            PosnicPro.delete(params, function (response) {
+                if (response.type === 'success') {
+                    PosnicPro.kiosk.removeImagePreview(type); // Hide preview after deletion
+                }
+                PosnicPro.alert(response.type, response.message);
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+        } else {
+            PosnicPro.kiosk.removeImagePreview(type);
+        }
+    },
+    // Function to remove image preview
+    removeImagePreview: function (type) {
+        if (type === 'logo') {
+            $("#preview_logo").attr("src", 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7').hide();
+        } else if (type === 'banner') {
+            $("#preview_banner").attr("src", 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7').hide();
+        } else if (type === 'advertisement') {
+            $("#preview_advertisement").attr("src", 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7').hide();
+        } else {
+            $("#preview_homebanner").attr("src", 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7').hide();
+        }
+    }
+
+};
+$("#kiosk_settings_form").submit(function (event) {
+    event.preventDefault();
+    PosnicPro.kiosk.submitKioskImages();
+});
+$("#radio_discount_amount, #radio_discount_percentage").change(function () {
+    if ($("#radio_discount_amount").is(":checked")) {
+        $('#discount_percentage').attr('disabled', 'disabled').addClass('bg-white').val('0').hide();
+        $('#discount_amount').removeAttr('disabled', 'disabled').show().focus().select();
+    } else {
+        $('#discount_amount').attr('disabled', 'disabled').addClass('bg-white').val('0').hide();
+        $('#discount_percentage').removeAttr('disabled', 'disabled').show().focus().select();
+    }
+});
+$(function () {
+    $('.hide-recyclebin').hide();
+    var $backupSelect = $('#backuptablelist');
+    if ($backupSelect.length) {
+        PosnicPro.settings.changeInputFieldsValueBackupTable($backupSelect[0]);
+    }
+    /*
+     * Test print, using whatever is selected right now.
+     *
+     * Delegated, because the settings page is loaded into the shell after this
+     * script runs and a direct binding would find nothing to bind to.
+     *
+     * The width is taken from the form rather than from saved settings, so
+     * somebody can try 58 and 80 and keep the one that fits without saving a
+     * wrong value in between.
+     */
+
+    // The printer and paper controls moved to Hardware Manager, a separate
+    // window the desktop app owns. This is the way through to it.
+    $(document).on('click', '#open_hardware_manager, [data-open-device-hardware]', function () {
+        if (window.electronAPI && window.electronAPI.desktop) {
+            window.electronAPI.desktop.open('hardware');
+        } else {
+            PosnicPro.alert('warning', PosnicPro.i18n.t('lang_hardware_manager_is_part_of_the_desktop_ap', 'Hardware Manager is part of the desktop app. Open Posnic on the till to set the printer.'));
+        }
+    });
+
+    $('.custom_default_value_search').on('keydown.autocomplete', function () {
+        var module = $(this).data('id');
+        $(this).autocomplete({
+            lookup: function (query, done) {
+                var result = {};
+                var suggestions = [];
+                var params = {
+                    url: 'base/getDefaultSuggest',
+                    data: 'query=' + query + '&module=' + module
+                };
+                PosnicPro.get(params, function (response) {
+                    if (response.suggestions.length > 0) {
+                        suggestions: $.map(response.suggestions, function (dataItem) {
+                            suggestions.push({ "value": dataItem.name, "data": dataItem });
+                        });
+                    } else {
+                        suggestions.push({ value: query + ' ', data: -1 });
+                    }
+
+                    result["suggestions"] = suggestions;
+                    done(result);
+                }, function (xhr) {
+                    var response = jQuery.parseJSON(xhr.responseText);
+                    PosnicPro.alert(response.type, response.message);
+                });
+            },
+            onSelect: function (suggestion) {
+
+                if (suggestion.data !== -1) {
+                    $('#' + module + '_default_value').val(suggestion.data.id);
+                } else {
+                    if (module === 'customers') {
+                        hasher.setHash('settings/default/customer');
+                    } else {
+                        hasher.setHash('settings/default/supplier');
+                    }
+
+                }
+            },
+            autoSelectFirst: true,
+            triggerSelectOnValidInput: false,
+            formatResult: function (suggestion) {
+                var phone = suggestion.data.phone;
+                if (suggestion.data === -1 || typeof suggestion.phone === undefined) {
+                    phone = "( Add new )";
+                }
+                return '<div>' +
+                    $.Autocomplete.formatResult(suggestion) +
+                    '</div><span class="pull-right" style="margin-top:-20px;">' + phone + '</span>';
+            }
+        });
+    });
+});
+// validate submit
+$("#sms_setting").validate({
+    highlight: function (element, errorClass) {
+        $(element).css("border-color", "#f9616d");
+    },
+    unhighlight: function (element, errorClass) {
+        $(element).css("border-color", "#eae8e8");
+    },
+    rules: {
+
+        way2sms_userid: {
+            required: true,
+            phone: true,
+            minlength: 3,
+            maxlength: 20
+        },
+        way2sms_password: {
+            required: true,
+            maxlength: 50
+        },
+        way2sms_api: {
+            required: true,
+            maxlength: 100
+        }
+
+    },
+    messages: {
+
+        way2sms_userid: {
+            required: "Enter the user ID",
+            maxlength: "User id should not be more than 20 digits"
+        },
+        way2sms_password: {
+            required: "Enter a password",
+            maxlength: "Password should not be more than 50 digits"
+        },
+        way2sms_api: {
+            required: "Enter the API key",
+            maxlength: "API should not be more than 100 characters"
+        }
+    }
+});
+$("#sms_setting").submit(function (event) {
+    event.preventDefault();
+    if ($('#sms_setting').valid()) {            // checks form for validity
+        PosnicPro.settings.way2smsSettings();
+    }
+});
+// validate submit
+$("#textlocal_setting").validate({
+    highlight: function (element, errorClass) {
+        $(element).css("border-color", "#f9616d");
+    },
+    unhighlight: function (element, errorClass) {
+        $(element).css("border-color", "#eae8e8");
+    },
+    rules: {
+
+        textlocal_sender: {
+            required: true,
+            maxlength: 20
+        },
+        textlocal_api: {
+            required: true,
+            maxlength: 100
+        }
+
+    },
+    messages: {
+
+        textlocal_sender: {
+            required: "Enter the sender name",
+            maxlength: "Sender name should not be more than 20 characters"
+        },
+        textlocal_api: {
+            required: "Enter the API key",
+            maxlength: "API should not be more than 100 characters"
+        }
+    }
+});
+$("#textlocal_setting").submit(function (event) {
+    event.preventDefault();
+    if ($('#textlocal_setting').valid()) {            // checks form for validity
+        PosnicPro.settings.textlocalsmsSettings();
+    }
+});
+$("#setting_add").validate({
+    highlight: function (element, errorClass) {
+        $(element).css("border-color", "#f9616d");
+    },
+    unhighlight: function (element, errorClass) {
+        $(element).css("border-color", "#eae8e8");
+    },
+    rules: {
+        store_name: {
+            required: true,
+            minlength: 3,
+            maxlength: 250
+        },
+        store_telephone: {
+            required: true,
+            minlength: 3,
+            maxlength: 20,
+            setting_phone_number: true
+        },
+        store_email: {
+            required: true,
+            email: true,
+            emailExt: true,
+            maxlength: 250
+        },
+        store_address: {
+            required: true,
+            minlength: 3,
+            maxlength: 500
+        },
+        printing_address: {
+            required: true,
+            minlength: 3,
+            maxlength: 500
+        },
+        website: {
+            url: true,
+            minlength: 3,
+            maxlength: 50
+        },
+        city: {
+            maxlength: 50
+        },
+        pincode: {
+            maxlength: 15
+        },
+        branch_gstin_number: {
+            gst: true,
+            minlength: 15,
+            maxlength: 15
+        }
+    },
+    messages: {
+        store_name: {
+            required: "Enter the shop name",
+            maxlength: "Store name should not be more than 250 characters"
+        },
+        store_telephone: {
+            required: "Enter the phone number",
+            setting_phone_number: "Enter a valid phone number",
+            minlength: "Use at least 3 characters",
+            maxlength: "Use no more than 20 characters"
+        },
+        store_email: {
+            required: "Enter a valid email address",
+            maxlength: "Email should not be more than 250 digits"
+        },
+        store_address: {
+            required: "Enter the shop address",
+            minlength: "Store Address must be Atleast 3 Characters long",
+            maxlength: "Address is too Long !"
+        },
+        printing_address: {
+            required: "Enter the address to print on receipts",
+            minlength: "Printing Address must be Atleast 3 Characters long",
+            maxlength: "Address is too Long !"
+        },
+        website: {
+            required: "Enter a valid web address",
+            minlength: "Website must be Atleast 3 Characters long",
+            maxlength: "Website should not be more than 50 digits"
+        },
+        city: {
+            maxlength: "Place should not be more than 50 digits"
+        },
+        pincode: {
+            maxlength: "Place should not be more than 15 digits"
+        },
+        branch_gstin_number: {
+            minlength: "Gstr must be Atleast 15 Characters long",
+            maxlength: "Gstr should not be more than 15 digits"
+        }
+    }
+});
+jQuery.validator.addMethod("setting_phone_number", function (phone_number, element) {
+    let valid = PosnicPro.settings.store_telephone.isValidNumber();
+    let num = PosnicPro.settings.store_telephone.getNumber();
+    if (valid === true) {
+        $('#store_telephone').val(num);
+        return true;
+    } else {
+        return false;
+    }
+
+}, "Enter a valid phone number");
+jQuery.validator.addMethod("gst", function (value, element) {
+    if (value !== '') {
+        return /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(value);
+    }
+    return true;
+}, "Enter a valid GSTIN");
+$("#setting_add").submit(function (event) {
+    event.preventDefault();
+    if ($('#setting_add').valid()) {          // checks form for validity
+        PosnicPro.settings.generalSetting();
+    }
+});
+$("#setting_image_add").submit(function (event) {
+    event.preventDefault();
+    PosnicPro.settings.settingImageFormSubmit();
+});
+$("#tax_add_form").validate({
+    errorClass: 'error error_tax',
+    highlight: function (element, errorClass) {
+        $(element).css("border-color", "#f9616d");
+    },
+    unhighlight: function (element, errorClass) {
+        $(element).css("border-color", "#eae8e8");
+    },
+    rules: {
+        tax_name: {
+            required: true,
+            minlength: 3,
+            maxlength: 20
+        },
+        tax_value: {
+            required: true,
+            minlength: 1,
+            maxlength: 5
+        }
+    },
+    messages: {
+        tax_name: {
+            required: "Enter the tax name",
+            minlength: "Tax name must be at least 3 characters",
+            maxlength: "Tax name should not be more than 100 characters"
+        },
+        tax_value: {
+            required: "Enter the tax rate",
+            minlength: "Tax value must be at least 1 characters",
+            maxlength: "Tax value should not be more than 5 characters"
+        }
+    }
+});
+$("#denom_add_form").validate({
+    highlight: function (element, errorClass) {
+        $(element).css("border-color", "#f9616d");
+    },
+    unhighlight: function (element, errorClass) {
+        $(element).css("border-color", "#eae8e8");
+    },
+    rules: {
+        denom_value: {
+            required: true,
+            minlength: 1
+        }
+    },
+    messages: {
+        denom_value: {
+            required: "Enter a cash amount",
+            minlength: "value must be at least 1 characters"
+        }
+    }
+});
+$("#payment_add_form").validate({
+    highlight: function (element, errorClass) {
+        $(element).css("border-color", "#f9616d");
+    },
+    unhighlight: function (element, errorClass) {
+        $(element).css("border-color", "#eae8e8");
+    },
+    rules: {
+        payment_value: {
+            required: true,
+            minlength: 1,
+            maxlength: 12
+        }
+    },
+    messages: {
+        payment_value: {
+            required: "Enter a payment amount",
+            minlength: "value must be at least 1 characters",
+            maxlength: "value should not be more than 12 characters"
+        }
+    }
+});
+$("#tax_add_form").submit(function (event) {
+    event.preventDefault();
+    if ($('#tax_add_form').valid()) {            // checks form for validity
+        if ($('#tax_id').val() !== '') {
+            PosnicPro.tax.editTaxRates();
+        } else {
+            PosnicPro.tax.addTaxRates();
+        }
+    }
+});
+$("#denom_add_form").submit(function (event) {
+    event.preventDefault();
+    if ($('#denom_add_form').valid()) {            // checks form for validity
+        if ($('#denom_id').val() !== '') {
+            PosnicPro.denom.editDenomField();
+        } else {
+            PosnicPro.denom.addDenomField();
+        }
+    }
+});
+$("#payment_add_form").submit(function (event) {
+    event.preventDefault();
+    if ($('#payment_add_form').valid()) {            // checks form for validity
+        if ($('.payment_id').val() !== '') {
+            PosnicPro.payment.editPaymentField();
+        } else {
+            PosnicPro.payment.addPaymentField();
+        }
+    }
+});
+$('#tableorder_value').on('input', function () {
+    // remove anything that is not A-Z, a-z, 0-9
+    this.value = this.value.replace(/[^A-Za-z0-9]/g, '').slice(0, 6);
+});
+$("#tableorder_add_form").validate({
+    highlight: function (element, errorClass) {
+        $(element).css("border-color", "#f9616d");
+    },
+    unhighlight: function (element, errorClass) {
+        $(element).css("border-color", "#eae8e8");
+    },
+    rules: {
+        tableorder_value: {
+            required: true,
+            minlength: 1,
+            maxlength: 6
+        }
+    },
+    errorClass: 'error error_tableorder',
+    messages: {
+        tableorder_value: {
+            required: "Enter a table number",
+            minlength: "value must be at least 1 characters",
+            maxlength: "value should not be more than 6 characters"
+        }
+    }
+});
+$("#tableorder_add_form").submit(function (event) {
+    event.preventDefault();
+    if ($('#tableorder_add_form').valid()) {            // checks form for validity
+        if ($('#tableorder_id').val() !== '') {
+            PosnicPro.tableOrders.editTableOrderField();
+        } else {
+            PosnicPro.tableOrders.addTableOrderField();
+        }
+    }
+});
+$("#taxgroup_add_form").validate({
+    errorClass: 'error error_taxgroup',
+    highlight: function (element, errorClass) {
+        $(element).css("border-color", "#f9616d");
+    },
+    unhighlight: function (element, errorClass) {
+        $(element).css("border-color", "#eae8e8");
+    },
+    rules: {
+        taxgroup_name: {
+            required: true,
+            minlength: 3,
+            maxlength: 20
+        },
+        'tax_rates[]': {
+            required: true
+        }
+    },
+    messages: {
+        taxgroup_name: {
+            required: "Enter the tax name",
+            minlength: "Tax name must be at least 3 characters",
+            maxlength: "Tax name should not be more than 100 characters"
+        },
+        'tax_rates[]': {
+            required: "You must check at least 1 box"
+        }
+    }
+});
+$("#taxgroup_add_form").submit(function (event) {
+    event.preventDefault();
+    if ($('#taxgroup_add_form').valid()) {            // checks form for validity
+        var checked = $(".tax_rates:checked").length;
+        if (checked > 0) {
+            $("#error_tax_checkbox").text("").removeClass('error');
+            if ($('#taxgroup_id').val() !== '') {
+                PosnicPro.taxgroup.editTaxgroupRates();
+            } else {
+                PosnicPro.taxgroup.addTaxgroupRates();
+            }
+        } else {
+            $("#error_tax_checkbox").text("You must check at least 1 box").addClass('error');
+        }
+    }
+});
+$("#eraseForm").validate({
+    highlight: function (element, errorClass) {
+        $(element).css("border-color", "#f9616d");
+    },
+    unhighlight: function (element, errorClass) {
+        $(element).css("border-color", "#eae8e8");
+    },
+    rules: {
+        verifyPassword: {
+            required: true,
+            minlength: 5,
+            strong_password: true,
+            maxlength: 20
+        }
+    },
+    messages: {
+        verifyPassword: {
+            required: "Enter the password",
+            minlength: "Password must be at least 5 characters",
+            maxlength: "Password should not be more than 20 characters"
+        }
+    }
+});
+$("#eraseForm").submit(function (event) {
+    event.preventDefault();
+    if ($('#eraseForm').valid()) {            // checks form for validity
+        PosnicPro.settings.verifyViewDangerZoneConfirmed();
+    }
+});
+// Email setting validate submit
+$("#email_add").validate({
+    highlight: function (element, errorClass) {
+        $(element).css("border-color", "#f9616d");
+    },
+    unhighlight: function (element, errorClass) {
+        $(element).css("border-color", "#eae8e8");
+    },
+    rules: {
+        report_type: {
+            required: true
+        },
+        "emailaddress[0]": {
+            required: true,
+            maxlength: 250,
+            email: true,
+            emailExt: true
+        }
+    },
+    messages: {
+        report_type: {
+            required: "Choose a report type"
+        },
+        "emailaddress[0]": {
+            required: "Enter a valid email address",
+            email: "Enter a valid email address",
+            maxlength: "Email should not be more than 250 Characters"
+        }
+    }
+});
+$("#email_add").submit(function (event) {
+    event.preventDefault();
+    if ($('#email_add').valid()) {
+        PosnicPro.settings.emailSetting();
+    }
+});
+// Kiosk account validate submit
+$("#kioskaccount_form").validate({
+    highlight: function (element) {
+        $(element).css("border-color", "#f9616d");
+    },
+    unhighlight: function (element) {
+        $(element).css("border-color", "#eae8e8");
+    },
+    rules: {
+        kioskstore_id: {
+            required: true,
+            minlength: 3,
+            maxlength: 6,
+            pattern: /^[A-Za-z0-9]+$/
+        }
+        // kiosksecret_key: {
+        //     required: true,
+        //     minlength: 3,
+        //     maxlength: 6,
+        //     pattern: /^[A-Za-z0-9]+$/
+        // }
+    },
+    messages: {
+        kioskstore_id: {
+            required: "Enter the store ID",
+            minlength: "Minimum 3 characters",
+            maxlength: "Maximum 6 characters",
+            pattern: "Only letters and numbers allowed"
+        }
+
+        // kiosksecret_key: {
+        //     required: "Enter the secret key",
+        //     minlength: "Minimum 3 characters",
+        //     maxlength: "Maximum 6 characters",
+        //     pattern: "Only letters and numbers allowed"
+        // }
+    }
+});
+// Add pattern rule support if not already available
+$.validator.addMethod("pattern", function (value, element, pattern) {
+    if (this.optional(element)) return true;
+    if (typeof pattern === "string") {
+        pattern = new RegExp(pattern);
+    }
+    return pattern.test(value);
+}, "Invalid format.");
+
+$("#kioskaccount_form").submit(function (event) {
+    event.preventDefault();
+    if ($(this).valid()) {
+        PosnicPro.settings.kioskAccountSettings();
+    }
+});
+
+$("#kioskprint_form").validate({
+    highlight: function (element) {
+        $(element).css("border-color", "#f9616d");
+    },
+    unhighlight: function (element) {
+        $(element).css("border-color", "#eae8e8");
+    },
+    rules: {
+        kioskprinter_name: {
+            required: true
+        }
+    },
+    messages: {
+        kioskprinter_name: {
+            required: "Enter the printer name"
+        }
+    }
+});
+
+$("#kioskprint_form").submit(function (event) {
+    event.preventDefault();
+    if ($(this).valid()) {
+        PosnicPro.settings.kioskPrinterSettings();
+    }
+});
+
+$('.custom_recyclebin_search_input').on('keypress keydown.autocomplete', function () {
+    var module = $('#backuptablelist').val();
+    var field_name = $('#view_recycle_bin_fields').val();
+    $(this).autocomplete({
+        lookup: function (query, done) {
+            var result = {};
+            var suggestions = [];
+            var params = {
+                url: 'setting/autoSuggestionRecycleBinTableField',
+                data: 'query=' + query + '&field=' + field_name + '&module=' + module
+            };
+            PosnicPro.get(params, function (response) {
+                suggestions: $.map(response.suggestions, function (dataItem) {
+                    suggestions.push({ "value": dataItem, "data": dataItem });
+                });
+                result["suggestions"] = suggestions;
+                done(result);
+            });
+        },
+        autoSelectFirst: true
+    });
+});
+$("#click_filter_btn,#v-pills-recyclebin-tab").click(function () {
+    if ($('#show_recycle').css('display') == 'none') {
+        $('#card_recycle').css({ "display": "block", "background-color": "#fff", "margin-bottom": "30px" });
+    } else if ($('.hide-button-action').css('display') == 'none') {
+        $('#card_recycle').css({ "display": "none", "background-color": "transparent", "margin-bottom": "0px" });
+    }
+});
+$('.custom_default_value_search').click(function () {
+    PosnicPro.selectAllText(jQuery(this));
+});
+$(document).on('change', '#indian_gst', function () {
+    var gst_status = $(this).val();
+    if (gst_status === 'gst_on') {
+        $('.disable_indian_gst').show();
+        PosnicPro.local.set('gst_action', 'enable');
+    } else {
+        $('.disable_indian_gst').hide();
+        PosnicPro.local.set('gst_action', 'disable');
+    }
+});
+$(document).ready(function () {
+    $('#discount_amount').keyup(function () {
+        if ($('#discount_amount').val() === '')
+            $('#discount_amount').val('0');
+    });
+    $("#setting_country").change(function () {
+        if (this.value === 'India') {
+            $(".branch-gstin-hide-show").show();
+        } else {
+            $('#branch_gstin_number').val('');
+            $(".branch-gstin-hide-show").hide();
+        }
+    });
+});
+$("#decimal_Round").click(function () {
+    if ($(this).is(":checked")) {
+        $('#decimal_Round').attr('checked', 'checked');
+    } else {
+        $('#decimal_Round').attr('unchecked', 'unchecked');
+    }
+});
+$("#receipt_barcode").click(function () {
+    if ($(this).is(":checked")) {
+        $('#receipt_barcode').attr('checked', 'checked');
+    } else {
+        $('#receipt_barcode').attr('unchecked', 'unchecked');
+    }
+});
+$("#backup_table_data").click(function () {
+    $('.storeSetting').removeClass('active');
+    $('#backup_table_data').addClass('active');
+    $(".backupReportTable").css({ "display": "none" });
+    PosnicPro.settings.settingsTable();
+});
+$('#branch_name').change(function () {
+    var branch_no = $('#branch_name').find(":selected").val();
+    PosnicPro.settings.changeBranch(branch_no);
+});
+$(function () {
+    $("#radio_discount_amount, #radio_discount_percentage").change(function () {
+        if ($("#radio_discount_amount").is(":checked")) {
+            $('#discount_percentage').attr('disabled', 'disabled').addClass('bg-white').val('0');
+            $('#discount_amount').removeAttr('disabled', 'disabled').focus().select();
+        } else if ($("#radio_discount_percentage").is(":checked")) {
+            $('#discount_amount').attr('disabled', 'disabled').addClass('bg-white').val('0');
+            $('#discount_percentage').removeAttr('disabled', 'disabled').focus().select();
+        }
+    });
+});
+function resize() {
+    if ($(window).width() < 768) {
+        $('#vertical_nav').addClass('tabs-horizantal');
+        $('#vertical_nav').removeClass('tabs-vertical');
+    } else {
+        $('#vertical_nav').addClass('tabs-vertical');
+    }
+}
+
+$(document).ready(function () {
+    $('#v-pills-manage').addClass('show active');
+    $(window).resize(resize);
+    resize();
+});
+// Function to preview image after validation
+$(function () {
+    PosnicPro.settings.loadSelectSettingCountry();
+    PosnicPro.settings.loadSelectSettingCurrency();
+    PosnicPro.settings.timeZone();
+    PosnicPro.commonDate();
+    $("#file").change(function () {
+        var fileSize = this.files[0].size;
+        if (fileSize < 5242880) {
+            var validExtensions = ['gif', 'jpg', 'png', 'jpeg', 'bmp'];
+            var fileName = this.files[0].name;
+            $('#setting_image_value').val(this.files[0].name);
+            var fileNameExt = fileName.substr(fileName.lastIndexOf('.') + 1);
+            if ($.inArray(fileNameExt, validExtensions) === -1) {
+                this.type = ''
+                this.type = 'file'
+                PosnicPro.alert('error', "Only these file types are accepted : " + validExtensions.join(', '));
+            } else {
+                var reader = new FileReader();
+                reader.onload = PosnicPro.settings.settingImageReadURL;
+                reader.readAsDataURL(this.files[0]);
+            }
+        } else {
+            PosnicPro.alert('error', "size should be less than 5MB !");
+        }
+    });
+    /*Date Select Dropdown*/
+    $('#storedate').on({
+        change: function () {
+            var selectedDate = $('#storedate').val();
+            $('#storedate option[value="' + selectedDate + '"]').attr("selected", true);
+            var serverDate = $('#storedate option[value="' + selectedDate + '"]').data('id');
+            var serverText = $('#storedate option[value="' + selectedDate + '"]').text();
+            $('#serverdate').val(serverDate);
+            $('#dateText').val(serverText);
+            $('#storedate').off('click');
+        }
+    });
+    ($('#backuptablelist').val() === 'branches') ? $('#hide_branch_recyclebin,#Select_backup_Branch').hide() : $('#hide_branch_recyclebin,#Select_backup_Branch').show();
+});
+$("#Select_backup_Branch").change("change", function () {
+    $("#select_backup_value_set").val($(this).find("option:selected").attr("value"));
+});
+// validate submit
+$("#tax_discount_add").validate({
+    highlight: function (element, errorClass) {
+        $(element).css("border-color", "#f9616d");
+    },
+    unhighlight: function (element, errorClass) {
+        $(element).css("border-color", "#eae8e8");
+    },
+    rules: {
+        default_customer: {
+            required: true,
+            minlength: 3,
+            maxlength: 100
+        },
+        default_supplier: {
+            required: true,
+            minlength: 3,
+            maxlength: 100
+        },
+        sales_prefix: {
+            maxlength: 6
+        },
+        receiving_prefix: {
+            maxlength: 6
+        },
+        notification_value: {
+            required: true
+        },
+        header_print: {
+            minlength: 3,
+            maxlength: 1000
+        },
+        footer_print: {
+            minlength: 3,
+            maxlength: 1000
+        }
+    },
+    messages: {
+        default_customer: {
+            required: "Choose a customer",
+            minlength: "Customer name must be at least 3 characters",
+            maxlength: "Customer name should not be more than 100 characters"
+        },
+        default_supplier: {
+            required: "Choose a supplier",
+            minlength: "Supplier name must be at least 3 characters",
+            maxlength: "Supplier name should not be more than 100 characters"
+        },
+        sales_prefix: {
+            required: "Enter a prefix for sale numbers",
+            minlength: "Must be at least 3 characters",
+            maxlength: "Should not be more than 3 characters"
+        },
+        receiving_prefix: {
+            required: "Enter a prefix for stock entries",
+            minlength: "Must be at least 3 characters",
+            maxlength: "Should not be more than 3 characters"
+        },
+        notification_value: {
+            required: "Enter a notification value"
+        },
+        header_print: {
+            minlength: "Header content must be at least 3 characters",
+            maxlength: "Header content should not be more than 1000 characters"
+        },
+        footer_print: {
+            minlength: "Footer content must be at least 3 characters",
+            maxlength: "Footer content should not be more than 1000 characters"
+        }
+    }
+});
+jQuery.validator.addMethod("lettersonly", function (value, element) {
+    return this.optional(element) || /^[a-z\s]+$/i.test(value);
+}, "Use letters only");
+$("#tax_discount_add").submit(function (event) {
+    event.preventDefault();
+    // Only this form owns the selected Core Settings tab. Other pages share
+    // updateCommonSetting, and the hidden Receipt Print tab stays active.
+    if ($('#core-tab-print').hasClass('active') && PosnicPro.receiptDesignerEditor) {
+        PosnicPro.receiptDesignerEditor.save();
+        return;
+    }
+    if ($('#tax_discount_add').valid()) {            // checks form for validity
+        PosnicPro.settings.updateCommonSetting('Core Settings saved');
+    }
+});
+$("#tax_checked_all").click(function () {
+    if ($("#tax_checked_all").is(":checked")) {
+        $('.tax_rates').prop('checked', true);
+        $("#error_tax_checkbox").text("").removeClass('error');
+    } else {
+        $('.tax_rates').prop('checked', false);
+    }
+});
+//start cash denom
+$('.cashregisters-wrapper').each(function () {
+    var $wrapper = $('.cashregisters-fields', this);
+    var i = 0;
+    $(".add-field", $(this)).click(function (e) {
+        i++;
+        if ($(this).parent('.cashregisters-input').find('input').val() !== '')
+            $('.cashregisters-input:first-child', $wrapper).clone(true).appendTo($wrapper).find('input').attr('id', 'denom[' + i + ']').attr('name', 'cashdenom[' + i + ']').val('').focus();
+    });
+    $('.cashregisters-input .remove-field', $wrapper).click(function () {
+        if ($('.cashregisters-input', $wrapper).length > 1)
+            $(this).parent('.cashregisters-input').remove();
+    });
+});
+$('.email-wrapper').each(function () {
+    var $wrapper = $('.email-fields', this);
+    var i = 0;
+    $(".add-email-field", $(this)).click(function (e) {
+        i++;
+        if ($(this).parent('.email-input').find('input').val() !== '' && PosnicPro.validateEmail($(this).parent('.email-input').find('input').val())) {
+            var $test = $('.email-input:parent', $wrapper);
+            var $newField = $('.email-input:first-child', $wrapper).clone(true);
+            $newField.appendTo($wrapper).find('input').attr('id', 'emailaddress[' + i + ']').attr('name', 'emailaddress[' + i + ']').val('').focus();
+            $('.add-email-field', $test).hide();
+            $('.add-email-field', $newField).show();
+        }
+    });
+    $('.email-input .remove-email-field', $wrapper).click(function () {
+        var $emailInput = $(this).closest('.email-input');
+        $('input', $emailInput).val('');
+        if ($('.email-input', $wrapper).length > 1)
+            $(this).parent('.email-input').remove();
+    });
+});
+$('.remove-email-field').click(function () {
+    var $text = $('.email-input:last-child');
+    $('.add-email-field', $text).show();
+});
+$('.printer-wrapper').each(function () {
+    var $wrapper = $('.printer-fields', this);
+    var i = 0;
+
+    $(".add-printer-field", $(this)).click(function (e) {
+        e.preventDefault();
+        i++;
+
+        var $newField = $('.printer-input:first-child', $wrapper).clone(true);
+        $newField.appendTo($wrapper)
+            .find('input')
+            .attr('id', 'printer_name_' + i)
+            .attr('name', 'printer_name[' + i + ']')
+            .val('')
+            .focus();
+
+        // only last row shows "+"
+        var $rows = $('.printer-input:parent', $wrapper);
+        $('.add-printer-field', $rows).hide();
+        $('.add-printer-field', $newField).show();
+    });
+
+    $('.printer-input .remove-printer-field', $wrapper).click(function (e) {
+        e.preventDefault();
+        var $row = $(this).closest('.printer-input');
+        if ($('.printer-input', $wrapper).length > 1) {
+            $row.remove();
+            var $last = $('.printer-input:last-child', $wrapper);
+            $('.add-printer-field', $last).show();
+        } else {
+            $('input', $row).val('');
+        }
+    });
+});
+$("#v-pills-store-tab").click(function () {
+    PosnicPro.HideSideBarModal();
+});
+$("#v-pills-general-tab").click(function () {
+    PosnicPro.HideSideBarModal();
+});
+$("#v-pills-email-tab").click(function () {
+    PosnicPro.HideSideBarModal();
+});
+$("#setting_image_add").click(function () {
+    PosnicPro.HideSideBarModal();
+});
+$(document).ready(function () {
+    if (window.matchMedia("(pointer: coarse)").matches) {
+        $('#shortcut').hide();
+    } else {
+        $('#shortcut').show();
+    }
+});
+$('#setting_country').one('change', function () {
+    var countrySelect = $('#setting_country');
+    countrySelect.on('select2:select', function (e) {
+        var data = e.params.data;
+        PosnicPro.settings.loadSelectSettingState(data.element.attributes['data-setting-id'].value);
+        PosnicPro.local.set("country_value", data.id);
+    });
+});
+
+// Initialize form validation
+
+$("#phonepe_qr_code_form").validate({
+    rules: {
+        phonepe_merchant_id: {
+            required: true
+        },
+        phonepe_salt_key: {
+            required: true
+        }
+    },
+    messages: {
+        phonepe_merchant_id: {
+            required: "Merchant Id is required."
+        },
+        phonepe_salt_key: {
+            required: "Salt key is required."
+        }
+    }
+});
+$("#phonepe_qr_code_form").submit(function (event) {
+    event.preventDefault();
+    if ($('#phonepe_qr_code_form').valid()) {
+        PosnicPro.settings.phonepePaymentKey();
+    }
+});
+
+$("#qr_code_form").validate({
+    rules: {
+        site_key: {
+            required: true
+        },
+        secret_key: {
+            required: true
+        }
+    },
+    messages: {
+        site_key: {
+            required: "Site key is required."
+        },
+        secret_key: {
+            required: "Secret key is required."
+        }
+    }
+});
+$("#qr_code_form").submit(function (event) {
+    event.preventDefault();
+    if ($('#qr_code_form').valid()) {
+        PosnicPro.settings.paymentKey();
+    }
+});
+$("#payment_gateway").on('change', function (event) {
+    event.preventDefault();
+    if ($('#payment_gateway').is(":checked")) {
+        if ($('#site_key').val() === '' || $('#secret_key').val() === '') {
+            $('#payment_gateway').prop("checked", false).attr('unchecked', 'unchecked');
+            PosnicPro.alert('warning', PosnicPro.i18n.t('lang_fill_in_all_required_fields', 'Fill in all required fields.'));
+        }
+    }
+});
+/*
+ * The print-designer editors load ON DEMAND (bundle-split slice 1).
+ * summernote is 325KB that every boot parsed and initialised for a pane
+ * most sessions never open; the editors now build when Settings opens.
+ * _printDocs holds the truth meanwhile, so loads and saves that happen
+ * before (or without) the editors still carry the right documents.
+ */
+PosnicPro.settings._printDocs = { header: '', footer: '' };
+PosnicPro.settings._editorsReady = false;
+PosnicPro.settings.initPrintEditors = function () {
+    if (PosnicPro.settings._editorsReady) { return Promise.resolve(); }
+    return PosnicPro.lazy.load('summernote').then(function () {
+        if (PosnicPro.settings._editorsReady) { return; }
+        $('#footer_print,#header_print').summernote({
+    height: 120,
+    toolbar: [
+        ['style', ['style']],
+        ['font', ['bold', 'underline', 'clear']],
+        ['color', ['color']],
+        ['para', ['ul', 'ol', 'paragraph']],
+        ['table', ['table']],
+        ['view', ['fullscreen', 'help']],
+        ['height', ['height']],
+        ['fontsize', ['fontsize']],
+        ['fontname', ['fontname']]
+    ],
+    placeholder: PosnicPro.i18n.t('lang_enter_a_content', 'Enter a content ...'),
+    focus: true,
+    callbacks: {
+        onKeydown: function (e) {
+            var t = e.currentTarget.innerText;
+            if (t.trim().length === 0) {
+                $('#footer_print,#header_print').summernote('code', '');
+            }
+            if (t.trim().length >= 1000) {
+                //delete keys, arrow keys, copy, cut, select all
+                if (e.keyCode != 8 && !(e.keyCode >= 37 && e.keyCode <= 40) && e.keyCode != 46 && !(e.keyCode == 88 && e.ctrlKey) && !(e.keyCode == 67 && e.ctrlKey) && !(e.keyCode == 65 && e.ctrlKey))
+                    e.preventDefault();
+            }
+        },
+        onKeyup: function (e) {
+            var t = e.currentTarget.innerText;
+            if (t.trim().length === 0) {
+                $('#footer_print,#header_print').summernote('code', '');
+            }
+            $('#footer_print,#header_print').text(1000 - t.trim().length);
+        },
+        onPaste: function (e) {
+            var t = e.currentTarget.innerText;
+            var bufferText = ((e.originalEvent || e).clipboardData || window.clipboardData).getData('Text');
+            e.preventDefault();
+            var maxPaste = bufferText.length;
+            if (t.length + bufferText.length > 1000) {
+                maxPaste = 1000 - t.length;
+            }
+            if (maxPaste > 0) {
+                document.execCommand('insertText', false, bufferText.substring(0, maxPaste));
+            }
+            $('#footer_print,#header_print').text(1000 - t.length);
+        }
+    }
+});
+        PosnicPro.settings._editorsReady = true;
+        $('#header_print').summernote('code', PosnicPro.settings._printDocs.header);
+        $('#footer_print').summernote('code', PosnicPro.settings._printDocs.footer);
+    });
+};
+
+
+$(function () {
+    PosnicPro.lazyPhoneInput('#store_telephone', PosnicPro.settings, 'store_telephone', {
+        separateDialCode: true,
+        preferredCountries: ['in'],
+        hiddenInput: "full",
+        utilsScript: "../static/script/js/utils.js"
+    });
+    $('#enable_email_reminders, #enable_sms_reminders').on('change', function () {
+        if ($('#enable_email_reminders').prop('checked') || $('#enable_sms_reminders').prop('checked')) {
+            $('#enable_sms_auto_send').prop('disabled', false);  // Enable the Auto Send checkbox        
+        } else {
+            $('#enable_sms_auto_send').prop('disabled', true);   // Disable Auto Send checkbox
+            $('#enable_sms_auto_send').prop('checked', false);   // Uncheck Auto Send checkbox
+            PosnicPro.settings.toggleInputs();
+        }
+    });
+    $('#enable_sms_auto_send').on('change', function () {
+        PosnicPro.settings.toggleInputs();
+    });
+    $('#sms_auto_send_time').on('change', function () {
+        const time = $(this).val(); // Get 24-hour format (e.g., "14:30")
+        const [hour, minute] = time.split(':'); // Split into hour and minute
+        let period = 'am';
+        let formattedHour = parseInt(hour, 10);
+
+        if (formattedHour >= 12) {
+            period = 'pm';
+            if (formattedHour > 12) {
+                formattedHour -= 12; // Convert to 12-hour format
+            }
+        } else if (formattedHour === 0) {
+            formattedHour = 12; // Convert midnight to 12 AM
+        }
+        // Update hidden input for AM/PM
+        $('#sms_auto_send_period').val(formattedHour + ':' + minute + ' ' + period);
+    });
+    PosnicPro.kiosk.handleFileChange("kiosk_logo", "preview_logo");
+    PosnicPro.kiosk.handleFileChange("kiosk_banner", "preview_banner");
+    PosnicPro.kiosk.handleFileChange("kiosk_homebanner", "preview_homebanner");
+    PosnicPro.kiosk.handleFileChange("kiosk_advertisement", "preview_advertisement");
+
+    // read setting stored by settings.js
+    var kotEnabled = (PosnicPro.local.get('table_options') === 'enable');
+
+    var $kotLi = $('#view_kot_page').closest('li');
+    var $kotOrderLi = $('#view_kotorder_page').closest('li');
+    var $kotHistoryLi = $('#view_kothistory_page').closest('li');
+    var $kotReportLi = $('#viewkotreport_page').closest('li');
+
+    if (kotEnabled) {
+        $kotLi.show();
+        $kotOrderLi.show();
+        $kotHistoryLi.show();
+        $kotReportLi.show();
+    } else {
+        $kotLi.hide();
+        $kotOrderLi.hide();
+        $kotHistoryLi.hide();
+        $kotReportLi.hide();
+    }
+});
+
+$('#kiosk_payment_form').on('submit', function (e) {
+    // Prevent form submission
+    e.preventDefault();
+
+    // Initialize default values
+    var paymentParams = {
+        payment_cod: false,
+        payment_razorpay: false,
+        payment_number: false
+    };
+
+    // Update based on enabled and checked checkboxes
+    $('input[name="payment_methods[]"]:enabled').each(function () {
+        const id = $(this).attr('id'); // like 'payment_cod' or 'payment_razorpay', or 'payment_number'
+        paymentParams[id] = $(this).is(':checked');
+    });
+    /* The payee, which is typed rather than ticked: the loop above reads
+       checkboxes, and Boolean('name@bank') is simply true. */
+    paymentParams.payment_upi_id = $('#payment_upi_id').val() || '';
+    paymentParams.payment_upi_name = $('#payment_upi_name').val() || '';
+
+    var params = {
+        url: 'setting/kioskPayment', // change to your endpoint
+        data: JSON.stringify(paymentParams)
+    };
+
+    PosnicPro.post(params, function (response) {
+        if (response.type === 'success') {
+            PosnicPro.alert(response.type, response.message);
+        }
+    }, function (xhr) {
+        var response = jQuery.parseJSON(xhr.responseText);
+        PosnicPro.alert(response.type, response.message);
+    });
+});
+// Module cards mirror their switch instantly (saving still goes through the
+// Save button - the card state is feedback, not a write).
+$(document).on('change', '#v-pills-modules .module-card-head input.custom-control-input', function () {
+    PosnicPro.settings._featuresDirty = true;
+    PosnicPro.settings.refreshModuleCards();
+    /* Demo Data is the one switch whose OFF is a deletion, so it is the one
+       switch that asks. Only when it was genuinely on - re-unchecking a
+       switch that was already off deletes nothing and asks nothing. */
+    if (this.id === 'module_demo_data_enable' && !this.checked
+        && PosnicPro.settings._demoWasOn !== false) {
+        PosnicPro.settings.confirmDemoOff(this, ['#fp_master']);
+    }
+    /* Quotes and Invoices are two halves of one job - see suggestPartner. */
+    PosnicPro.settings.suggestPartner(this);
+});
+// Unsaved feature changes get a real decision (owner upgrade from the
+// toast): Stay pulls you back with every selection intact; Leave
+// discards knowingly.
+$(window).on('hashchange', function () {
+    if (PosnicPro.settings._featuresDirty && !/settings/i.test(window.location.hash || '')) {
+        if (!window.confirm('You have unsaved feature changes. Leave without saving?')) {
+            hasher.replaceHash('settings/modules');
+            return;
+        }
+        PosnicPro.settings._featuresDirty = false;
+    }
+});
+
+// Core Settings tabs refold on resize (debounced - resize storms are real).
+(function () {
+    var t = null;
+    $(window).on('resize', function () {
+        clearTimeout(t);
+        t = setTimeout(function () { PosnicPro.settings.coreTabsOverflow(); }, 150);
+    });
+})();
+
+// Config sections carry their route: every pill switch writes
+// #/settings/<section>, so a refresh reopens exactly where you were.
+// The Core Settings inner tab is remembered per device the same way.
+$(function () {
+    // Delegated from #settings, NOT from '#v-pills-tab': that id exists
+    // TWICE (the main sidebar rail uses it too, first in the DOM), so the
+    // original binding caught RAIL clicks - pressing Purchase wrote
+    // #/settings/purchase and Config swallowed the page.
+    $('#settings').on('shown.bs.tab', 'a[data-toggle="pill"][id^="v-pills-"]', function () {
+        var m = /^v-pills-(.+?)(?:-tab)?$/.exec(this.id || '');
+        if (!m) { return; }
+        var target = 'settings/' + m[1];
+        if (window.location.hash.slice(2) !== target) {
+            hasher.setHash(target);
+        }
+        // The Manage sidebar carries the sections now: mirror the active one.
+        $('.manage-settings-entry').removeClass('active');
+        $('#manage_sec_' + m[1]).addClass('active');
+    });
+    $('#core_settings_tabs').on('shown.bs.tab', 'a[data-toggle="tab"]', function () {
+        PosnicPro.local.set('posnic_core_tab', $(this).attr('href'));
+    });
+});
+
+
+/*
+ * Integrations admin (roadmap I3): the UI over the shipped token and
+ * webhook APIs. Secrets render ONCE into a reveal box; lists never
+ * contain them (the server projects them out).
+ */
+PosnicPro.integrations = {
+    // Mirrors the api whitelists - a scope or entity outside these is
+    // refused server-side anyway; the UI just doesn't offer it.
+    MODULES: ['sales', 'item', 'customer', 'supplier', 'category',
+        'receiving', 'expense', 'branch', 'user', 'report', 'dashboard'],
+    ENTITIES: ['sales', 'items', 'receivings', 'customers', 'suppliers',
+        'categories', 'registers', 'expenses', 'shifts', 'easytables'],
+    load: function () {
+        PosnicPro.integrations.loadTokens();
+        PosnicPro.integrations.loadHooks();
+        // Connectors are a TILL surface: the desktop supervises them, so the
+        // tab only exists where the desktop bridge does. The web dashboard
+        // manages tokens and webhooks; the till manages what runs beside it.
+        var hasBridge = !!(window.electronAPI && window.electronAPI.connectors);
+        $('#int_connectors_subtab').toggle(hasBridge);
+    },
+    // ---- connectors (I6 enable flow; desktop only) ----
+    loadConnectors: function () {
+        var api = window.electronAPI && window.electronAPI.connectors;
+        if (!api) { return; }
+        var esc = PosnicPro.integrations.esc;
+        api.status().then(function (r) {
+            var rows = (r && r.connectors) || [];
+            if (!rows.length) {
+                $('#int_connectors_body').html('<tr><td colspan="4" class="text-center text-muted"><lang class="lang_none_installed_yet_connectors_arrive_with">None installed yet - connectors arrive with the till&#39;s update checks once published.</lang></td></tr>');
+                return;
+            }
+            var badge = function (c) {
+                if (!c.installed) return '<span class="badge badge-secondary">not installed</span>';
+                if (c.state === 'running') return '<span class="badge badge-success">running</span>';
+                if (c.state === 'crashloop') return '<span class="badge badge-danger">parked (kept failing)</span>';
+                if (!c.enabled) return '<span class="badge badge-light">off</span>';
+                return '<span class="badge badge-warning">' + esc(c.state) + '</span>';
+            };
+            var html = '';
+            rows.forEach(function (c) {
+                var action = c.enabled
+                    ? '<button type="button" class="btn btn-outline-danger btn-sm int-conn-disable" data-name="' + esc(c.name) + '">Turn off</button>'
+                    : '<button type="button" class="btn btn-outline-primary btn-sm int-conn-enable" data-name="' + esc(c.name) + '"' + (c.installed ? '' : ' disabled') + '>Turn on</button>';
+                html += '<tr><td>' + esc(c.name) + '</td>'
+                    + '<td>' + esc(c.version || '—') + '</td>'
+                    + '<td>' + badge(c) + '</td>'
+                    + '<td class="text-right">' + action + '</td></tr>';
+            });
+            $('#int_connectors_body').html(html);
+        }).catch(function () {
+            $('#int_connectors_body').html('<tr><td colspan="4" class="text-center text-danger"><lang class="lang_could_not_reach_the_till_39_s_connector_ru">Could not reach the till&#39;s connector runtime.</lang></td></tr>');
+        });
+    },
+    enableConnector: function (name) {
+        // The whole enable act: mint the connector its OWN scoped token
+        // (message-this-shop's-customers, nothing more), hand it to the
+        // desktop, start. The plaintext token goes straight into the till's
+        // config and is never shown - there is nothing for a person to store.
+        PosnicPro.post({
+            url: 'api-tokens',
+            data: JSON.stringify({
+                name: 'Connector: ' + name,
+                scopes: { customer: { read: true, write: true } },
+            })
+        }, function (r) {
+            if (!(r && r.type === 'success' && r.data && r.data.token)) {
+                PosnicPro.alert((r && r.type) || 'error', (r && r.message) || 'Could not mint the connector token.');
+                return;
+            }
+            window.electronAPI.connectors.enable(name, r.data.token, {}).then(function (res) {
+                if (res && res.ok) {
+                    PosnicPro.alert('success', name + ' turned on');
+                    PosnicPro.integrations.loadTokens();
+                    PosnicPro.integrations.loadConnectors();
+                } else {
+                    PosnicPro.alert('error', (res && res.error) || 'The till refused to start it.');
+                }
+            });
+        }, function () {
+            PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_mint_the_connector_token', 'Could not mint the connector token.'));
+        });
+    },
+    disableConnector: function (name) {
+        window.electronAPI.connectors.disable(name).then(function (res) {
+            if (res && res.ok) {
+                PosnicPro.alert('success', name + ' turned off');
+                PosnicPro.integrations.loadConnectors();
+            } else {
+                PosnicPro.alert('error', (res && res.error) || 'Could not stop it.');
+            }
+        });
+    },
+    esc: function (v) {
+        return String(v == null ? '' : v).replace(/[&<>"]/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+        });
+    },
+    // ---- tokens ----
+    loadTokens: function () {
+        PosnicPro.get({ url: 'api-tokens', data: {} }, function (r) {
+            var rows = (r && r.data) || [];
+            var esc = PosnicPro.integrations.esc;
+            if (!rows.length) {
+                $('#int_tokens_body').html('<tr><td colspan="5" class="text-center text-muted"><lang class="lang_no_tokens_yet_mint_one_for_each_integratio">No tokens yet - mint one for each integration.</lang></td></tr>');
+                return;
+            }
+            var html = '';
+            rows.forEach(function (t) {
+                var scopes = [];
+                $.each(t.access || {}, function (mod, p) {
+                    var perms = ['read', 'write', 'delete'].filter(function (x) { return p && p[x]; });
+                    if (perms.length) { scopes.push(mod + ':' + perms.join('/')); }
+                });
+                var used = t.last_used_at ? PosnicPro.convertDate(t.last_used_at) : 'never';
+                html += '<tr' + (t.active === false ? ' class="text-muted"' : '') + '>' +
+                    '<td>' + esc(t.name) + (t.active === false ? ' <span class="badge badge-secondary-inverse">revoked</span>' : '') + '</td>' +
+                    '<td><code>' + esc(t.hint) + '</code></td>' +
+                    '<td style="max-width:260px;"><small>' + esc(scopes.join(', ') || '-') + '</small></td>' +
+                    '<td><small>' + esc(used) + '</small></td>' +
+                    '<td class="text-right">' + (t.active === false ? '' :
+                        '<button type="button" class="btn btn-outline-danger btn-sm int-revoke-btn" data-id="' + esc(t.id) + '">Revoke</button>') +
+                    '</td></tr>';
+            });
+            $('#int_tokens_body').html(html);
+        }, function () {
+            $('#int_tokens_body').html('<tr><td colspan="5" class="text-center text-danger"><lang class="lang_could_not_load_tokens">Could not load tokens.</lang></td></tr>');
+        });
+    },
+    openMint: function () {
+        var rows = '';
+        PosnicPro.integrations.MODULES.forEach(function (m) {
+            rows += '<tr><td>' + m + '</td>' +
+                ['read', 'write', 'delete'].map(function (p) {
+                    return '<td class="text-center"><input type="checkbox" class="int-scope" data-mod="' + m + '" data-perm="' + p + '"></td>';
+                }).join('') + '</tr>';
+        });
+        $('#int_mint_scopes').html(rows);
+        $('#int_mint_name').val('');
+        $('#int_mint_modal').modal('show');
+    },
+    mint: function () {
+        var scopes = {};
+        var granted = 0;
+        $('.int-scope:checked').each(function () {
+            var m = $(this).data('mod'), p = $(this).data('perm');
+            scopes[m] = scopes[m] || {};
+            scopes[m][p] = true;
+            granted++;
+        });
+        if (!granted) { PosnicPro.alert('error', PosnicPro.i18n.t('lang_grant_at_least_one_permission_a_token_that', 'Grant at least one permission - a token that can do nothing is a mistake, not a credential.')); return; }
+        PosnicPro.post({
+            url: 'api-tokens',
+            data: JSON.stringify({ name: $('#int_mint_name').val() || 'API token', scopes: scopes })
+        }, function (r) {
+            if (r && r.type === 'success' && r.data && r.data.token) {
+                $('#int_mint_modal').modal('hide');
+                $('#int_token_plain').text(r.data.token);
+                $('#int_token_reveal').show();
+                PosnicPro.integrations.loadTokens();
+            } else {
+                PosnicPro.alert((r && r.type) || 'error', (r && r.message) || 'Could not create the token.');
+            }
+        }, function (xhr) {
+            var resp = {};
+            try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+            PosnicPro.alert('error', resp.message || 'Could not create the token.');
+        });
+    },
+    copyToken: function () {
+        navigator.clipboard.writeText($('#int_token_plain').text()).then(function () {
+            PosnicPro.alert('success', PosnicPro.i18n.t('lang_token_copied', 'Token copied'));
+        });
+    },
+    revoke: function (id) {
+        PosnicPro.delete({ url: 'api-tokens/' + id, data: JSON.stringify({}) }, function (r) {
+            PosnicPro.alert((r && r.type) || 'success', (r && r.message) || 'Token revoked');
+            PosnicPro.integrations.loadTokens();
+        }, function () { PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_revoke_the_token', 'Could not revoke the token.')); });
+    },
+    // ---- webhooks ----
+    loadHooks: function () {
+        var esc = PosnicPro.integrations.esc;
+        PosnicPro.get({ url: 'webhooks', data: {} }, function (r) {
+            var rows = (r && r.data) || [];
+            if (!rows.length) {
+                $('#int_hooks_body').html('<tr><td colspan="4" class="text-center text-muted"><lang class="lang_no_webhooks_register_an_endpoint_to_receiv">No webhooks - register an endpoint to receive change signals.</lang></td></tr>');
+            } else {
+                var html = '';
+                rows.forEach(function (h) {
+                    html += '<tr>' +
+                        '<td style="max-width:280px; word-break:break-all;"><small>' + esc(h.url) + '</small></td>' +
+                        '<td><small>' + esc((h.events || []).join(', ') || 'all') + '</small></td>' +
+                        '<td>' + (h.active === false ? '<span class="badge badge-secondary-inverse">off</span>' : '<span class="badge badge-success-inverse">active</span>') + '</td>' +
+                        '<td class="text-right"><button type="button" class="btn btn-outline-danger btn-sm int-removehook-btn" data-id="' + esc(h.id) + '">Remove</button></td>' +
+                        '</tr>';
+                });
+                $('#int_hooks_body').html(html);
+            }
+        }, function () {
+            $('#int_hooks_body').html('<tr><td colspan="4" class="text-center text-danger"><lang class="lang_could_not_load_webhooks">Could not load webhooks.</lang></td></tr>');
+        });
+        PosnicPro.get({ url: 'webhooks/deliveries', data: {} }, function (r) {
+            var rows = (r && r.data) || [];
+            if (!rows.length) {
+                $('#int_deliveries_body').html('<tr><td colspan="5" class="text-center text-muted"><lang class="lang_no_deliveries_yet">No deliveries yet.</lang></td></tr>');
+                return;
+            }
+            var html = '';
+            rows.slice(0, 25).forEach(function (d) {
+                var status = d.status || '-';
+                var badge = status === 'delivered' ? 'badge-success-inverse'
+                    : status === 'dead' ? 'badge-danger-inverse' : 'badge-secondary-inverse';
+                html += '<tr>' +
+                    '<td><small>' + esc(d.entity || '-') + '</small></td>' +
+                    '<td style="max-width:240px; word-break:break-all;"><small>' + esc(d.url || '') + '</small></td>' +
+                    '<td><span class="badge ' + badge + '">' + esc(status) + '</span></td>' +
+                    '<td><small>' + esc(d.attempts != null ? d.attempts : '-') + '</small></td>' +
+                    '<td><small>' + esc(d.updatedAt ? PosnicPro.convertDate(d.updatedAt) : (d.createdAt ? PosnicPro.convertDate(d.createdAt) : '-')) + '</small></td>' +
+                    '</tr>';
+            });
+            $('#int_deliveries_body').html(html);
+        }, function () { /* the hooks table is the primary view */ });
+    },
+    openRegister: function () {
+        var html = '';
+        PosnicPro.integrations.ENTITIES.forEach(function (e) {
+            html += '<label class="mb-0" style="font-weight:400;"><input type="checkbox" class="int-entity" value="' + e + '"> ' + e + '</label>';
+        });
+        $('#int_hook_entities').html(html);
+        $('#int_hook_url').val('');
+        $('#int_hook_modal').modal('show');
+    },
+    register: function () {
+        var events = $('.int-entity:checked').map(function () { return this.value; }).get();
+        PosnicPro.post({
+            url: 'webhooks',
+            data: JSON.stringify({ url: $('#int_hook_url').val(), events: events })
+        }, function (r) {
+            if (r && r.type === 'success' && r.data && r.data.secret) {
+                $('#int_hook_modal').modal('hide');
+                $('#int_hook_secret').text(r.data.secret);
+                $('#int_hook_reveal').show();
+                PosnicPro.integrations.loadHooks();
+            } else {
+                PosnicPro.alert((r && r.type) || 'error', (r && r.message) || 'Could not register the webhook.');
+            }
+        }, function (xhr) {
+            var resp = {};
+            try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+            PosnicPro.alert('error', resp.message || 'Could not register the webhook.');
+        });
+    },
+    copySecret: function () {
+        navigator.clipboard.writeText($('#int_hook_secret').text()).then(function () {
+            PosnicPro.alert('success', PosnicPro.i18n.t('lang_secret_copied', 'Secret copied'));
+        });
+    },
+    removeHook: function (id) {
+        PosnicPro.delete({ url: 'webhooks/' + id, data: JSON.stringify({}) }, function (r) {
+            PosnicPro.alert((r && r.type) || 'success', (r && r.message) || 'Webhook removed');
+            PosnicPro.integrations.loadHooks();
+        }, function () { PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_remove_the_webhook', 'Could not remove the webhook.')); });
+    }
+};
+
+/*
+ * Modifier groups (V2): the Restaurant pane's option-set manager. A group
+ * is a name, min/max pick rules and priced options; items reference the
+ * groups; the sale screen enforces the rules at pick time.
+ */
+PosnicPro.modifiers = {
+    _esc: function (s) {
+        return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+        });
+    },
+    _cache: [],
+    loadGroups: function () {
+        var esc = PosnicPro.modifiers._esc;
+        PosnicPro.get({ url: 'setting/modifierGroups', data: {} }, function (r) {
+            var rows = (r && r.data) || [];
+            PosnicPro.modifiers._cache = rows;
+            if (!rows.length) {
+                $('#modifier_groups_body').html('<tr><td colspan="4" class="text-center text-muted"><lang class="lang_no_modifier_groups_yet_the_kitchen_menu_st">No modifier groups yet - the kitchen menu starts here.</lang></td></tr>');
+                return;
+            }
+            var html = '';
+            rows.forEach(function (g) {
+                var rules = (g.min > 0 ? 'pick at least ' + g.min : 'optional')
+                    + (g.max > 0 ? ', at most ' + g.max : '');
+                var opts = g.options.map(function (o) {
+                    var d = Number(o.price_delta) || 0;
+                    return esc(o.name) + (d ? ' (' + (d > 0 ? '+' : '') + d + ')' : '');
+                }).join(', ');
+                html += '<tr><td>' + esc(g.name) + '</td><td><small>' + esc(rules) + '</small></td>'
+                    + '<td><small>' + opts + '</small></td>'
+                    + '<td class="text-right">'
+                    + '<button type="button" class="btn btn-outline-primary btn-sm mod-edit-btn" data-id="' + esc(g.id) + '">Edit</button> '
+                    + '<button type="button" class="btn btn-outline-danger btn-sm mod-del-btn" data-id="' + esc(g.id) + '">Delete</button>'
+                    + '</td></tr>';
+            });
+            $('#modifier_groups_body').html(html);
+        }, function () {
+            $('#modifier_groups_body').html('<tr><td colspan="4" class="text-center text-danger"><lang class="lang_could_not_load_modifier_groups">Could not load modifier groups.</lang></td></tr>');
+        });
+    },
+    openEditor: function (id) {
+        var esc = PosnicPro.modifiers._esc;
+        var g = id ? (PosnicPro.modifiers._cache.find(function (x) { return x.id === id; }) || {}) : {};
+        var optionRow = function (o) {
+            o = o || { name: '', price_delta: 0 };
+            return '<div class="form-row mb-1 mod-opt-row">'
+                + '<div class="col-7"><input type="text" class="form-control form-control-sm mod-opt-name" maxlength="60" placeholder="e.g. Extra cheese" value="' + esc(o.name) + '"></div>'
+                + '<div class="col-4"><input type="number" step="0.01" class="form-control form-control-sm mod-opt-delta" placeholder="+/- price" value="' + (Number(o.price_delta) || 0) + '"></div>'
+                + '<div class="col-1"><a href="javascript:void(0);" class="text-danger mod-opt-remove" aria-label="Remove" data-t-aria-label="lang_remove"><i class="feather icon-x"></i></a></div>'
+                + '</div>';
+        };
+        $('#modifier_editor_modal').remove();
+        $('body').append(
+            '<div class="modal fade close_on_esc" id="modifier_editor_modal" tabindex="-1" role="dialog" aria-hidden="true">'
+            + '<div class="modal-dialog" role="document"><div class="modal-content">'
+            + '<div class="modal-header"><h5 class="modal-title">' + (id ? PosnicPro.i18n.t('lang_edit_title', 'Edit') : PosnicPro.i18n.t('lang_addvariant_title', 'New')) + ' Modifier Group</h5>'
+            + '<button type="button" class="close" data-dismiss="modal" aria-label="Close" data-t-aria-label="lang_close_title"><span aria-hidden="true">&times;</span></button></div>'
+            + '<div class="modal-body">'
+            + '<input type="hidden" id="mod_edit_id" value="' + esc(id || '') + '">'
+            + '<div class="form-group"><label style="font-weight:600; font-size:.85rem;"><lang class="lang_group_name">Group name</lang></label>'
+            + '<input type="text" class="form-control" id="mod_edit_name" maxlength="60" placeholder="e.g. Toppings" value="' + esc(g.name || '') + '"></div>'
+            + '<div class="form-row">'
+            + '<div class="form-group col-6"><label style="font-weight:600; font-size:.85rem;"><lang class="lang_min_picks">Min picks</lang></label>'
+            + '<input type="number" min="0" class="form-control" id="mod_edit_min" value="' + (g.min || 0) + '"></div>'
+            + '<div class="form-group col-6"><label style="font-weight:600; font-size:.85rem;">Max picks <small class="text-muted">(0 = no limit)</small></label>'
+            + '<input type="number" min="0" class="form-control" id="mod_edit_max" value="' + (g.max || 0) + '"></div>'
+            + '</div>'
+            + '<label style="font-weight:600; font-size:.85rem;"><lang class="lang_options">Options</lang></label>'
+            + '<div id="mod_edit_options">' + ((g.options && g.options.length) ? g.options.map(optionRow).join('') : optionRow()) + '</div>'
+            + '<button type="button" class="btn btn-outline-secondary btn-sm mt-1" id="mod_opt_add">+ Option</button>'
+            + '</div>'
+            + '<div class="modal-footer">'
+            + '<button type="button" class="btn btn-outline-secondary" data-dismiss="modal"><lang class="lang_cancel_title">Cancel</lang></button>'
+            + '<button type="button" class="btn btn-outline-primary" id="mod_edit_save" onclick="PosnicPro.modifiers.save();"><lang class="lang_save_title">Save</lang></button>'
+            + '</div></div></div></div>'
+        );
+        $('#modifier_editor_modal').modal('show');
+        $('#mod_opt_add').on('click', function () { $('#mod_edit_options').append(optionRow()); });
+        $('#modifier_editor_modal').on('click', '.mod-opt-remove', function () { $(this).closest('.mod-opt-row').remove(); });
+    },
+    save: function () {
+        var id = $('#mod_edit_id').val();
+        var payload = {
+            name: $('#mod_edit_name').val(),
+            min: $('#mod_edit_min').val(),
+            max: $('#mod_edit_max').val(),
+            options: $('.mod-opt-row').map(function () {
+                return {
+                    name: $(this).find('.mod-opt-name').val(),
+                    price_delta: $(this).find('.mod-opt-delta').val()
+                };
+            }).get()
+        };
+        var done = function (r) {
+            if (r && r.type === 'success') {
+                $('#modifier_editor_modal').modal('hide');
+                PosnicPro.alert('success', r.message);
+                PosnicPro.modifiers.loadGroups();
+            } else {
+                PosnicPro.alert((r && r.type) || 'error', (r && r.message) || 'Could not save the group.');
+            }
+        };
+        var fail = function (xhr) {
+            var resp = {};
+            try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+            PosnicPro.alert('error', resp.message || 'Could not save the group.');
+        };
+        if (id) {
+            PosnicPro.put({ url: 'setting/modifierGroups/' + id, data: JSON.stringify(payload) }, done, fail);
+        } else {
+            PosnicPro.post({ url: 'setting/modifierGroups', data: JSON.stringify(payload) }, done, fail);
+        }
+    },
+    remove: function (id) {
+        PosnicPro.delete({ url: 'setting/modifierGroups/' + id, data: JSON.stringify({}) }, function (r) {
+            PosnicPro.alert((r && r.type) || 'error', (r && r.message) || '');
+            PosnicPro.modifiers.loadGroups();
+        }, function (xhr) {
+            var resp = {};
+            try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+            PosnicPro.alert('error', resp.message || 'Could not delete the group.');
+        });
+    }
+};
+$(document).on('click', '.mod-edit-btn', function () { PosnicPro.modifiers.openEditor($(this).data('id')); });
+$(document).on('click', '.mod-del-btn', function () { PosnicPro.modifiers.remove($(this).data('id')); });
+
+/*
+ * Price lists (V4): customer-group pricing manager (Marketing > Customer
+ * Pricing). One list per category; the sale screen resolves it live.
+ */
+PosnicPro.pricelists = {
+    _esc: function (s) {
+        return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+        });
+    },
+    _cache: [],
+    load: function () {
+        var esc = PosnicPro.pricelists._esc;
+        PosnicPro.get({ url: 'setting/priceLists', data: {} }, function (r) {
+            var rows = (r && r.data) || [];
+            PosnicPro.pricelists._cache = rows;
+            if (!rows.length) {
+                $('#pricelists_body').html('<tr><td colspan="4" class="text-center text-muted"><lang class="lang_no_price_lists_yet_wholesale_pricing_start">No price lists yet - wholesale pricing starts here.</lang></td></tr>');
+                return;
+            }
+            var html = '';
+            rows.forEach(function (l) {
+                var rule = l.percent_off
+                    ? (l.percent_off > 0 ? l.percent_off + '% off' : Math.abs(l.percent_off) + '% markup')
+                    : '—';
+                html += '<tr><td>' + esc(l.customer_category_name || l.customer_category_id) + '</td>'
+                    + '<td>' + esc(rule) + '</td>'
+                    + '<td>' + (l.item_overrides || []).length + '</td>'
+                    + '<td class="text-right">'
+                    + '<button type="button" class="btn btn-outline-primary btn-sm pl-edit-btn" data-id="' + esc(l.id) + '">Edit</button> '
+                    + '<button type="button" class="btn btn-outline-danger btn-sm pl-del-btn" data-id="' + esc(l.id) + '">Delete</button>'
+                    + '</td></tr>';
+            });
+            $('#pricelists_body').html(html);
+        }, function () {
+            $('#pricelists_body').html('<tr><td colspan="4" class="text-center text-danger"><lang class="lang_could_not_load_price_lists">Could not load price lists.</lang></td></tr>');
+        });
+    },
+    openEditor: function (id) {
+        var esc = PosnicPro.pricelists._esc;
+        var l = id ? (PosnicPro.pricelists._cache.find(function (x) { return x.id === id; }) || {}) : {};
+        var overrideRow = function (o) {
+            o = o || { item_id: '', item_name: '', price: '' };
+            return '<div class="form-row mb-1 pl-ov-row">'
+                + '<div class="col-7"><input type="text" class="form-control form-control-sm pl-ov-name" placeholder="Type to search an item" data-t-placeholder="lang_type_to_search_an_item" value="' + esc(o.item_name) + '" data-itemid="' + esc(o.item_id) + '"></div>'
+                + '<div class="col-4"><input type="number" min="0" step="0.01" class="form-control form-control-sm pl-ov-price" placeholder="Price" data-t-placeholder="lang_price_title" value="' + (o.price === '' ? '' : (Number(o.price) || 0)) + '"></div>'
+                + '<div class="col-1"><a href="javascript:void(0);" class="text-danger pl-ov-remove" aria-label="Remove" data-t-aria-label="lang_remove"><i class="feather icon-x"></i></a></div>'
+                + '</div>';
+        };
+        $('#pricelist_editor_modal').remove();
+        $('body').append(
+            '<div class="modal fade close_on_esc" id="pricelist_editor_modal" tabindex="-1" role="dialog" aria-hidden="true">'
+            + '<div class="modal-dialog" role="document"><div class="modal-content">'
+            + '<div class="modal-header"><h5 class="modal-title">' + (id ? PosnicPro.i18n.t('lang_edit_title', 'Edit') : PosnicPro.i18n.t('lang_addvariant_title', 'New')) + ' Price List</h5>'
+            + '<button type="button" class="close" data-dismiss="modal" aria-label="Close" data-t-aria-label="lang_close_title"><span aria-hidden="true">&times;</span></button></div>'
+            + '<div class="modal-body">'
+            + '<input type="hidden" id="pl_edit_id" value="' + esc(id || '') + '">'
+            + '<div class="form-group"><label style="font-weight:600; font-size:.85rem;"><lang class="lang_customer_category">Customer category</lang></label>'
+            + '<select class="form-control" id="pl_edit_category"><option value="" data-t="lang_loading">Loading&hellip;</option></select></div>'
+            + '<div class="form-group"><label style="font-weight:600; font-size:.85rem;">Percent off <small class="text-muted">(negative = markup; 0 = item prices only)</small></label>'
+            + '<input type="number" step="0.01" class="form-control" id="pl_edit_percent" value="' + (l.percent_off || 0) + '"></div>'
+            + '<label style="font-weight:600; font-size:.85rem;">Exact item prices <small class="text-muted">(win over the percentage)</small></label>'
+            + '<div id="pl_edit_overrides">' + ((l.item_overrides && l.item_overrides.length) ? l.item_overrides.map(overrideRow).join('') : '') + '</div>'
+            + '<button type="button" class="btn btn-outline-secondary btn-sm mt-1" id="pl_ov_add">+ Item price</button>'
+            + '</div>'
+            + '<div class="modal-footer">'
+            + '<button type="button" class="btn btn-outline-secondary" data-dismiss="modal"><lang class="lang_cancel_title">Cancel</lang></button>'
+            + '<button type="button" class="btn btn-outline-primary" onclick="PosnicPro.pricelists.save();"><lang class="lang_save_title">Save</lang></button>'
+            + '</div></div></div></div>'
+        );
+        $('#pricelist_editor_modal').modal('show');
+        $('#pl_ov_add').on('click', function () { $('#pl_edit_overrides').append(overrideRow()); });
+        $('#pricelist_editor_modal').on('click', '.pl-ov-remove', function () { $(this).closest('.pl-ov-row').remove(); });
+        // Item search on override rows: first match by name wins on blur.
+        $('#pricelist_editor_modal').on('change', '.pl-ov-name', function () {
+            var $inp = $(this);
+            var q = ($inp.val() || '').trim();
+            if (!q) { $inp.data('itemid', ''); return; }
+            PosnicPro.get({ url: 'items/search', data: { q: q, limit: 1 } }, function (r) {
+                var hit = r && r.data && r.data.list && r.data.list[0];
+                if (hit) {
+                    $inp.val(hit.name).data('itemid', String(hit._id || hit.id || ''));
+                } else {
+                    $inp.data('itemid', '');
+                    PosnicPro.alert('warning', 'No item matches "' + q + '".');
+                }
+            }, function () { $inp.data('itemid', ''); });
+        });
+        // Categories dropdown from the same source the customer form uses.
+        PosnicPro.get({ url: 'customerCategory/getCustomerCategoryAjaxList', data: 'query=' }, function (response) {
+            var opts = '';
+            (response.suggestions || []).forEach(function (c) {
+                var sel = String(c.id) === String(l.customer_category_id) ? ' selected' : '';
+                opts += '<option value="' + esc(c.id) + '" data-name="' + esc(c.name) + '"' + sel + '>' + esc(c.name) + '</option>';
+            });
+            $('#pl_edit_category').html(opts || '<option value="" data-t="lang_no_customer_categories_yet">No customer categories yet</option>');
+        }, function () {
+            $('#pl_edit_category').html('<option value="" data-t="lang_could_not_load_categories">Could not load categories</option>');
+        });
+    },
+    save: function () {
+        var overrides = $('.pl-ov-row').map(function () {
+            return {
+                item_id: $(this).find('.pl-ov-name').data('itemid') || '',
+                item_name: $(this).find('.pl-ov-name').val(),
+                price: $(this).find('.pl-ov-price').val()
+            };
+        }).get().filter(function (o) { return o.item_id; });
+        var payload = {
+            customer_category_id: $('#pl_edit_category').val(),
+            customer_category_name: $('#pl_edit_category option:selected').data('name') || '',
+            percent_off: $('#pl_edit_percent').val(),
+            item_overrides: overrides
+        };
+        PosnicPro.post({ url: 'setting/priceLists', data: JSON.stringify(payload) }, function (r) {
+            if (r && r.type === 'success') {
+                $('#pricelist_editor_modal').modal('hide');
+                PosnicPro.alert('success', r.message);
+                PosnicPro.pricelists.load();
+            } else {
+                PosnicPro.alert((r && r.type) || 'error', (r && r.message) || 'Could not save the list.');
+            }
+        }, function (xhr) {
+            var resp = {};
+            try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+            PosnicPro.alert('error', resp.message || 'Could not save the list.');
+        });
+    },
+    remove: function (id) {
+        PosnicPro.delete({ url: 'setting/priceLists/' + id, data: JSON.stringify({}) }, function (r) {
+            PosnicPro.alert((r && r.type) || 'error', (r && r.message) || '');
+            PosnicPro.pricelists.load();
+        }, function () { PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_delete_the_list', 'Could not delete the list.')); });
+    }
+};
+$(document).on('click', '.pl-edit-btn', function () { PosnicPro.pricelists.openEditor($(this).data('id')); });
+$(document).on('click', '.pl-del-btn', function () { PosnicPro.pricelists.remove($(this).data('id')); });
+
+// Delegated actions: rows repaint on every load.
+$(document).on('click', '.int-revoke-btn', function () {
+    PosnicPro.integrations.revoke($(this).data('id'));
+});
+$(document).on('click', '.int-removehook-btn', function () {
+    PosnicPro.integrations.removeHook($(this).data('id'));
+});
+$(document).on('click', '.int-conn-enable', function () {
+    PosnicPro.integrations.enableConnector($(this).data('name'));
+});
+$(document).on('click', '.int-conn-disable', function () {
+    PosnicPro.integrations.disableConnector($(this).data('name'));
+});
+
+/*
+ * First-run Feature picker (user request, from the Loyverse pattern): the
+ * first sign-in shows what the till can do, one honest line per feature,
+ * pre-set from this branch's real state. Saving writes through the M4
+ * modules-only path (toggle map and nothing else - the full settings
+ * surface is never touched). Any dismissal marks it seen; it never nags.
+ */
+PosnicPro.features = {
+    /* key, label, consequence - the same wording as the Features cards. */
+    INTRO: [
+        ['cash_register_enable', 'Cash register', 'Openings, closings and cash counts per till.'],
+        ['staff_shifts_enable', 'Shifts & clock-in', 'Track when staff work; powers the labour report.'],
+        ['staff_tips_enable', 'Tips', 'Record tips at tender and in payouts.'],
+        ['staff_roster_enable', 'Roster', 'Plan the week; staff see their shifts.'],
+        ['till_lock_enable', 'Till PIN lock', 'Lock the screen between sales; PIN to resume.'],
+        ['module_tax_enable', 'Taxes', 'Tax rates, groups and tax on every sale.'],
+        ['module_credit_enable', 'Customer credit', 'Sell on account and settle later.'],
+        ['module_marketing_enable', 'Marketing', 'Campaigns, coupons and customer pricing.'],
+        ['module_messaging_enable', 'Messaging', 'Receipts and notices by WhatsApp or SMS.'],
+        ['module_online_ordering_enable', 'Online ordering', 'A QR code or a link customers open on their phone.'],
+        ['module_kiosk_enable', 'Kiosk machine', 'A self-service terminal standing in your shop.'],
+        ['module_captain_enable', 'Captain app', 'Staff taking orders at the table on a phone.'],
+        ['module_delivery_partners_enable', 'Delivery partners', 'Swiggy, Zomato and the rest, with what each keeps.'],
+        ['module_webshop_enable', 'Webshop', 'An online shop of your own sending orders here.'],
+        ['module_cashbook_enable', 'Cash book', 'Expenses and cash movements beside sales.'],
+        ['quick_sale_enable', 'Quick sale', 'Type an amount, take payment - the busy-counter pad on the sale screen.'],
+        ['module_recyclebin_enable', 'Recycle bin', 'Deleted records are kept and restorable.'],
+        ['module_demo_data_enable', 'Demo data', 'Sample products, sales, purchases and people to try the till with. Off removes the samples and nothing of your own (it asks first).'],
+        ['module_themes_enable', 'Themes', 'Change how the till looks.']
+    ],
+    _blob: function () {
+        try { return JSON.parse(PosnicPro.local.get('general_settings') || '{}'); } catch (e) { return {}; }
+    },
+    /*
+     * The general_settings blob is rebuilt from scratch in three places, and a
+     * key missing from those literals is not merged - it is LOST. That is fine
+     * for a switch, which the next settings read restores; it is not fine for
+     * "this shop has been welcomed", because losing it shows the welcome again
+     * to somebody who already dismissed it.
+     *
+     * An explicit value from the server always wins. `undefined` means the API
+     * did not send the field - an older build, or a response that predates it -
+     * and the honest answer there is what we already knew, not false.
+     */
+    keepFirstRunFlag: function (data, key) {
+        var k = key || 'first_run_done';
+        var d = data || {};
+        if (d[k] === true || d[k] === 'true') { return true; }
+        if (d[k] === false || d[k] === 'false') { return false; }
+        return PosnicPro.features._blob()[k] === true;
+    },
+    /*
+     * "Already seen" is PER SHOP, never per browser.
+     *
+     * The first version used one bare localStorage key, and that is why the
+     * owner never saw the welcome on a single new shop he created: dismiss it
+     * once on any shop and every shop opened from that browser afterwards is
+     * silently skipped. The person it failed for hardest is exactly the
+     * person who opens many shops - the owner testing signups, a partner
+     * setting up customers. Keyed by branch id, a NEW shop has a NEW key and
+     * is asked; the same shop still never asks the same browser twice.
+     *
+     * The legacy unscoped key is deliberately NOT read. Honouring it keeps
+     * the bug alive for every browser that has it; ignoring it costs at most
+     * one extra welcome on an old shop, and dismissing now writes the
+     * per-shop server flag, so it is once, ever.
+     */
+
+    maybeShowIntro: function () {
+        /*
+         * Two gates, and they answer different questions.
+         *
+         * `features_intro_seen` is localStorage, so it is per BROWSER: it stops
+         * the same person being asked twice on the machine they are sitting at,
+         * and it is what shops running today already carry.
+         *
+         * `first_run_done` is saved on the shop, so it survives a new browser,
+         * a second till and a reinstall. Without it the welcome returns every
+         * time somebody signs in from a device that has not seen it, which for
+         * a shop with four tills is four welcomes.
+         *
+         * It defaults to FALSE rather than absent-means-seen. Getting that
+         * backwards would mean nobody ever sees this and nothing would look
+         * wrong - the failure of a thing that only ever shows once is silence.
+         */
+        /*
+         * THE DATABASE FIELD IS THE ONLY GATE. Owner, after three rounds of
+         * this screen not appearing for him: "keep on db field and make sure
+         * user know about it. mainly super admin."
+         *
+         * Every browser-side memory this gate ever had has burned it: the
+         * bare localStorage key suppressed every new shop on his browser,
+         * and its per-shop successor still meant a decision on one till was
+         * invisible on the next. first_run_decided lives on the SHOP, is
+         * written only by Save and the explicit "Not now", and can be read,
+         * checked and reset with a one-line database query when someone asks
+         * why a welcome did or did not show. One truth, inspectable.
+         */
+        var blob = PosnicPro.features._blob();
+        /*
+         * first_run_DECIDED, never first_run_done.
+         *
+         * A build shipped on the morning of 24 Aug counted ANY close as an
+         * answer and wrote first_run_done to the server - so for every shop
+         * touched in that window, including the owner's own test shops, the
+         * flag says "asked" about a person who never was, and the welcome he
+         * had demanded a thousand times silently never returned. The value
+         * cannot be trusted and cannot be un-written shop by shop, so the
+         * gate reads a key that only the two DECISION paths have ever
+         * written. The cost is one extra welcome for anybody who genuinely
+         * decided during those few hours; the alternative was every burned
+         * shop never being asked at all.
+         */
+        /* Every exit says why, once. Three builds of this gate failed
+           SILENTLY - the only witness each time was the owner, testing again.
+           A branch that cannot say its own name in the console is a branch
+           that gets debugged by shouting. */
+        var say = function (why) {
+            if (!PosnicPro.features._saidWhy) {
+                PosnicPro.features._saidWhy = true;
+                console.log('[welcome] not shown: ' + why);
+            }
+        };
+        if (blob.first_run_decided === true || blob.first_run_decided === 'true') {
+            say('already decided on this shop (first_run_decided is set)');
+            return;
+        }
+        /* An empty blob is "settings have not loaded", not "never been asked",
+           and guessing wrong there puts this in front of a shop that has been
+           trading for a year. The caller keeps retrying while this is the
+           case - see the poll below - because on a brand-new shop's FIRST
+           login the blob is still being written when the first check fires,
+           and a one-shot check loses that race on exactly the login this
+           screen exists for. */
+        if (!Object.keys(blob).length) {
+            /*
+             * FETCH THE TRUTH, do not wait for it to be left behind.
+             *
+             * The blob is written by the LOGIN flow - and shadow sessions
+             * (the My Account "open in browser" door, the owner's own door)
+             * never run it: they drop a token and land on the dashboard. So
+             * "retry until the blob appears" retried forever on exactly his
+             * sessions, silently, and the welcome that gates on a DB field
+             * never actually asked the DB. It asks now: one read of the
+             * features group, merged into the blob so the rest of the app
+             * gains the same truth, then the gate decides for real.
+             */
+            if (!PosnicPro.features._fetchingGate) {
+                PosnicPro.features._fetchingGate = true;
+                /*
+                 * getOneStore, NOT the features-group resolver.
+                 *
+                 * The resolver answers with READ-TIME defaults - absent means
+                 * on - which is the right answer for gating a menu and a
+                 * catastrophic one to persist. The first version merged those
+                 * resolved values into the blob; the welcome rendered every
+                 * switch ON from them; the owner pressed Save; and his own
+                 * Save wrote all-on to a shop the installer had carefully
+                 * created all-off. "again all features toggled on" - the
+                 * poison travelled through the one button that should be
+                 * safest. The branch document carries the installer's
+                 * EXPLICIT values, so it is the only safe source to merge.
+                 */
+                PosnicPro.get({ url: 'branches/getOneStore', data: 'id=null' }, function (response) {
+                    /* crash-hunt probe gate: skippable render */
+                    if (window.__posnicSkip === 'store' || window.__posnicSkip === 'all') { return; }
+                    var d = (response && response.data) || {};
+                    var b = PosnicPro.features._blob();
+                    PosnicPro.features.INTRO.forEach(function (f) {
+                        var k = f[0];
+                        if (b[k] === undefined && d[k] !== undefined) { b[k] = d[k] !== false && d[k] !== 'false'; }
+                    });
+                    ['first_run_done', 'first_run_decided'].forEach(function (k) {
+                        if (b[k] === undefined && d[k] !== undefined) { b[k] = d[k] === true || d[k] === 'true'; }
+                    });
+                    PosnicPro.local.set('general_settings', JSON.stringify(b));
+                    PosnicPro.features._fetchingGate = false;
+                    PosnicPro.features.maybeShowIntro();
+                }, function () {
+                    /* the poll keeps retrying; a failed read must not end it */
+                    PosnicPro.features._fetchingGate = false;
+                });
+            }
+            return false;
+        }
+        /*
+         * NO identity gate at all. Owner, fourth round: "keep on db field and
+         * make sure user know about it."
+         *
+         * Every identity check this gate has carried refused HIM: the ACL
+         * shape test refused owner-class users whose full access is an empty
+         * map; the usertype bypass then read localStorage that shadow
+         * sessions - the My Account "open in browser" door, HIS door - never
+         * wrote. Two different silent refusals of the one person the screen
+         * exists for.
+         *
+         * So the rule is now exactly his sentence: the DB field decides,
+         * nothing else. Anyone signed in sees the welcome until somebody
+         * saves or deliberately skips. A user without feature rights who
+         * presses Save is refused by the SERVER - which was always the real
+         * guard - and told they can set these later.
+         */
+        if (!$('#feature_intro_modal').length) { return; }
+        /*
+         * The Features page first, the welcome on top of it.
+         *
+         * Owner, more than once: "until skip you keep showing the features as
+         * first page." The dialog opens OVER the features grid, so whichever
+         * way it closes, the person is standing in front of the switches it
+         * was talking about - not on a dashboard with no idea where those
+         * switches went.
+         */
+        if (window.location.hash.slice(2) !== 'settings/modules') {
+            hasher.setHash('settings/modules');
+        }
+        PosnicPro.features.renderIntro();
+        /* One line, on purpose, forever: "did the welcome show for this
+           shop?" is a support question, and a console line a headless session
+           can grep is the difference between an answer and an argument. */
+        console.log('[welcome] shown over the features page');
+        $('#feature_intro_modal').modal('show');
+        /*
+         * Only a DECISION ends the welcome - Save, or the explicit "Not now".
+         *
+         * The first design treated any close as "asked" so it would never
+         * nag. The owner overruled it, and he is right about who this is for:
+         * a brand-new user who Escapes a dialog they did not read has not
+         * learned that features are switchable, which is the entire point. So
+         * a casual dismissal - Esc, a stray click - writes NOTHING, and the
+         * welcome returns on the next login, over the Features page, until
+         * the person either saves or says "Not now" on purpose.
+         */
+        /* No browser-side memory on close. The DB flag the decision paths
+           write is the whole record; an undecided close leaves nothing, and
+           the welcome returns next login - on this till and every other. */
+    },
+    /*
+     * Where is this till actually running?
+     *
+     * Owner, twice: "i feel user is not clear about this system software
+     * desktop application plus web based... we know but when first visit he
+     * dont know." The website says it now; the first sign-in did not, and the
+     * first sign-in is the one screen a new shop is certain to read.
+     *
+     * Three answers, decided from evidence the page already has:
+     *
+     *   desktop  the Electron app - the userAgent says so.
+     *   web      a browser on a PUBLIC address, in which case the shop's web
+     *            address IS the address bar. No lookup, no way to be stale.
+     *   lan      a browser on localhost or a private address - somebody on the
+     *            shop's own network looking at the local server. Claiming that
+     *            address "opens on any phone" would be false the moment they
+     *            left the building, so it gets its own sentence.
+     */
+    runningContext: function () {
+        if (navigator.userAgent.indexOf('Electron') !== -1) { return 'desktop'; }
+        var host = String(window.location.hostname || '').toLowerCase();
+        var isPrivate = host === 'localhost' || host === '' ||
+            /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) ||
+            /^172\.(1[6-9]|2[0-9]|3[01])\./.test(host) || /\.local$/.test(host);
+        return isPrivate ? 'lan' : 'web';
+    },
+
+    /*
+     * The desktop-and-web sentence, in the version that is true HERE.
+     *
+     * Never the generic "we have both an app and a website": that tells
+     * somebody nothing about the one they are looking at, and the whole
+     * point is orientation. Each variant says what THIS one is, what the
+     * other one offers, and where to find it.
+     *
+     * The desktop line does not print a web address, deliberately. The app
+     * does not reliably know its shop's cloud address, and a guessed URL that
+     * 404s teaches a brand-new user that the product lies. The welcome email
+     * and My Account genuinely carry it, so that is where they are sent.
+     */
+    accessNote: function () {
+        var esc = function (v) { return $('<i>').text(v == null ? '' : v).html(); };
+        var ctx = PosnicPro.features.runningContext();
+        if (ctx === 'desktop') {
+            return '<b><lang class="lang_you_are_in_the_desktop_app">You are in the desktop app.</lang></b> Your data lives on this computer, so ' +
+                'selling works with no internet at all. The same shop also opens in any web ' +
+                'browser - the address is in your welcome email, and under ' +
+                '<b><lang class="lang_my_account">My Account</lang></b> on posnic.com.';
+        }
+        if (ctx === 'web') {
+            return '<b><lang class="lang_you_are_in_the_web_version">You are in the web version.</lang></b> The address of this shop is ' +
+                '<b>' + esc(window.location.hostname) + '</b> - it opens on any computer or ' +
+                'phone, so share it with your staff. For a till that keeps selling when the ' +
+                'internet drops, the free desktop app is at <b>posnic.com/download</b>.';
+        }
+        return '<b><lang class="lang_you_are_on_the_shop_network">You are on the shop network.</lang></b> This till runs from the shop computer ' +
+            'and works with no internet. If you signed up on posnic.com, the same shop ' +
+            'also opens in any browser - the address is under <b><lang class="lang_my_account">My Account</lang></b> there.';
+    },
+
+    setupSummary: function () {
+        var esc = function (v) { return $('<i>').text(v == null ? '' : v).html(); };
+        var value = function () {
+            for (var i = 0; i < arguments.length; i += 1) {
+                var text = $.trim(String(arguments[i] == null ? '' : arguments[i]));
+                if (text && text !== 'null' && text !== 'undefined') { return text; }
+            }
+            return '';
+        };
+        var rows = [
+            ['Country', value(PosnicPro.local.get('country_setting'), PosnicPro.local.get('countryname'), PosnicPro.local.get('country_value'), 'Detected')],
+            ['Currency', value(PosnicPro.local.get('currencySign'), 'Shop currency')],
+            ['Timezone', value(PosnicPro.timeZone(), 'Shop timezone')],
+            ['Date format', value(PosnicPro.local.get('dateformatset'), 'Shop default')]
+        ];
+        return rows.map(function (row) {
+            return '<span><small>' + esc(row[0]) + '</small><b>' + esc(row[1]) + '</b></span>';
+        }).join('');
+    },
+
+    _esc: function (v) {
+        return $('<i>').text(v == null ? '' : v).html();
+    },
+
+    _value: function () {
+        for (var i = 0; i < arguments.length; i += 1) {
+            var text = $.trim(String(arguments[i] == null ? '' : arguments[i]));
+            if (text && text !== 'null' && text !== 'undefined') { return text; }
+        }
+        return '';
+    },
+
+    enhanceIntroSelect: function (selector) {
+        var el = $(selector);
+        if (!el.length || !$.fn.select2) { return; }
+        if (el.data('select2')) {
+            el.trigger('change.select2');
+            return;
+        }
+        el.select2({
+            dropdownParent: $('#feature_intro_modal'),
+            width: '100%'
+        });
+    },
+
+    chooseIntroSelectValue: function (selector, wanted) {
+        var el = $(selector);
+        if (!el.length) { return; }
+        var hasWanted = false;
+        if (wanted) {
+            el.find('option').each(function () {
+                if (String($(this).val()) === String(wanted)) { hasWanted = true; }
+            });
+        }
+        if (hasWanted) {
+            el.val(wanted);
+        }
+        if (!el.val() && el.find('option').length) {
+            el.prop('selectedIndex', 0);
+        }
+        PosnicPro.features.enhanceIntroSelect(selector);
+        el.trigger('change.select2');
+    },
+
+    copyIntroOptions: function (from, to, selected) {
+        var src = $(from);
+        var dest = $(to);
+        if (!src.length || !dest.length || !src.find('option').length) { return false; }
+        dest.html(src.html());
+        PosnicPro.features.chooseIntroSelectValue(to, selected);
+        return true;
+    },
+
+    loadIntroCountries: function () {
+        var selected = PosnicPro.features._value(
+            PosnicPro.local.get('country_setting'),
+            PosnicPro.local.get('countryname'),
+            PosnicPro.local.get('country_value')
+        );
+        if (PosnicPro.features.copyIntroOptions('#setting_country', '#feature_intro_country', selected)) {
+            PosnicPro.features.loadIntroStates();
+            return;
+        }
+        PosnicPro.get({
+            url: 'setting/getJSONCountry',
+            data: { name: 'countries' }
+        }, function (response) {
+            var options = '';
+            $.each((response.data && response.data.countries) || [], function (key, dataItem) {
+                options += '<option value="' + PosnicPro.features._esc(dataItem.value) +
+                    '" data-setting-id="' + PosnicPro.features._esc(dataItem.id) + '">' +
+                    PosnicPro.features._esc(dataItem.value) + '</option>';
+            });
+            $('#feature_intro_country').html(options);
+            PosnicPro.features.chooseIntroSelectValue('#feature_intro_country', selected);
+            PosnicPro.features.loadIntroStates();
+        });
+    },
+
+    loadIntroStates: function (countryId, selected) {
+        var picked = PosnicPro.features._value(selected, PosnicPro.local.get('state_setting'), PosnicPro.local.get('statename'));
+        var id = PosnicPro.features._value(countryId, $('#feature_intro_country option:selected').data('setting-id'), PosnicPro.local.get('countryid'));
+        if (!id) {
+            $('#feature_intro_state').html('<option value="' + PosnicPro.features._esc(picked) + '">' + PosnicPro.features._esc(picked || 'State / region') + '</option>');
+            PosnicPro.features.chooseIntroSelectValue('#feature_intro_state', picked);
+            return;
+        }
+        PosnicPro.get({
+            url: 'setting/getJSONState',
+            data: { id: id }
+        }, function (response) {
+            var options = '';
+            $.each((response.data && response.data.stateJsonArray) || [], function (key, name) {
+                options += '<option value="' + PosnicPro.features._esc(name) + '">' + PosnicPro.features._esc(name) + '</option>';
+            });
+            if (!options && picked) {
+                options = '<option value="' + PosnicPro.features._esc(picked) + '">' + PosnicPro.features._esc(picked) + '</option>';
+            }
+            $('#feature_intro_state').html(options);
+            PosnicPro.features.chooseIntroSelectValue('#feature_intro_state', picked);
+        });
+    },
+
+    loadIntroCurrencies: function () {
+        var selected = PosnicPro.features._value($('#currency_setting').val(), PosnicPro.local.get('currency_setting'));
+        if (PosnicPro.features.copyIntroOptions('#currency_setting', '#feature_intro_currency', selected)) {
+            return;
+        }
+        PosnicPro.get({
+            url: 'setting/getJSONCurrency'
+        }, function (response) {
+            var options = '';
+            $.each((response.data && response.data.currency) || [], function (key, dataItem) {
+                options += '<option value="' + PosnicPro.features._esc(dataItem.value) +
+                    '" data-currency-id="' + PosnicPro.features._esc(dataItem.id) +
+                    '" data-currency-text="' + PosnicPro.features._esc(dataItem.text) +
+                    '" data-currency-symbol="' + PosnicPro.features._esc(dataItem.symbol) + '">' +
+                    PosnicPro.features._esc(dataItem.value) + '</option>';
+            });
+            $('#feature_intro_currency').html(options);
+            PosnicPro.features.chooseIntroSelectValue('#feature_intro_currency', selected);
+        });
+    },
+
+    loadIntroTimezones: function () {
+        var selected = PosnicPro.features._value(PosnicPro.timeZone());
+        if (PosnicPro.features.copyIntroOptions('#time_zone', '#feature_intro_timezone', selected)) {
+            return;
+        }
+        PosnicPro.get({
+            url: 'setting/getJSONTimeZone'
+        }, function (response) {
+            var options = '';
+            $.each(response.data || [], function (key, dataItem) {
+                options += '<option value="' + PosnicPro.features._esc(dataItem.text) +
+                    '" data-timezone-name="' + PosnicPro.features._esc(dataItem.text) + '">' +
+                    PosnicPro.features._esc(dataItem.value) + '</option>';
+            });
+            $('#feature_intro_timezone').html(options);
+            PosnicPro.features.chooseIntroSelectValue('#feature_intro_timezone', selected);
+        });
+    },
+
+    loadIntroDates: function () {
+        var selected = PosnicPro.features._value(PosnicPro.local.get('dateformatset'), $('#storedate').val(), 'dd/mm/yyyy');
+        PosnicPro.features.copyIntroOptions('#storedate', '#feature_intro_date', selected);
+    },
+
+    initIntroLocaleEditor: function () {
+        PosnicPro.features.loadIntroCountries();
+        PosnicPro.features.loadIntroCurrencies();
+        PosnicPro.features.loadIntroTimezones();
+        PosnicPro.features.loadIntroDates();
+        window.setTimeout(function () {
+            PosnicPro.features._introLocaleSnapshot = JSON.stringify(PosnicPro.features.readIntroLocale());
+        }, 0);
+    },
+
+    readIntroLocale: function () {
+        var countryOption = $('#feature_intro_country option:selected');
+        var currencyOption = $('#feature_intro_currency option:selected');
+        var dateOption = $('#feature_intro_date option:selected');
+        var currencySymbol = PosnicPro.features._value(
+            currencyOption.attr('data-currency-symbol'),
+            $('#currencyText').val(),
+            PosnicPro.local.get('currencySign')
+        );
+        return {
+            setting_country: PosnicPro.features._value($('#feature_intro_country').val(), PosnicPro.local.get('country_setting')),
+            country_id: PosnicPro.features._value(countryOption.attr('data-setting-id'), PosnicPro.local.get('countryid')),
+            setting_state: PosnicPro.features._value($('#feature_intro_state').val(), PosnicPro.local.get('state_setting')),
+            currency_setting: PosnicPro.features._value($('#feature_intro_currency').val(), $('#currency_setting').val()),
+            currencyText: currencySymbol,
+            currencyTextname: PosnicPro.features._value(currencyOption.attr('data-currency-text'), $('#currencyTextname').val(), currencySymbol),
+            currency_type: currencySymbol,
+            time_zone: PosnicPro.features._value($('#feature_intro_timezone').val(), PosnicPro.timeZone()),
+            storedate: PosnicPro.features._value($('#feature_intro_date').val(), PosnicPro.local.get('dateformatset'), 'dd/mm/yyyy'),
+            serverdate: PosnicPro.features._value(dateOption.attr('data-id'), $('#serverdate').val(), 'd/m/Y'),
+            dateText: PosnicPro.features._value(dateOption.text(), $('#dateText').val(), '01/01/2018 - dd/mm/yyyy')
+        };
+    },
+
+    applyIntroLocale: function (data, sent) {
+        var d = data || {};
+        var fallback = sent || {};
+        var country = PosnicPro.features._value(d.country, fallback.setting_country);
+        var state = PosnicPro.features._value(d.state, fallback.setting_state);
+        var countryId = PosnicPro.features._value(d.country_id, fallback.country_id);
+        var currencyText = PosnicPro.features._value(d.currency_text, fallback.currency_setting);
+        var currencySymbol = PosnicPro.features._value(d.currency_type, fallback.currency_type, fallback.currencyText);
+        var timezone = PosnicPro.features._value(d.time_zone, fallback.time_zone);
+        var clientDate = PosnicPro.features._value(d.clientdate, d.client_dateformat, fallback.storedate);
+        var serverDate = PosnicPro.features._value(d.serverdate, d.server_dateformat, fallback.serverdate);
+        var dateText = PosnicPro.features._value(d.dateformat_text, fallback.dateText);
+
+        PosnicPro.local.set('country_setting', country);
+        PosnicPro.local.set('countryname', country);
+        PosnicPro.local.set('countryid', countryId);
+        PosnicPro.local.set('state_setting', state);
+        PosnicPro.local.set('statename', state);
+        PosnicPro.local.set('currency_setting', currencyText);
+        PosnicPro.local.set('currencySign', currencySymbol);
+        PosnicPro.local.set('timezone', timezone);
+        PosnicPro.local.set('dateformatset', clientDate);
+        PosnicPro.local.set('setdateformat', serverDate);
+
+        $('#setting_country').val(country).trigger('change.select2');
+        if (state) {
+            $('#setting_state').html('<option value="' + PosnicPro.features._esc(state) + '" selected>' + PosnicPro.features._esc(state) + '</option>');
+        }
+        $('#currency_setting').val(currencyText).trigger('change.select2');
+        $('#currencyText').val(PosnicPro.features._value(fallback.currencyText, currencySymbol));
+        $('#currencyTextname').val(PosnicPro.features._value(fallback.currencyTextname, currencyText));
+        $('#currency_type').html('<option value="' + PosnicPro.features._esc(currencySymbol) + '" selected>Symbol( ' + PosnicPro.features._esc(currencySymbol) + ' )</option>');
+        $('#time_zone').val(timezone).trigger('change.select2');
+        $('#storedate').val(clientDate).trigger('change.select2');
+        $('#serverdate').val(serverDate);
+        $('#dateText').val(dateText);
+        $('.display-currency').html(currencySymbol);
+    },
+
+    saveIntroLocaleIfNeeded: function (done, fail) {
+        var locale = PosnicPro.features.readIntroLocale();
+        var snapshot = JSON.stringify(locale);
+        if (snapshot === PosnicPro.features._introLocaleSnapshot) {
+            done();
+            return;
+        }
+        PosnicPro.put({
+            url: 'setting/starterLocale',
+            data: JSON.stringify(locale)
+        }, function (response) {
+            if (response.type === 'success') {
+                PosnicPro.features.applyIntroLocale(response.data, locale);
+                PosnicPro.features._introLocaleSnapshot = snapshot;
+                done();
+            } else {
+                fail(response.message || 'Could not save starter settings');
+            }
+        }, function () {
+            fail('Could not save starter settings. Please try again.');
+        });
+    },
+
+    featureOn: function (blob, key) {
+        var onByDefault = !(key === 'staff_tips_enable' || key === 'till_lock_enable');
+        return blob[key] === undefined ? onByDefault : blob[key] === true;
+    },
+
+    paintDemoChoice: function (wanted) {
+        $('#feature_intro_demo_yes').toggleClass('is-selected', wanted === true)
+            .attr('aria-pressed', wanted === true ? 'true' : 'false');
+        $('#feature_intro_demo_no').toggleClass('is-selected', wanted === false)
+            .attr('aria-pressed', wanted === false ? 'true' : 'false');
+        $('#feature_intro_demo_status').text(wanted === true
+            ? 'Sample data selected. It will install in the background after Next.'
+            : 'Clean catalogue selected. You can add sample data later under Manage > Demo Data.');
+    },
+
+    chooseDemoData: function (wanted) {
+        $('#fi_module_demo_data_enable').prop('checked', wanted === true);
+        if (wanted === false && PosnicPro.settings) {
+            PosnicPro.settings._demoPurgeArmed = true;
+        }
+        PosnicPro.features.paintDemoChoice(wanted === true);
+    },
+
+    markIntroDemoStatus: function (title, line, pct, keepOpen) {
+        var box = $('#feature_intro_demo_bg_status');
+        if (!box.length) { return; }
+        box.prop('hidden', false).removeAttr('hidden');
+        $('#feature_intro_demo_bg_title').text(title || 'Adding sample data');
+        $('#feature_intro_demo_bg_step').text(line || 'Working in the background...');
+        $('#feature_intro_demo_bg_bar').css('width', Math.max(0, Math.min(100, Number(pct) || 0)) + '%');
+        if (!keepOpen) {
+            window.setTimeout(function () {
+                $('#feature_intro_demo_bg_status').prop('hidden', true).attr('hidden', 'hidden');
+            }, 2200);
+        }
+    },
+
+    beginIntroDemoInstall: function () {
+        if (PosnicPro.features._introDemoStarted) { return; }
+        var selected = $('#fi_module_demo_data_enable').is(':checked');
+        if (!selected) {
+            PosnicPro.features.markIntroDemoStatus('Clean shop selected', 'No sample records will be added.', 100, false);
+            return;
+        }
+        PosnicPro.features._introDemoStarted = true;
+        if (PosnicPro.settings && PosnicPro.settings._demoWasOn === false) {
+            PosnicPro.settings.syncDemoDataAfterSave(true, {
+                inlineTarget: '#feature_intro_demo_bg_status',
+                title: PosnicPro.i18n.t('lang_adding_sample_data', 'Adding sample data')
+            });
+            return;
+        }
+        PosnicPro.features.markIntroDemoStatus('Sample data ready', 'Products and sample sales are ready to try.', 100, false);
+    },
+
+    showIntroStep: function (step) {
+        var steps = ['sample', 'features', 'settings'];
+        var index = Math.max(0, Math.min(steps.length - 1, Number(step) || 0));
+        PosnicPro.features._introStep = index;
+        $('[data-intro-step]').each(function () {
+            $(this).toggleClass('is-active', $(this).data('introStep') === steps[index]);
+        });
+        $('[data-intro-dot]').each(function () {
+            var dot = Number($(this).attr('data-intro-dot'));
+            $(this).toggleClass('is-active', dot === index);
+            $(this).toggleClass('is-done', dot < index);
+        });
+        $('#feature_intro_step_label').text('Step ' + (index + 1) + ' of ' + steps.length);
+        $('#feature_intro_back').prop('hidden', index === 0).attr('hidden', index === 0 ? 'hidden' : null);
+        $('#feature_intro_next').prop('hidden', index === steps.length - 1).attr('hidden', index === steps.length - 1 ? 'hidden' : null);
+        $('#feature_intro_save, #feature_intro_tour')
+            .prop('hidden', index !== steps.length - 1)
+            .attr('hidden', index !== steps.length - 1 ? 'hidden' : null);
+    },
+
+    nextIntroStep: function () {
+        var index = PosnicPro.features._introStep || 0;
+        if (index === 0) { PosnicPro.features.beginIntroDemoInstall(); }
+        PosnicPro.features.showIntroStep(index + 1);
+    },
+
+    previousIntroStep: function () {
+        PosnicPro.features.showIntroStep((PosnicPro.features._introStep || 0) - 1);
+    },
+
+    filterIntro: function () {
+        var q = String($('#feature_intro_filter').val() || '').trim().toLowerCase();
+        $('[data-feature-row]').each(function () {
+            var hay = String($(this).data('featureSearch') || '').toLowerCase();
+            $(this).toggleClass('is-hidden', !!q && hay.indexOf(q) === -1);
+        });
+    },
+
+    renderIntro: function () {
+        var blob = PosnicPro.features._blob();
+
+        /*
+         * The welcome, in the shop's own name. `local.get` hands back the
+         * STRING "null" for a key written as null, which is how a header once
+         * read "null null" - so anything that is not a real name falls back to
+         * the generic sentence rather than greeting a shop called null.
+         */
+        var shop = PosnicPro.local.get('branchname');
+        shop = (shop == null || shop === 'null' || shop === 'undefined') ? '' : $.trim(shop);
+        $('#feature_intro_sub').text(shop
+            ? shop + ' is set up and ready to take its first sale.'
+            : 'Your till is set up and ready to take its first sale.');
+
+        /*
+         * Two different true sentences, because this screen reaches two
+         * different shops. A NEW shop starts with a few features on and the
+         * rest off, and needs to be told that the short menus are deliberate.
+         * A shop created before those defaults existed has everything on, and
+         * telling it "everything else is off" would be plainly false while it
+         * looks at a full menu. Decided from the switches themselves rather
+         * than from a signup date, which this page does not have.
+         */
+        var anyOff = PosnicPro.features.INTRO.some(function (f) {
+            return blob[f[0]] === false || blob[f[0]] === 'false';
+        });
+        $('#feature_intro_lead').text(anyOff
+            ? 'We have switched on the few things almost every shop needs, and left the rest off so your menus stay short. Turn on whatever you want - now, or any time later.'
+            : 'Here is everything this till can do. Switch off what you do not need and those menus disappear; switch them back on whenever you want.');
+
+        /* Built by accessNote, which escapes the one dynamic value (the
+           hostname); everything else in it is our own copy. */
+        $('#feature_intro_access').html(PosnicPro.features.accessNote());
+        PosnicPro.features.initIntroLocaleEditor();
+
+        $('#feature_intro_filter').val('');
+        var demoOn = blob.module_demo_data_enable === false || blob.module_demo_data_enable === 'false'
+            ? true
+            : PosnicPro.features.featureOn(blob, 'module_demo_data_enable');
+        $('#fi_module_demo_data_enable').prop('checked', demoOn);
+        PosnicPro.features.paintDemoChoice(demoOn);
+        PosnicPro.features._introStep = 0;
+        PosnicPro.features._introDemoStarted = false;
+        $('#feature_intro_demo_bg_status').prop('hidden', true).attr('hidden', 'hidden');
+        PosnicPro.features.showIntroStep(0);
+
+        var rows = PosnicPro.features.INTRO.filter(function (f) {
+            return f[0] !== 'module_demo_data_enable';
+        }).map(function (f) {
+            var key = f[0];
+            var on = PosnicPro.features.featureOn(blob, key);
+            var search = (f[1] + ' ' + f[2] + ' ' + key).replace(/"/g, '&quot;');
+            /* The whole row is the label, so a thumb anywhere on it flips the
+               switch - the switch itself is a 40px target on a touch screen. */
+            return {
+                on: on,
+                html: '<label class="first-run-row' + (on ? ' is-recommended' : '') + '" for="fi_' + key + '" data-feature-row data-feature-search="' + search + '">' +
+                '<span class="first-run-row-text">' +
+                '<b>' + f[1] + '</b>' +
+                '<span>' + f[2] + '</span>' +
+                '</span>' +
+                '<span class="custom-control custom-switch first-run-switch">' +
+                '<input type="checkbox" class="custom-control-input feature-intro-toggle" id="fi_' + key + '" data-key="' + key + '"' + (on ? ' checked' : '') + '>' +
+                '<span class="custom-control-label"></span>' +
+                '</span>' +
+                '</label>'
+            };
+        }).sort(function (a, b) {
+            return (a.on === b.on) ? 0 : (a.on ? -1 : 1);
+        }).map(function (row) { return row.html; }).join('');
+        $('#feature_intro_list').html(rows);
+    },
+    /*
+     * "Save and start selling" has to arrive at the sale screen.
+     *
+     * The welcome puts the shop on the features page first, so it is standing
+     * in front of the switches it is being told about - maybeShowIntro sets
+     * that hash deliberately. The cost is that dismissing the dialog leaves a
+     * shop that signed up ninety seconds ago looking at a settings screen,
+     * which is the one place a new shop has no reason to be. The button names
+     * where it goes; it should go there.
+     *
+     * Not for "Save & show me around", which is a walk around where these
+     * switches live and would be cut short by a page change, and not for
+     * "Not now", which decided nothing and asked to be left alone.
+     */
+    startSelling: function () {
+        /*
+         * Once, however this is reached. Every path below is a race that can
+         * be won twice - a transition that fires and a timeout that also
+         * fires - and setting the hash twice would push two history entries,
+         * so Back would appear not to work.
+         */
+        var went = false;
+        var go = function () {
+            if (went) { return; }
+            went = true;
+            hasher.setHash('sales/new');
+        };
+        /*
+         * The welcome fades out asynchronously. Changing the page under a
+         * modal that has not finished closing is how a backdrop gets left
+         * behind over the sale screen, so wait for this one visible dialog.
+         */
+        var showing = function (sel) {
+            var m = $(sel);
+            return m.length && (m.is(':visible') || m.hasClass('show') || m.hasClass('in'));
+        };
+        var after = function (sel, next) {
+            if (!showing(sel)) { next(); return; }
+            $(sel).one('hidden.bs.modal', next);
+        };
+        after('#feature_intro_modal', go);
+        /*
+         * And a floor under all of it. A transition that never fires - a
+         * detached element, a browser honouring reduced motion, a stylesheet
+         * that did not load - would leave the shop sitting on the settings
+         * page having pressed a button that names somewhere else. Arriving
+         * late is a blemish; not arriving is the bug being fixed.
+         */
+        setTimeout(go, 1200);
+    },
+    saveIntro: function () {
+        /* Toggles only. This used to send sales_prefix:'SAL' and
+           receiving_prefix:'REC' - invented values, purely to satisfy a
+           validator for two fields this screen does not own. They were
+           described as ignored, but nothing guaranteed that: the day the
+           modules-only path stopped skipping them, every shop saving a
+           feature toggle would have had its receipt numbering overwritten
+           with "SAL" and "REC". The features endpoint knows only its own
+           keys, so it cannot ask for them and would refuse them by name. */
+        var payload = {};
+        /* BOOLEANS, never the strings 'true'/'false'. The group endpoint
+           once stored this payload verbatim, and every `!== false` reader
+           then took the string "false" for ENABLED - saving all-off lit
+           every feature up. The server coerces now, but the honest payload
+           means even a not-yet-updated server stores values that read
+           correctly. */
+        $('.feature-intro-toggle').each(function () {
+            payload[$(this).data('key')] = $(this).is(':checked');
+        });
+        /* Recorded in the same write as the choice it belongs to. A separate
+           call could succeed while the toggles failed, and the shop would then
+           never be offered the switches it did not manage to save. */
+        payload.first_run_done = true;
+        payload.first_run_decided = true;
+        var saveButtons = $('#feature_intro_save, #feature_intro_tour, #feature_intro_skip, #feature_intro_close');
+        saveButtons.prop('disabled', true);
+        PosnicPro.features.saveIntroLocaleIfNeeded(function () {
+            PosnicPro.put({
+                url: 'settings/group/features',
+                data: JSON.stringify(payload)
+            }, function (response) {
+                saveButtons.prop('disabled', false);
+            if (response.type === 'success') {
+                // The session blob must agree with what was just written, and
+                // the menus react now, not at next login.
+                var blob = PosnicPro.features._blob();
+                $('.feature-intro-toggle').each(function () {
+                    blob[$(this).data('key')] = $(this).is(':checked');
+                });
+                blob.first_run_done = true;
+                blob.first_run_decided = true;
+                PosnicPro.features._savedIntro = true;
+                PosnicPro.features._decided = true;
+                PosnicPro.local.set('general_settings', JSON.stringify(blob));
+                if (PosnicPro.settings && PosnicPro.settings.applyModuleNav) { PosnicPro.settings.applyModuleNav(); }
+                else if (PosnicPro.applyModuleSidebar) { PosnicPro.applyModuleSidebar(); }
+                /* Read before the branch below clears it, because where this
+                   shop goes next depends on which of the two buttons was
+                   pressed and the flag does not survive to the end. */
+                var wantedTour = PosnicPro.features._tourAfterSave;
+                var wantedDemo = $('#fi_module_demo_data_enable').length
+                    ? $('#fi_module_demo_data_enable').is(':checked')
+                    : undefined;
+                if (wantedDemo === true && PosnicPro.features._introDemoStarted !== true) {
+                    PosnicPro.features.beginIntroDemoInstall();
+                } else {
+                    PosnicPro.settings.syncDemoDataAfterSave(wantedDemo);
+                }
+                $('#feature_intro_modal').modal('hide');
+                PosnicPro.alert('success', PosnicPro.i18n.t('lang_feature_switches_saved', 'Feature switches saved'));
+                /* Only on a SAVED shop, and only when asked: a failed save
+                   must never start a tour, and Save-alone must never grow
+                   an uninvited one. */
+                if (PosnicPro.features._tourAfterSave) {
+                    PosnicPro.features._tourAfterSave = false;
+                    setTimeout(function () { PosnicPro.tour.firstRun(); }, 400);
+                }
+                /* And then the sale screen, because that is what the button
+                   says. The tour goes the other way - see startSelling. */
+                if (!wantedTour) { PosnicPro.features.startSelling(); }
+            } else {
+                PosnicPro.alert(response.type, response.message);
+            }
+            }, function () {
+                saveButtons.prop('disabled', false);
+                PosnicPro.features._tourAfterSave = false;
+                PosnicPro.alert('error', 'Could not save - you can set these later under Manage > Features');
+            });
+        }, function (message) {
+            saveButtons.prop('disabled', false);
+            PosnicPro.features._tourAfterSave = false;
+            PosnicPro.alert('error', message);
+        });
+    }
+};
+/*
+ * "Use defaults" is a decision, not a close button. It saves the current
+ * recommended switches through the same path as Save and start selling, so the
+ * welcome cannot disappear without recording the chosen setup.
+ */
+$(document).on('click', '#feature_intro_skip', function () {
+    PosnicPro.features._decided = true;
+    PosnicPro.features._tourAfterSave = false;
+    PosnicPro.features.saveIntro();
+});
+$(document).on('click', '#feature_intro_close', function () {
+    PosnicPro.features._decided = true;
+    PosnicPro.features._tourAfterSave = false;
+    PosnicPro.features.saveIntro();
+});
+$(document).on('change', '#fi_module_demo_data_enable', function () {
+    /* The welcome's own demo switch: same consent, same rule. The blob is
+       the truth here - the settings form may not be primed yet. */
+    var blobOn = PosnicPro.features._blob().module_demo_data_enable !== false;
+    if (!this.checked && blobOn) { PosnicPro.settings.confirmDemoOff(this); }
+    PosnicPro.features.paintDemoChoice($(this).is(':checked'));
+});
+$(document).on('input', '#feature_intro_filter', function () { PosnicPro.features.filterIntro(); });
+$(document).on('click', '#feature_intro_demo_yes', function () { PosnicPro.features.chooseDemoData(true); });
+$(document).on('click', '#feature_intro_demo_no', function () { PosnicPro.features.chooseDemoData(false); });
+$(document).on('click', '#feature_intro_next', function () { PosnicPro.features.nextIntroStep(); });
+$(document).on('click', '#feature_intro_back', function () { PosnicPro.features.previousIntroStep(); });
+$(document).on('click', '#feature_intro_save', function () { PosnicPro.features.saveIntro(); });
+$(document).on('click', '#feature_intro_tour', function () {
+    PosnicPro.features._tourAfterSave = true;
+    PosnicPro.features.saveIntro();
+});
+$(document).on('change', '#feature_intro_country', function () {
+    PosnicPro.features.loadIntroStates($(this).find('option:selected').attr('data-setting-id'), '');
+});
+$(document).ready(function () {
+    /*
+     * A POLL, not a one-shot.
+     *
+     * Login writes the general_settings blob and the ACL while the dashboard
+     * is coming up, and on a brand-new shop's first login that write can land
+     * after any fixed delay - a one-shot check fires into an empty blob,
+     * returns, and the welcome never shows on the one login it exists for.
+     * Nothing looks wrong: the shop simply appears to have no welcome, which
+     * is how it went unreported until the owner opened a fresh shop himself.
+     *
+     * maybeShowIntro returns false ONLY for "not loaded yet". Every decided
+     * outcome - shown, already seen, cashier, no modal - ends the poll.
+     */
+    var tries = 0;
+    var poll = function () {
+        tries += 1;
+        if (PosnicPro.features.maybeShowIntro() === false) {
+            if (tries < 30) { setTimeout(poll, 2000); return; }
+            console.log('[welcome] not shown: settings or permissions never loaded in 60s');
+        }
+    };
+    setTimeout(poll, 2500);
+});
+
+/* The customer-display address card was removed from Core Settings on owner
+   instruction; customerview.html still serves on the LAN unchanged. */
+/*
+ * S4: a credential the server will not send back.
+ *
+ * The field loads empty because the value never leaves the server any more,
+ * and an empty field on save means "keep the saved one". Without a word of
+ * explanation that reads as "the password was lost", so the placeholder says
+ * which ones are configured. The value itself is never in this page.
+ */
+PosnicPro.settings.markSavedSecrets = function (configured) {
+    var labels = {
+        email_smtp_password: 'SMTP password',
+        smtp_password: 'SMTP password',
+        way2sms_password: 'Password',
+        way2sms_api: 'API key',
+        textlocal_api: 'API key'
+    };
+    var map = configured || {};
+    Object.keys(labels).forEach(function (key) {
+        var $f = $('#' + key);
+        if (!$f.length) { return; }
+        $f.attr('placeholder', map[key]
+            ? 'Saved - leave blank to keep it'
+            : labels[key]);
+        $f.closest('.form-group').find('.secret-saved-flag').remove();
+        if (map[key]) {
+            $f.after('<small class="secret-saved-flag text-success d-block mt-1">'
+                + '<i class="feather icon-check mr-1"></i>Configured</small>');
+        }
+    });
+};
+
+
+/*
+ * The month a financial year starts in only means something to a financial
+ * year.
+ *
+ * A shop on the calendar year that is shown "Financial year starts in April"
+ * has been asked a question that does not apply to it, and the honest answers
+ * to that are to hide it - not to grey it out, which is a control saying "you
+ * may not touch me" about something that is simply not part of this choice.
+ */
+/*
+ * The twelve months, in the language the page is in.
+ *
+ * Every browser ships every month name in every language it supports, so
+ * writing them into seventeen translation packs would be a hundred and
+ * ninety-nine hand-typed strings duplicating something already correct - and
+ * one more list to keep true when a language is added. The year is arbitrary;
+ * only the month names are read.
+ */
+PosnicPro.settings.fillFinancialYearMonths = function () {
+    var select = document.getElementById('bill_number_fy_start_month');
+    if (!select || select.options.length) { return; }
+    var code = (PosnicPro.i18n && PosnicPro.i18n.code && PosnicPro.i18n.code()) || undefined;
+    for (var month = 1; month <= 12; month += 1) {
+        var name;
+        try {
+            name = new Date(2001, month - 1, 1).toLocaleString(code, { month: 'long' });
+        } catch (e) {
+            /* A language code the browser will not take. Its own default
+               still names the months, which beats an empty list. */
+            name = new Date(2001, month - 1, 1).toLocaleString(undefined, { month: 'long' });
+        }
+        select.add(new Option(name, String(month)));
+    }
+};
+
+PosnicPro.settings.showFinancialYearMonth = function () {
+    var row = $('#bill_number_fy_start_month_row');
+    if (!row.length) { return; }
+    row.toggle($('#bill_number_reset').val() === 'financial');
+};
+
+$(document).on('change', '#bill_number_reset', function () {
+    PosnicPro.settings.showFinancialYearMonth();
+});
+
+
+/* Feature search (owner feedback): filter the cards by anything visible on
+   them - title, description, sub-toggle labels. */
+PosnicPro.settings.filterModuleCards = function (query) {
+    var q = String(query || '').trim().toLowerCase();
+    $('.module-grid .module-card').each(function () {
+        var hit = !q || $(this).text().toLowerCase().indexOf(q) !== -1;
+        $(this).toggleClass('search-miss', !hit);
+    });
+    PosnicPro.settings.applyModuleVisibility();
+};
+
+/*
+ * What is shown is the search AND the chip, worked out in one place.
+ *
+ * Search marks a card search-miss; the All / On / Off chip marks it
+ * filter-miss. Neither knows about the other, so a group whose every card is
+ * hidden by one or the other would keep its heading on an empty grid - which
+ * reads as "this group has nothing in it" rather than "nothing here matched".
+ * This runs after either changes and hides the heading with its cards.
+ */
+PosnicPro.settings._moduleFilter = 'all';
+PosnicPro.settings.applyModuleVisibility = function () {
+    var f = PosnicPro.settings._moduleFilter || 'all';
+    $('#v-pills-modules .module-card').each(function () {
+        var off = $(this).hasClass('is-off');
+        $(this).toggleClass('filter-miss', (f === 'on' && off) || (f === 'off' && !off));
+    });
+    $('#v-pills-modules .module-group').each(function () {
+        var visible = $(this).find('.module-card').not('.search-miss, .filter-miss').length;
+        $(this).toggleClass('group-empty', visible === 0);
+    });
+    var any = $('#v-pills-modules .module-card').not('.search-miss, .filter-miss').length;
+    $('#fg_empty').toggle(any === 0);
+};
+
+$(document).on('click', '#v-pills-modules .fg-chip', function () {
+    PosnicPro.settings._moduleFilter = $(this).attr('data-fg-filter') || 'all';
+    $('#v-pills-modules .fg-chip').removeClass('is-active');
+    $(this).addClass('is-active');
+    PosnicPro.settings.applyModuleVisibility();
+});
+
+/* The settings header names whichever page the pill opened. */
+$(document).on('shown.bs.tab', '#v-pills-tab a[data-toggle="pill"]', function () {
+    var t = $.trim($(this).text());
+    if (t) { $('#settings_page_title').text(t); }
+});
+
+/* Authorised signature for quotations: a small image stored with the shop
+   settings as a data URL. No image = no signatory line on the quote. */
+/*
+ * A picture the shop chose, read here rather than uploaded.
+ *
+ * Same shape as the quotation signature above: a data URL in a hidden
+ * field, saved with the rest of the form. No upload endpoint, no bucket,
+ * and - the part that matters for printing - no other origin, so the
+ * canvas that rasterises it for a thermal printer can actually read it.
+ */
+$(document).on('change', '#footer_image_file', function () {
+    var f = this.files && this.files[0];
+    if (!f) { return; }
+    if (f.size > 300 * 1024) {
+        PosnicPro.alert('warning', PosnicPro.i18n.t('lang_keep_the_picture_under_300_kb_a_small_png_w', 'Keep the picture under 300 KB - a small PNG works best.'));
+        $(this).val('');
+        return;
+    }
+    var reader = new FileReader();
+    reader.onload = function (e) {
+        $('#footer_image_value').val(e.target.result);
+        $('#footer_image_thumb').attr('src', e.target.result).show();
+        $('#footer_image_clear').show();
+        /* An uploaded picture and a QR address cannot both print, so
+           picking a file clears the address rather than leaving the shop
+           to wonder which one won. */
+        $('#footer_qr_url').val('');
+        PosnicPro.settings._footerImagePicked = true;
+    };
+    reader.readAsDataURL(f);
+});
+$(document).on('click', '#footer_image_clear', function () {
+    $('#footer_image_value').val('');
+    $('#footer_image_file').val('');
+    $('#footer_qr_url').val('');
+    $('#footer_image_thumb').hide().attr('src', '');
+    $(this).hide();
+    PosnicPro.settings._footerImagePicked = true;
+});
+/* Typing an address is the other way to get a picture, and it replaces an
+   uploaded one - the server makes the code and stores it. */
+$(document).on('input', '#footer_qr_url', function () {
+    if (!$(this).val()) { return; }
+    $('#footer_image_file').val('');
+    PosnicPro.settings._footerImagePicked = false;
+});
+
+$(document).on('change', '#quote_signature_file', function () {
+    var file = this.files && this.files[0], input = this;
+    if (!file) return;
+    PosnicPro.branchSignature.readFile(file).then(function (value) {
+        $('#quote_default_signature').val(value);
+        $('#quote_signature_thumb').attr('src', value).show();
+        $('#quote_signature_clear').show();
+    }).catch(function (error) { PosnicPro.alert('error', error.message); }).finally(function () { $(input).val(''); });
+});
+$(document).on('click', '#quote_signature_clear', function () {
+    $('#quote_default_signature').val('');
+    $('#quote_signature_file').val('');
+    $('#quote_signature_thumb').hide().attr('src', '');
+    $(this).hide();
+});
+
+/* Quotation settings live in their own popup off the Features card - the
+   card itself stays a clean on/off (owner rule: toggles toggle, config
+   configures). Same field ids as ever, so the existing loads fill them. */
+
+
+/*
+ * The generic feature-settings popup (owner rule): EVERY feature's
+ * configuration opens here - a big scrollable dialog that can hold even
+ * list pages. It ADOPTS an existing pane's children on open and returns
+ * them on close, so pages keep working when reached the normal way too.
+ */
+PosnicPro.settings.openFeatureModal = function (title, paneSelector) {
+    if (!$('#feature_settings_modal').length) {
+        $('body').append(
+            '<div class="modal fade" id="feature_settings_modal" tabindex="-1" role="dialog" aria-hidden="true">'
+            + '<div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable" role="document">'
+            + '<div class="modal-content">'
+            + '<div class="modal-header py-2"><h5 class="modal-title" id="feature_settings_title"></h5>'
+            + '<button type="button" class="close" data-dismiss="modal">&times;</button></div>'
+            + '<div class="modal-body" id="feature_settings_body"></div>'
+            + '</div></div></div>');
+        $('#feature_settings_modal').on('hidden.bs.modal', function () {
+            var home = $('#feature_settings_body').data('home');
+            if (home) { $(home).append($('#feature_settings_body').children()); }
+            $('#feature_settings_body').empty().removeData('home');
+        });
+    }
+    var $pane = $(paneSelector);
+    if (!$pane.length) { return; }
+    $('#feature_settings_title').text(title);
+    $('#feature_settings_body').data('home', paneSelector).append($pane.children());
+    $('#feature_settings_modal').modal('show');
+};
+$(document).on('click', '.feature-pane-open', function () {
+    PosnicPro.settings.openFeatureModal($(this).data('title') || 'Settings', $(this).data('pane'));
+});
+/*
+ * Sharing between shops (owner ask #85).
+ *
+ * Its own load and its own save, because it writes at ACCOUNT level while
+ * everything around it on this screen writes to the branch. Riding the general
+ * form save would let a screen opened on one shop push that shop's view onto
+ * all of them - which is the exact failure S5 inheritance was built to avoid.
+ *
+ * `?level=account` on the read, for the same reason: resolveGroup would answer
+ * "what is in force at THIS branch", and saving that back would turn one
+ * branch's override into everybody's rule.
+ */
+PosnicPro.settings = PosnicPro.settings || {};
+
+/* Stock is deliberately absent: a count sits on one shelf, in one building, so
+   it is copied once when a shop is created rather than shared as a rule. See
+   api/src/services/catalogue-copy.js. */
+PosnicPro.settings.SHARING_KEYS = ['share_customers', 'share_suppliers'];
+
+PosnicPro.settings.loadSharing = function () {
+    if (!$('#sharing_fieldset').length) { return; }
+    PosnicPro.get({ url: 'settings/group/sharing', data: { level: 'account' } }, function (r) {
+        var values = (r && r.data && r.data.values) || {};
+        $.each(PosnicPro.settings.SHARING_KEYS, function (i, key) {
+            /* An absent key means nothing account-wide has been decided, which
+               the server reads as off. The switch must show the same thing, or
+               the screen and the query disagree. */
+            $('#set_' + key).prop('checked', PosnicPro.settings._sharingOn(values[key]));
+        });
+        $('#sharing_status').text('');
+    }, function () {
+        $('#sharing_status').text(PosnicPro.i18n.t('lang_could_not_read_the_current_setting', 'Could not read the current setting.'));
+    });
+};
+
+/* Settings arrive as a boolean or as the string a form wrote. `!!"false"` is
+   true, and for a switch that decides who sees whose customers that is the
+   wrong direction to be wrong in - the server reads it the same way. */
+PosnicPro.settings._sharingOn = function (v) {
+    if (v === true) { return true; }
+    if (v === false || v === null || v === undefined) { return false; }
+    var t = String(v).trim().toLowerCase();
+    return t === 'true' || t === '1' || t === 'yes' || t === 'on' || t === 'enable' || t === 'enabled';
+};
+
+PosnicPro.settings.saveSharing = function () {
+    var payload = { level: 'account' };
+    $.each(PosnicPro.settings.SHARING_KEYS, function (i, key) {
+        /* Stated, never implied. A switch left alone must still travel, or the
+           server keeps whatever it had and the screen says otherwise. */
+        payload[key] = $('#set_' + key).is(':checked');
+    });
+    $('#sharing_save_btn').prop('disabled', true);
+    $('#sharing_status').text(PosnicPro.i18n.t('lang_saving', 'Saving ...'));
+    PosnicPro.put({ url: 'settings/group/sharing', data: JSON.stringify(payload) }, function (r) {
+        $('#sharing_save_btn').prop('disabled', false);
+        $('#sharing_status').text(r.type === 'success' ? 'Saved. Applies to every shop.' : '');
+        PosnicPro.alert(r.type, r.type === 'success' ? 'Sharing saved' : r.message);
+    }, function (xhr) {
+        $('#sharing_save_btn').prop('disabled', false);
+        $('#sharing_status').text('');
+        var resp = {}; try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+        /* 403 has a specific meaning here and a generic "could not save" hides
+           it: this is deliberately owner-class, because it decides what other
+           people can read. */
+        PosnicPro.alert('error', xhr.status === 403
+            ? 'Only an owner can change what is shared between shops'
+            : (resp.message || 'Could not save sharing'));
+    });
+};
+
+$(document).on('click', '#v-pills-general-tab', function () {
+    PosnicPro.settings.loadSharing();
+});
+
+/* Invoice settings (INVOICING_MODULE_DESIGN): two groups, two endpoints -
+   the prefix and credit days are preferences, the terms are document text.
+   Each endpoint knows only its own keys, so neither can be asked for the
+   other's. */
+$(document).on('click', '#invoice_settings_save', function () {
+    var days = parseInt($('#invoice_due_days').val(), 10);
+    if (isNaN(days) || days < 0) { days = 30; }
+    if (days > 365) { days = 365; }
+    var prefs = {
+        invoice_prefix: ($.trim($('#invoice_prefix').val()) || 'INV-').slice(0, 12),
+        invoice_due_days: days
+    };
+    var docs = { invoice_terms: $('#invoice_terms').val() || '' };
+    var $btn = $('#invoice_settings_save').prop('disabled', true);
+    var fail = function (xhr) {
+        $btn.prop('disabled', false);
+        var resp = {}; try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+        PosnicPro.alert('error', resp.message || 'Could not save invoice settings');
+    };
+    PosnicPro.put({ url: 'settings/group/preferences', data: JSON.stringify(prefs) }, function (r) {
+        if (r.type !== 'success') { $btn.prop('disabled', false); PosnicPro.alert(r.type, r.message); return; }
+        PosnicPro.put({ url: 'settings/group/documents', data: JSON.stringify(docs) }, function (r2) {
+            $btn.prop('disabled', false);
+            PosnicPro.alert(r2.type, r2.type === 'success' ? 'Invoice settings saved' : r2.message);
+            if (r2.type === 'success') { PosnicPro.local.set('invoice_terms', docs.invoice_terms); }
+        }, fail);
+    }, fail);
+});
+
+$(document).on('click', '#quote_settings_save', function () {
+    var signatureBranchId = PosnicPro.branchSignature.activeBranch();
+    var payload = {
+        quote_default_payment_method: $('#quote_default_payment_method').val() || '',
+        quote_default_bank_details: $('#quote_default_bank_details').val() || '',
+        quote_default_terms: $('#quote_default_terms').val() || '',
+        quote_default_signature: $('#quote_default_signature').val() || ''
+    };
+    $('#quote_settings_save').prop('disabled', true);
+    // four keys, all of them documents - so the documents endpoint
+    PosnicPro.put({ url: 'settings/group/documents', data: JSON.stringify(payload) }, function (r) {
+        $('#quote_settings_save').prop('disabled', false);
+        PosnicPro.alert(r.type, r.type === 'success' ? 'Quotation settings saved' : r.message);
+        if (r.type === 'success') {
+            PosnicPro.branchSignature.sync(signatureBranchId, payload.quote_default_signature);
+        }
+    }, function (xhr) {
+        $('#quote_settings_save').prop('disabled', false);
+        var resp = {}; try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+        PosnicPro.alert('error', resp.message || 'Could not save quotation settings');
+    });
+});
+
+/*
+ * Feature detail dialogs (FEATURE_PAGES_DESIGN): every Core feature opens
+ * like a marketplace listing - readable while OFF, toggle in the hero,
+ * screenshots and benefits when provided, and ALL of its settings adopted
+ * into one place. JS-built and body-appended: the only modal pattern that
+ * has never broken in this codebase.
+ */
+PosnicPro.settings.featureInfo = {
+    /*
+     * Copy written 2026-08-21 for the nine features whose dialog opened with
+     * nothing but the one-line card description.
+     *
+     * Every claim below was checked against the code that implements it rather
+     * than written from the feature's name. A listing that promises something
+     * the software does not do is worse than a listing with no detail at all -
+     * it is the shop owner who finds out, in front of a customer.
+     *
+     * NO `section` KEY on most of these, deliberately. It names the markup
+     * block whose controls the dialog ADOPTS, and only four exist: fc_quotes,
+     * fc_restaurant, fc_tillpin and fc_workforce. The first draft invented
+     * seven more from the feature names. The renderer guards with
+     * $(info.section).length so nothing would have broken - which is exactly
+     * what makes it worth catching: it would have sat there reading as wired.
+     */
+    staff_tips_enable: {
+        tagline: 'Record tips at clock-out and pay them out with wages.',
+        about: 'Cash tips are declared by the person who earned them when they clock out, stored against that shift, and carried into the labour and payroll figures - so they are paid rather than remembered.',
+        benefits: [
+            'Declared at clock-out, by the person who took them',
+            'Held against the shift, so who earned what is never in doubt',
+            'Flows into payroll rather than living on a piece of paper'
+        ],
+        how: [
+            'Turn it on - a tips box appears at clock-out',
+            'Staff enter what they took in cash; blank is fine',
+            'Review it per shift, and pay it with that period of wages'
+        ]
+    },
+    staff_roster_enable: {
+        tagline: 'Plan the week ahead; staff see the shifts they are on.',
+        about: 'A roster is next week decided this week. Plan a stretch for a person on a day, and the people you rostered can see their own shifts without asking.',
+        benefits: [
+            'Plan a week in one screen instead of a group message',
+            'Staff see their own shifts; managers see everyone',
+            'Viewing and planning are separate permissions'
+        ],
+        how: [
+            'Turn it on - Roster appears beside Shifts',
+            'Pick a person and a day, and set their stretch',
+            'They see it on their own account from then on'
+        ]
+    },
+    module_credit_enable: {
+        tagline: 'Sell on account now, settle later - with a limit that holds.',
+        about: 'Regulars who pay at month end can take goods today. Each customer carries a balance and an optional credit limit, and the limit is checked when the sale is made rather than discovered at the end of the month.',
+        benefits: [
+            'A per-customer limit, enforced at the moment of sale',
+            'Outstanding balances in one list',
+            'Reminders can go out by SMS or WhatsApp',
+            'Zero means unlimited, for the customers you trust completely'
+        ],
+        how: [
+            'Turn it on and set a default limit under Credit',
+            'Give a customer their own limit if it differs',
+            'Sell on account; the balance follows the customer',
+            'Settle it whenever they pay, in part or in full'
+        ]
+    },
+    module_marketing_enable: {
+        tagline: 'Loyalty points, coupons, cashback and campaigns in one place.',
+        about: 'Everything that brings a customer back a second time: points earned per sale, coupons with real rules, cashback into a wallet, and campaigns that decide who hears about what.',
+        benefits: [
+            'Points earn and redeem on the till, not on a card someone lost',
+            'Coupons with limits that are checked before they apply',
+            'Cashback waits in the wallet for the next visit',
+            'Category pricing for the customers who buy in volume'
+        ],
+        how: [
+            'Turn it on - Marketing appears in the menu',
+            'Set how points are earned and what they are worth',
+            'Create coupons or a campaign when you want one',
+            'It applies itself at the till from then on'
+        ]
+    },
+    module_messaging_enable: {
+        tagline: 'Send the receipt where the customer already reads - WhatsApp or SMS.',
+        about: 'A paper receipt is thrown away at the door. Messaging sends it to a phone instead, over WhatsApp when it is connected and SMS through your own gateway when it is not.',
+        benefits: [
+            'The receipt arrives somewhere they will still have it next month',
+            'Templates you write once, with the sale filled in',
+            'Your own SMS gateway - no per-message markup from us',
+            'Can be turned off per till, so a busy counter is not slowed'
+        ],
+        how: [
+            'Turn it on, then connect WhatsApp or fill in your SMS gateway',
+            'Write the template you want customers to receive',
+            'Send a test to your own phone before the first sale',
+            'It offers to send at the end of each sale'
+        ]
+    },
+    module_online_ordering_enable: {
+        tagline: 'A QR code on the table, or a link customers open on their phone.',
+        about: 'Your own storefront, served by your own till, at your own address. Customers read the menu and order from it; the order arrives in the list your staff already work from. Print a code for a table, or for a hotel room across the road that pays its own agreed price.',
+        benefits: [
+            'Your menu and your prices, with no commission to anybody',
+            'Open and close it on a schedule, or pause it in one tap on a busy night',
+            'Hold each order for approval, with an alarm so a waiting one is not missed'
+        ],
+        how: [
+            'Turn it on, then set a short store address under Channels',
+            'Print the code - one per table, or one for the window',
+            'Decide whether orders go straight to the kitchen or wait for a person'
+        ]
+    },
+    module_kiosk_enable: {
+        tagline: 'A self-service machine standing in your shop.',
+        about: 'A terminal a customer uses themselves, showing the same storefront as your online ordering with its own kitchen printer behind it. It signs in with the installation key rather than a staff password, so a machine on the counter never holds somebody login.',
+        benefits: [
+            'The machine signs in with its own key, never a staff password',
+            'Same menu and prices as everywhere else, kept in one place',
+            'Its own printer, so tickets go to the right kitchen'
+        ],
+        how: [
+            'Turn on Online Ordering first - the machine shows that storefront',
+            'Turn this on and choose the printer the machine should use',
+            'Stand the machine up and point it at your store address'
+        ]
+    },
+    module_captain_enable: {
+        tagline: 'Your staff taking orders at the table, on a phone.',
+        about: 'The captain app runs on a phone your waiters carry. They take the order at the table and it reaches the kitchen without anybody walking to the till, which is the walk that loses a table its starter.',
+        benefits: [
+            'The order reaches the kitchen from where the customer is sitting',
+            'No queue at the one till during a rush',
+            'Tables and covers recorded as the order is taken'
+        ],
+        how: [
+            'Turn it on and set up your tables under Restaurant',
+            'Install the app on the phones your staff carry',
+            'Point it at this shop and sign each waiter in'
+        ]
+    },
+    module_delivery_partners_enable: {
+        tagline: 'Swiggy, Zomato and the rest, with what each one keeps.',
+        about: 'Orders that arrive through somebody else app. Recording the commission is the point: a month that looks like ninety thousand through partners is sixty-seven and a half once their cut is out, and a shop planning on the first figure is planning on money it never had.',
+        benefits: [
+            'One row per partner, so a new aggregator is never a software update',
+            'The rate is stored on each order, so last month report cannot change',
+            'A report showing what you actually earned, not what was rung up'
+        ],
+        how: [
+            'Turn it on and add each partner with the rate you agreed',
+            'Keep taking their orders however you take them today',
+            'Read what you owe under Reports, Money, Commission owed'
+        ]
+    },
+    module_webshop_enable: {
+        tagline: 'An online shop of your own, sending its orders here.',
+        about: 'A webshop you run yourself - OpenCart, WooCommerce - handing its orders to this till so stock and takings stay in one place instead of two systems that disagree by Friday.',
+        benefits: [
+            'One stock figure, not one in the shop and another on the website',
+            'Web orders in the same list as everything else',
+            'Reports that count the website beside the counter'
+        ],
+        how: [
+            'Turn it on and add your shop under Channels',
+            'Connect it under Integrations, where the keys live',
+            'Check the first order lands before you announce it'
+        ]
+    },
+    module_cashbook_enable: {
+        tagline: 'Expenses and cash movements, beside the sales they sit next to.',
+        about: 'Money leaves the till as well as entering it. The cash book records what went out and why, so the cash position for the day is the truth rather than sales minus a guess.',
+        benefits: [
+            'Expenses recorded where the cash actually moved',
+            'The day accounts for money out, not only money in',
+            'Closing a register has something real to reconcile against'
+        ],
+        how: [
+            'Turn it on - Cash book appears in the menu',
+            'Record an expense when money leaves the drawer',
+            'It shows against the day, beside the sales'
+        ]
+    },
+    module_demo_data_enable: {
+        /* Its own settings: the trade chooser. Owner ask - "Demo data user
+           should able to change the industry and install the different data.
+           so keep dedicated page for that." */
+        offNote: 'Switching off asks for confirmation, then removes the sample records. Your own work - anything edited, sold or received - is always kept.',
+        tagline: 'Sample data you can remove, reset, or swap for another trade.',
+        about: 'Every new shop arrives with sample products so the till can be tried before there is any real stock in it. Once your own catalogue is in, switch this off: it asks first, then removes the samples - products, sales, quotes, customers and suppliers. Anything you edited into a real product or already sold is kept. The Reset button below installs a fresh set for the same trade, and the chooser swaps trades.',
+
+        benefits: [
+            'One switch clears the samples out of the whole till',
+            'Nothing is destroyed, so it is safe to try',
+            'A sample you have edited into a real product is never touched',
+            'Anything already sold keeps its place in your sales history'
+        ],
+        how: [
+            'Try the till with the samples that came with your shop',
+            'Add your own products when you are ready',
+            'Turn this off - the samples disappear and yours remain'
+        ]
+    },
+    module_recyclebin_enable: {
+        tagline: 'A deletion you can undo - records are kept, not destroyed.',
+        about: 'Deleting marks a record as deleted and hides it; it does not remove it. Anything deleted can be found and restored, which is what makes a delete button safe to hand to a cashier.',
+        benefits: [
+            'A wrong delete is a mistake, not a loss',
+            'Restore puts the record back where it was',
+            'Turning the feature off does not destroy what is already kept'
+        ],
+        how: [
+            'Turn it on - Recycle bin appears under settings',
+            'Delete as normal; the record moves there instead',
+            'Find it and restore it if it should not have gone'
+        ]
+    },
+    module_themes_enable: {
+        tagline: 'Change how the till looks, without changing how it works.',
+        about: 'A theme sets the colours and surfaces of the whole app from one place. Colour still carries meaning - red destroys, green succeeded, the accent is the main action - so a theme changes the palette, never what a colour means.',
+        benefits: [
+            'One place for the look of every screen',
+            'Light and dark, chosen per person',
+            'Meaning is preserved: a theme cannot make red mean "saved"'
+        ],
+        how: [
+            'Turn it on - Themes appears under settings',
+            'Pick one; it applies immediately, everywhere',
+            'Anyone can change it back without help'
+        ]
+    },
+    quotes_enable: {
+        tagline: 'Price an offer today, convert it to a sale when the customer says yes.',
+        about: 'A quotation is a price promise with a validity date. Build it from your catalog or free lines, discount per line or per quote, add charges in any name, and share it as a professional A4 PDF.',
+        benefits: [
+            'Professional A4 document with your logo, GSTIN and signature',
+            'Share by PDF, print, email, WhatsApp or a copy-paste link',
+            'Accepted quotes freeze their numbers - the promise is kept',
+            'Convert loads the sale at the QUOTED prices, discounts visible'
+        ],
+        how: [
+            'Turn the feature on - Quotes appears in the home menu',
+            'New quotation: pick a customer, add lines, set validity',
+            'Share it; mark Accepted when the customer says yes',
+            'Convert to sale - the receipt total matches the quote'
+        ],
+    },
+    invoices_enable: {
+        tagline: 'Bill a customer now, get paid later - and see who still owes you.',
+        about: 'An invoice is the bill you hand a customer who pays after delivery: lines from your catalog or free text, discounts, charges in any name, a due date, and a professional A4 PDF to share. A draft is a proforma; issuing it books the sale for you - stock, tax and the books - and recording a payment, in full or in part, keeps the customer balance right.',
+        benefits: [
+            'Quote becomes invoice becomes sale - the numbers agree end to end',
+            'Issue books the sale itself - no till screen in between',
+            'Overdue at a glance: what is owed, and how much of it is late',
+            'Share by PDF, print, email, WhatsApp or a copy-paste link'
+        ],
+        how: [
+            'Turn the feature on - Invoices appears in the home menu',
+            'New invoice, or Create invoice from an accepted quote',
+            'Issue it when the goods go out - the sale is booked for you',
+            'Record payments as the money lands - full or part, with a reference'
+        ],
+    },
+    staff_shifts_enable: {
+        tagline: 'Staff clock in and out from the header clock; labour report and payroll exports.',
+        about: 'Workforce turns the till into the timesheet: clock in/out, shift history, labour costing and payroll exports - with tips and rosters as optional pieces below.',
+        benefits: [
+            'One tap clock in/out right on the till header',
+            'Labour report shows who worked when, and what it cost',
+            'Payroll exports ready for your accountant',
+            'Tips at clock-out and rosters when you want them'
+        ],
+        how: [
+            'Turn it on and the clock appears in the header',
+            'Staff tap to clock in and out through their day',
+            'Review hours in the Labour report under Reports'
+        ]
+    },
+    table_options: {
+        tagline: 'Dine-in orders by table, KOTs to the kitchen.',
+        about: 'Restaurant mode adds tables, dine-in order flow and kitchen order tickets. Manage your table list right here.',
+        benefits: [
+            'Orders held per table until the bill is asked for',
+            'KOTs reach the kitchen as they are fired',
+            'Table list managed from this dialog'
+        ],
+        how: [
+            'Turn it on, then add your tables below',
+            'On a sale, pick dine-in and the table number',
+            'Fire KOTs; settle the table when the meal ends'
+        ],
+    },
+    custom_charges_enable: {
+        tagline: 'Parcel, service or delivery charges added on a sale.',
+        about: 'Named amounts that join the bill after the item math - never fake line items. Sales that already carry charges stay editable even when this is off, and charges arriving from a quotation always work.',
+        benefits: [
+            'Any name: parcel, service, delivery, installation',
+            'Joins the payable after discounts - honest totals',
+            'Quote-borne charges work regardless of this switch'
+        ],
+        how: [
+            'Turn it on; “+ Add charge” appears beside the Payment Note',
+            'Name it, amount it - it lists right there, removable',
+            'The Pay Total carries it; the sale stores it'
+        ]
+    },
+    quick_sale_enable: {
+        tagline: 'Type an amount, take payment - the busy-counter pad on the sale screen.',
+        about: 'For the queue that cannot wait for item search: an amount (and optional name) becomes a sale line instantly.',
+        benefits: [
+            'Fastest possible line for rush hours',
+            'Optional name keeps the receipt honest',
+            'Default tax applied the way your shop configures it'
+        ],
+        how: [
+            'On the sale screen, type an amount in the item search',
+            'Pick the quick-sale suggestion; add to sale',
+            'Tender as usual'
+        ]
+    },
+    cash_register_enable: {
+        tagline: 'Till sessions, floats and register reports.',
+        about: 'Registers add the open-count-close ceremony: a float to start, a session per till, and a register report to reconcile. Off: sales work without any register ceremony.',
+        benefits: [
+            'Every rupee in the drawer accounted per session',
+            'Register report reconciles float, sales and payouts',
+            'Resume your own session across devices'
+        ],
+        how: [
+            'Turn it on; login asks which register to open',
+            'Count the float, trade the day',
+            'Close with a count - the report shows the difference'
+        ]
+    },
+    module_tax_enable: {
+        tagline: 'Tax Rates and Tax Groups. Off hides both sections; saved taxes keep.',
+        about: 'Configure the taxes your items carry. Items bring their own tax to sales and quotations; documents show tax the moment any line carries it - even if you later switch this off.',
+        benefits: [
+            'Per-item rates - GST style, every line its own tax',
+            'Inclusive or added-on-top, per item',
+            'Recorded tax always shows, whatever the toggle says'
+        ],
+        how: [
+            'Turn it on; set Tax Rates under Core Settings',
+            'Assign a tax on each item (or via HSN suggestion)',
+            'Sales and quotes carry it automatically'
+        ]
+    },
+    till_lock_enable: {
+        tagline: 'Staff unlock with a 4-digit PIN instead of a password.',
+        about: 'The till locks to a PIN pad - fast for staff, safe for the counter. Choose an idle timeout below.',
+        benefits: [
+            'One tap lock, 4-digit unlock',
+            'Idle auto-lock keeps an unattended till safe'
+        ],
+        how: [
+            'Turn it on; staff set their PINs',
+            'Pick when the till should lock by itself'
+        ]
+    }
+};
+
+PosnicPro.settings._fpCard = null;
+PosnicPro.settings._fpSection = null;
+/*
+ * The feature PAGE (owner's final shape): each feature opens its OWN
+ * dedicated page - hero with the toggle, the help documentation, and only
+ * THAT feature's settings, adopted from the hidden store and returned on
+ * leave. No popup, no aggregate page, no extra menu entry.
+ */
+/*
+ * A screenshot that is not there yet removes itself, and takes the empty strip
+ * with it. Without the second half, a feature with no images keeps a 14px gap
+ * and a scroll container holding nothing.
+ */
+PosnicPro.settings._shotMissing = function (img) {
+    var $strip = $(img).closest('.fd-shots');
+    $(img).remove();
+    if (!$strip.find('img').length) { $strip.remove(); }
+};
+
+/*
+ * One loaded screenshot asks for the next. This is what keeps the cost at one
+ * failed request for a feature with no images instead of one per slot guessed.
+ *
+ * Capped, because the chain is driven by the server answering 200: a directory
+ * that somehow served every name would ask forever. Ten is far more than any
+ * feature page should show.
+ */
+PosnicPro.settings.MAX_SHOTS = 10;
+PosnicPro.settings._shotNext = function (img) {
+    var $img = $(img);
+    var $strip = $img.closest('.fd-shots');
+    var key = $strip.attr('data-shot-key');
+    var n = Number($img.attr('data-shot-n') || 0);
+    if (!/^[a-z0-9_-]+$/i.test(key || '') || !n || n >= PosnicPro.settings.MAX_SHOTS) { return; }
+    if ($strip.find('[data-shot-n="' + (n + 1) + '"]').length) { return; }
+    $('<img>')
+        .attr('src', 'static/images/features/' + key + '-' + (n + 1) + '.png')
+        .attr('alt', '')
+        .attr('data-shot-n', n + 1)
+        .attr('onload', 'PosnicPro.settings._shotNext(this);')
+        .attr('onerror', 'PosnicPro.settings._shotMissing(this);')
+        .appendTo($strip);
+};
+
+PosnicPro.settings.openFeaturePage = function ($card) {
+    var $main = $card.find('.module-card-head input.custom-control-input').first();
+    var key = $main.attr('id') || '';
+    var info = PosnicPro.settings.featureInfo[key] || {};
+    var title = $.trim($card.find('.module-title').text());
+    var desc = $.trim($card.find('.module-desc').text());
+
+    PosnicPro.settings._fpCard = $card;
+    $('#fp_icon').html($card.find('.module-ico').html() || '');
+    $('#fp_title').text(title);
+    $('#fp_tagline').text(info.tagline || desc);
+    var on = $main.is(':checked');
+    $('#fp_master').prop('checked', on);
+    $('#fp_state').text(on ? PosnicPro.i18n.t('lang_on', 'On') : PosnicPro.i18n.t('lang_off', 'Off'))
+        .toggleClass('badge-success', on)
+        .toggleClass('badge-light', !on);
+
+    var esc = function (v) { return $('<i>').text(v == null ? '' : v).html(); };
+    var infoHtml = '';
+    /*
+     * Screenshots by CONVENTION, so adding one is dropping a file.
+     *
+     * The owner has to take these - they are pictures of his running shop and
+     * nobody else can. Everything AROUND that is built here so his one action
+     * is the only thing left: drop
+     *
+     *     static/images/features/<feature_key>-1.png   (-2, -3 ... for more)
+     *
+     * and it appears. No JS edit, no list to maintain, no deploy for a picture.
+     * An explicit `shots` array still wins, for anything that does not fit.
+     *
+     * PROBED ONE AT A TIME, not three at once. Rendering -1, -2 and -3
+     * speculatively costs three 404s every time a dialog opens for a feature
+     * with no images - which is every feature today, seventeen of them. Asking
+     * for the next only after the current one LOADS means a feature with no
+     * screenshot costs exactly one failed request, and a feature with five
+     * costs five successes and one failure. The chain extends itself.
+     *
+     * A missing file removes its own tag, and the strip removes itself once
+     * empty, so nothing shows a row of broken-image icons.
+     *
+     * The CSS fixes the frame at aspect-ratio 8/5, which is why the ask is for
+     * 8:5 images - anything else is cropped to fit, not letterboxed.
+     */
+    var shots = info.shots || [];
+    if (shots.length) {
+        infoHtml += '<div class="fd-shots">' + shots.map(function (src) {
+            return '<img src="' + src + '" alt="" loading="lazy"'
+                + ' onerror="PosnicPro.settings._shotMissing(this);">';
+        }).join('') + '</div>';
+    } else if (key) {
+        infoHtml += '<div class="fd-shots" data-shot-key="' + esc(key) + '">'
+            + '<img loading="lazy" decoding="async" src="static/images/features/' + esc(key) + '-1.png" alt="" data-shot-n="1"'
+            + ' onload="PosnicPro.settings._shotNext(this);"'
+            + ' onerror="PosnicPro.settings._shotMissing(this);">'
+            + '</div>';
+    }
+    infoHtml += '<div class="q-label"><lang class="lang_about">About</lang></div><p class="fd-text">' + esc(info.about || desc) + '</p>';
+    if ((info.benefits || []).length) {
+        infoHtml += '<div class="q-label"><lang class="lang_why_use_it">Why use it</lang></div><ul class="fd-list">'
+            + info.benefits.map(function (b) { return '<li>' + esc(b) + '</li>'; }).join('') + '</ul>';
+    }
+    if ((info.how || []).length) {
+        infoHtml += '<div class="q-label"><lang class="lang_how_it_works">How it works</lang></div><ol class="fd-list">'
+            + info.how.map(function (h) { return '<li>' + esc(h) + '</li>'; }).join('') + '</ol>';
+    }
+    /*
+     * ONE SYSTEM, the owner's rule: "if user clicks on the feature box then
+     * show only details or guide for the features... every feature should
+     * have its own left side." So this page is TEXT - what the feature is,
+     * why, how - plus one link to the feature's own entry in the Manage
+     * sidebar. The old version adopted each feature's config form INTO this
+     * page, which made Demo Data configure one way and Tax another; with
+     * hundreds of features coming, two doors is one too many.
+     */
+    var home = PosnicPro.settings.FEATURE_HOME[key];
+    if (home) {
+        infoHtml += '<div class="q-label"><lang class="lang_fp_configure">Configure</lang></div>'
+            + '<p class="fd-text"><a class="fp-configure-link" href="#/settings/' + esc(home[0]) + '">'
+            + 'Manage &rarr; ' + esc(home[1]) + '</a></p>';
+    }
+    /* The generic line is TRUE for every feature except Demo Data, whose off
+       is now a consented deletion - a footer promising "never deletes" under
+       a switch that deletes is exactly the kind of lie a new user remembers. */
+    infoHtml += '<p class="text-muted mt-3 mb-0" style="font-size:13px;">'
+        + esc(info.offNote || 'Switching off never deletes anything - switch back on and everything returns.')
+        + '</p>';
+    $('#fp_info').html(infoHtml);
+
+    // show the page pane, keep the Features nav highlighted
+    $('#v-pills-modules').removeClass('show active');
+    $('#v-pills-featureconf').addClass('show active');
+};
+/*
+ * Where each feature's configuration LIVES - its Manage sidebar entry.
+ * [route key, label]. A feature added here gets its Configure link on the
+ * guide page; a feature with no entry simply shows no link.
+ */
+PosnicPro.settings.FEATURE_HOME = {
+    module_tax_enable: ['taxmodule', 'Tax'],
+    table_options: ['tableorder', 'Restaurant'],
+    cash_register_enable: ['cashregister', 'Cash Register'],
+    staff_shifts_enable: ['workforce', 'Workforce'],
+    staff_tips_enable: ['workforce', 'Workforce'],
+    staff_roster_enable: ['workforce', 'Workforce'],
+    module_cashbook_enable: ['cashbook', 'Cash Book'],
+    module_credit_enable: ['credit', 'Customer Credit'],
+    module_marketing_enable: ['marketingmodule', 'Marketing'],
+    module_messaging_enable: ['messagingmodule', 'Messaging'],
+    /* Each channel's card opens that channel's own page. */
+    module_online_ordering_enable: ['onlineordering', 'Online Ordering'],
+    module_kiosk_enable: ['kioskmachine', 'Kiosk Machine'],
+    module_captain_enable: ['captainapp', 'Captain App'],
+    module_mobile_pos_enable: ['mobilepos', 'Mobile POS'],
+    module_delivery_partners_enable: ['deliverypartners', 'Delivery Partners'],
+    module_webshop_enable: ['webshop', 'Webshop'],
+    module_themes_enable: ['theme', 'Themes'],
+    module_recyclebin_enable: ['recyclebin', 'Recycle Bin'],
+    module_demo_data_enable: ['demodata', 'Demo Data'],
+    quotes_enable: ['quotes', 'Quotes'],
+    invoices_enable: ['invoices', 'Invoices'],
+    till_lock_enable: ['tillpin', 'Till PIN Lock'],
+};
+/* The Configure link leaves the guide the same way Back does; the hash
+   route opens the feature's own section. */
+$(document).on('click', '.fp-configure-link', function () {
+    PosnicPro.settings.closeFeaturePage();
+});
+PosnicPro.settings.closeFeaturePage = function () {
+    PosnicPro.settings._fpCard = null;
+    $('#v-pills-featureconf').removeClass('show active');
+    $('#v-pills-modules').addClass('show active');
+};
+$(document).on('click', '#fp_back', function () {
+    PosnicPro.settings.closeFeaturePage();
+});
+$(document).on('change', '#fp_master', function () {
+    var $c = PosnicPro.settings._fpCard;
+    if (!$c) { return; }
+    var on = $(this).is(':checked');
+    $c.find('.module-card-head input.custom-control-input').first()
+        .prop('checked', on).trigger('change');
+    $('#fp_state').text(on ? PosnicPro.i18n.t('lang_on', 'On') : PosnicPro.i18n.t('lang_off', 'Off'))
+        .toggleClass('badge-success', on)
+        .toggleClass('badge-light', !on);
+});
+// the whole card is the door to the feature's page
+$(document).on('click', '#v-pills-modules .module-card', function (e) {
+    if ($(e.target).closest('input, select, textarea, label, a, button, .custom-control').length) { return; }
+    PosnicPro.settings.openFeaturePage($(this));
+});
+
+/*
+ * Putting the sample data back, with something to watch while it happens.
+ *
+ * Owner ask: "when demo data enabled again. we can do insert data by progress
+ * bar."
+ *
+ * Switching Demo Data off only hides, so turning it back on is usually
+ * instant - the rows never went anywhere. This is for the shop that removed
+ * the samples for good: without it, the switch appears to do nothing, because
+ * there is nothing left to unhide.
+ *
+ * THE BAR IS HONEST ABOUT WHAT IT KNOWS. The server does the work in one
+ * request and cannot report a percentage, so this does not invent one: it
+ * eases towards nine tenths while waiting and only completes when the answer
+ * arrives. A bar that marches confidently to 100% and then sits there is worse
+ * than no bar, because it says the work is done when it is not.
+ */
+PosnicPro.settings.demoProgress = {
+    _timer: null,
+    _pct: 0,
+    _inlineTarget: '',
+
+    /*
+     * `title` because this bar now serves two jobs: putting the samples back
+     * (Demo Data switched on) and swapping one trade's samples for another.
+     * "Adding the sample data" while rows are being REMOVED is a bar that
+     * describes work other than the work being done.
+     */
+    open: function (title, options) {
+        var self = PosnicPro.settings.demoProgress;
+        options = options || {};
+        self._inlineTarget = options.inlineTarget || '';
+        if (self._inlineTarget && $(self._inlineTarget).length) {
+            $(self._inlineTarget).prop('hidden', false).removeAttr('hidden');
+            $('#feature_intro_demo_bg_title').text(options.title || title || 'Adding sample data');
+            self._pct = 0;
+            self._set(4, 'Getting ready...');
+        } else {
+            self._inlineTarget = '';
+        }
+        if (!$('#demo_progress_modal').length) {
+            $('body').append(
+                '<div class="modal fade" id="demo_progress_modal" tabindex="-1" role="dialog"' +
+                ' data-backdrop="static" data-keyboard="false">' +
+                '  <div class="modal-dialog modal-dialog-centered modal-sm" role="document">' +
+                '    <div class="modal-content">' +
+                '      <div class="modal-body text-center" style="padding:26px 22px;">' +
+                '        <h5 id="demo_progress_title" style="margin:0 0 6px;font-size:16px;"><lang class="lang_adding_the_sample_data">Adding the sample data</lang></h5>' +
+                '        <p id="demo_progress_step" class="text-muted"' +
+                '           style="font-size:13px;margin:0 0 14px;">Getting ready…</p>' +
+                '        <div class="demo-progress-track"><div id="demo_progress_bar"' +
+                '             class="demo-progress-bar"></div></div>' +
+                '      </div>' +
+                '    </div>' +
+                '  </div>');
+        }
+        self._pct = 0;
+        $('#demo_progress_title').text(title || 'Adding the sample data');
+        self._set(4, 'Getting ready…');
+        if (!self._inlineTarget) { $('#demo_progress_modal').modal('show'); }
+
+        /*
+         * Named steps rather than a silent crawl. The shop is watching a bar
+         * for a few seconds and "Adding products" tells them what they are
+         * getting; a bar on its own tells them only to wait.
+         */
+        var steps = [
+            [12, 'Adding categories…'],
+            [30, 'Adding products…'],
+            [55, 'Adding photographs…'],
+            [66, 'Adding sample sales…'],
+            [76, 'Adding sample purchases…'],
+            [85, 'Adding sample quotes…'],
+        ];
+        var i = 0;
+        self._scripted = true;
+        self._timer = window.setInterval(function () {
+            /* The caller has started naming stages itself, so this script has
+               stopped being a guess and started being a contradiction - two
+               different sentences about the same moment. */
+            if (self._scripted && i < steps.length) {
+                self._set(steps[i][0], steps[i][1]);
+                i++;
+                return;
+            }
+            /* Past the named steps it creeps, and never reaches the end on its
+               own - the end belongs to the server's answer. */
+            self._set(Math.min(90, self._pct + 1), null);
+        }, 600);
+    },
+
+    /*
+     * A step the CALLER names, for work whose stages it knows and this object
+     * does not. The timed script below is a guess at how a single server
+     * request is progressing; a swap is two requests, and which one is running
+     * is a fact rather than an estimate.
+     */
+    step: function (label) {
+        var self = PosnicPro.settings.demoProgress;
+        self._scripted = false;
+        self._set(Math.max(self._pct, 6), label);
+    },
+
+    _set: function (pct, label) {
+        PosnicPro.settings.demoProgress._pct = pct;
+        var inlineTarget = PosnicPro.settings.demoProgress._inlineTarget;
+        if (inlineTarget) {
+            $(inlineTarget).find('.demo-progress-bar').css('width', pct + '%');
+            if (label) { $('#feature_intro_demo_bg_step').text(label.replace(/…/g, '...')); }
+            return;
+        }
+        $('#demo_progress_bar').css('width', pct + '%');
+        if (label) { $('#demo_progress_step').text(label); }
+    },
+
+    close: function (message, ok) {
+        var self = PosnicPro.settings.demoProgress;
+        if (self._timer) { window.clearInterval(self._timer); self._timer = null; }
+        if (self._inlineTarget) {
+            var target = self._inlineTarget;
+            self._set(100, ok ? 'Sample data ready.' : (message || 'Sample data could not be added.'));
+            self._inlineTarget = '';
+            if (message && !ok) { PosnicPro.alert('error', message); }
+            if (ok) {
+                window.setTimeout(function () {
+                    $(target).prop('hidden', true).attr('hidden', 'hidden');
+                }, 2600);
+            }
+            return;
+        }
+        self._set(100, ok ? PosnicPro.i18n.t('lang_done', 'Done') : PosnicPro.i18n.t('lang_stopped', 'Stopped'));
+        /* A beat at 100% so the bar is seen to finish rather than vanishing
+           mid-way, which reads as a crash. */
+        window.setTimeout(function () {
+            $('#demo_progress_modal').modal('hide');
+            if (message) { PosnicPro.alert(ok ? 'success' : 'error', message); }
+        }, 450);
+    }
+};
+
+/*
+ * ============================================================
+ * THE DEMO DATA PAGE: changing trade
+ *
+ * Owner: "Demo data user should able to change the industry and install the
+ * different data. so keep dedicated page for that."
+ *
+ * A shop signs up in thirty seconds and picks its trade from a short list, or
+ * does not pick one at all - in which case it is given the supermarket set.
+ * A bakery then opens its till and finds twenty-four grocery lines. That is
+ * the first thing they see of the product, and there was no way to change it
+ * short of deleting the samples one at a time.
+ *
+ * SWAPPING IS DELETE-THEN-SEED, IN THAT ORDER, AND THE DELETE IS THE CAREFUL
+ * HALF. The purge already refuses anything sold, received or edited and names
+ * what it kept - a sample somebody turned into a real product is their work,
+ * and a sample that has been sold is referenced by a real transaction. So a
+ * swap can legitimately leave rows behind, and saying which ones is the whole
+ * difference between "we kept your work" and "it did not do what I asked".
+ *
+ * The seed is only attempted if the purge got far enough for it to succeed -
+ * the server refuses to seed on top of existing samples, so running them
+ * blindly in sequence would report a failure that is really the guard doing
+ * its job.
+ * ============================================================
+ */
+PosnicPro.settings.demoPacks = {
+    _packs: [],
+    _current: null,
+    _loaded: false,
+
+    /*
+     * Remove the samples, from the page somebody is already on.
+     *
+     * One implementation, in the shell: this is offered from three places now
+     * - here, the line every page carries, and the dashboard card - and three
+     * copies of a deletion is three things to keep in step.
+     */
+    removeAll: function () {
+        PosnicPro.demoSamples.remove();
+    },
+
+    load: function () {
+        var self = PosnicPro.settings.demoPacks;
+        if (self._loaded) { self.paint(); return; }
+        PosnicPro.get({ url: 'items/demo/packs', data: {} }, function (response) {
+            var d = (response && response.data) || {};
+            self._packs = d.packs || [];
+            self._current = d.current || null;
+            self._loaded = true;
+            self.paint();
+        }, function () {
+            /* Said out loud rather than left on "Loading…" forever, which
+               reads as a screen that is still working. */
+            $('#demo_pack_choice').html('<option value="" data-t="lang_could_not_load_the_list">Could not load the list</option>');
+            $('#demo_pack_install').prop('disabled', true);
+        });
+    },
+
+    paint: function () {
+        var self = PosnicPro.settings.demoPacks;
+        var $sel = $('#demo_pack_choice');
+        if (!$sel.length) { return; }
+        var esc = function (v) { return $('<i>').text(v == null ? '' : v).html(); };
+
+        $sel.html(self._packs.map(function (p) {
+            return '<option value="' + esc(p.key) + '"'
+                + (p.key === self._current ? ' selected' : '') + '>'
+                + esc(p.label) + '</option>';
+        }).join(''));
+
+        /* Nothing selected means this shop has no samples at all - either it
+           never had them or it removed them. Then any pack is an install
+           rather than a swap, and the button should not sit disabled. */
+        if (!self._current && self._packs.length) { $sel.val(self._packs[0].key); }
+        self.describe();
+        $('#demo_pack_install').prop('disabled', !self._packs.length);
+        /* Reset needs something to reset: a shop with no samples installed
+           has nothing to refresh, and the install button is its answer. */
+        $('#demo_pack_reset').prop('disabled', !self._current);
+    },
+
+    /*
+     * Fresh samples, same trade.
+     *
+     * Owner: "inside have reset button to have fresh data again withing same
+     * industry." A shop that has sold and edited its way through the demo
+     * wants the showroom state back without hunting the chooser: this is the
+     * existing delete-then-seed run pointed at the trade already installed -
+     * so it inherits every protection that flow has (sold, received and
+     * edited records refused and named; seed only after the purge).
+     */
+    reset: function () {
+        var self = PosnicPro.settings.demoPacks;
+        var key = self._current || $('#demo_pack_choice').val();
+        if (!key) { return; }
+        swal({
+            title: PosnicPro.i18n.t('lang_reset_the_sample_data', 'Reset the sample data?'),
+            text: 'The current samples are removed and a fresh set for the same trade is installed. Anything you have edited, sold or received yourself is kept.',
+            showCancelButton: true,
+            confirmButtonClass: 'btn btn-primary',
+            cancelButtonClass: 'btn btn-danger m-l-10',
+            confirmButtonText: 'Reset the samples',
+            cancelButtonText: 'Cancel'
+        }).then(function () { self._run(key); }, function () { });
+    },
+
+    describe: function () {
+        var self = PosnicPro.settings.demoPacks;
+        var key = $('#demo_pack_choice').val();
+        var pack = null;
+        self._packs.forEach(function (p) { if (p.key === key) { pack = p; } });
+        if (!pack) { $('#demo_pack_summary').text(''); return; }
+        /* Counted by the server from the catalogue itself, so this cannot say
+           24 products while 23 arrive. */
+        /* Website datasets are probed, not parsed - their counts arrive as
+           null and the sentence must not read "null products". */
+        var line = pack.dataset
+            ? 'Full catalogue with photographs, priced for your currency'
+            : pack.products + ' products in ' + pack.categories + ' categories'
+              + (pack.photos ? ', ' + pack.photos + ' with photographs' : '');
+        $('#demo_pack_summary').text(
+            key === self._current ? line + ' (this is what you have now)' : line
+        );
+        $('#demo_pack_install').text(
+            key === self._current ? 'Reinstall these samples' : 'Install this trade\'s samples'
+        );
+    },
+
+    install: function () {
+        var self = PosnicPro.settings.demoPacks;
+        var key = $('#demo_pack_choice').val();
+        if (!key) { return; }
+        var label = $('#demo_pack_choice option:selected').text();
+
+        /*
+         * Asked first, because this removes rows. Not a scary dialog - the
+         * purge protects everything that matters - but a shop should never
+         * find its samples changed by a button it pressed to read the label.
+         */
+        swal({
+            title: PosnicPro.i18n.t('lang_replace_the_sample_data_with', 'Replace the sample data with ') + label + '?',
+            text: 'Your own products are not touched. Samples you have edited, sold or received are kept.',
+            showCancelButton: true,
+            confirmButtonClass: 'btn btn-primary',
+            cancelButtonClass: 'btn btn-danger m-l-10',
+            confirmButtonText: 'Yes, install them',
+            cancelButtonText: 'Cancel'
+            /* The second handler is not optional. This is SweetAlert v6, where
+               Cancel REJECTS the promise - without it, pressing Cancel throws
+               an unhandled rejection into the console on a screen that looks
+               like nothing happened. */
+        }).then(function () { self._run(key); }, function () { });
+    },
+
+    _run: function (key) {
+        var self = PosnicPro.settings.demoPacks;
+        $('#demo_pack_install').prop('disabled', true);
+        PosnicPro.settings.demoProgress.open('Changing the sample data');
+        PosnicPro.settings.demoProgress.step('Removing the old samples…');
+
+        PosnicPro.delete({ url: 'items/demo', data: JSON.stringify({}) }, function () {
+            self._seed(key);
+        }, function (xhr) {
+            var resp = {};
+            try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+            /*
+             * "Nothing to remove" is not a failure - it is the ordinary state
+             * of a shop that already cleared its samples, and the install it
+             * asked for can go ahead.
+             */
+            if (/nothing|no sample|not found/i.test(resp.message || '')) {
+                self._seed(key);
+                return;
+            }
+            PosnicPro.settings.demoProgress.close(
+                resp.message || 'Could not remove the old sample data', false);
+            $('#demo_pack_install').prop('disabled', false);
+        });
+    },
+
+    _seed: function (key) {
+        var self = PosnicPro.settings.demoPacks;
+        PosnicPro.settings.demoProgress.step('Adding the new samples…');
+        PosnicPro.post({
+            url: 'items/demo',
+            data: JSON.stringify({ businessType: key })
+        }, function (response) {
+            self._current = key;
+            /* The switch has to agree with what is now on screen: installing
+               samples while Demo Data is off would hide them the moment the
+               bar closes, which looks exactly like the install failing. */
+            if (!$('#module_demo_data_enable').is(':checked')) {
+                $('#module_demo_data_enable').prop('checked', true).trigger('change');
+                $('#fp_master').prop('checked', true);
+            }
+            PosnicPro.settings.demoProgress.close(response.message, response.type === 'success');
+            self.describe();
+            $('#demo_pack_install').prop('disabled', false);
+            /* The item list and the sale grid are both showing the old trade. */
+            if (PosnicPro.items && PosnicPro.items.itemsTable) { PosnicPro.items.itemsTable(); }
+        }, function (xhr) {
+            var resp = {};
+            try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+            PosnicPro.settings.demoProgress.close(
+                resp.message || 'Could not add the new sample data', false);
+            $('#demo_pack_install').prop('disabled', false);
+        });
+    }
+};
+$(document).on('change', '#demo_pack_choice', function () {
+    PosnicPro.settings.demoPacks.describe();
+});
+$(document).on('click', '#demo_pack_install', function () {
+    PosnicPro.settings.demoPacks.install();
+});
+$(document).on('click', '#demo_remove_all', function () {
+    PosnicPro.settings.demoPacks.removeAll();
+});
+$(document).on('click', '#demo_pack_reset', function () {
+    PosnicPro.settings.demoPacks.reset();
+});
+
+/*
+ * The consent that makes switching Demo Data OFF a deletion.
+ *
+ * Owner: "when demo data switched off, existing data needs to deleted with
+ * confirmation. just ask user concent... existing sales, items, purchase and
+ * etc created for demo purpose will be removed. make sure that."
+ *
+ * Asked at the MOMENT of unchecking, not at save: by save time the switch is
+ * one of a dozen and the question would read as noise about all of them.
+ * Cancel puts the switch back exactly as it was - a question dismissed must
+ * leave no trace. Confirm arms the deletion, and the deletion itself only
+ * runs AFTER the save succeeds: a failed save must never delete data whose
+ * switch is, as far as the server knows, still on.
+ *
+ * The removal is the server's careful purge, unchanged: anything sold,
+ * received or edited by the shop is refused and reported by name - a sample
+ * somebody turned into a real product is their work, and a sold sample is
+ * referenced by a real transaction. Whatever survives stays hidden by the
+ * read filter while the switch is off, so refusal never means reappearing.
+ */
+/*
+ * Quotes and Invoices are two halves of one job.
+ *
+ * A shop that prices work before doing it also bills for it afterwards: the
+ * quote is the promise, the invoice is the claim, and the same customer sees
+ * both. Somebody who finds one switch has usually not thought about the other,
+ * and discovers it months later - or never.
+ *
+ * So turning one on offers the other. Three rules keep an offer from becoming
+ * nagging:
+ *
+ *   only on the way ON. Switching Invoices off says nothing about Quotes.
+ *   only when the partner is OFF. Otherwise there is nothing to offer.
+ *   only once per visit, per pair. "No" is an answer, and asking a second
+ *     time tells somebody their answer was not heard.
+ *
+ * Nothing is written here. The switch is feedback; Save is what saves - which
+ * is the rule every other card on this page already follows.
+ */
+PosnicPro.settings._partners = {
+    quotes_enable: {
+        other: 'invoices_enable',
+        title: 'Turn on Invoices as well?', titleKey: 'lang_turn_on_invoices_as_well',
+        text: 'Quotes price the work before you do it; invoices bill for it afterwards, '
+            + 'and show you who still owes. Shops that use one usually want both.',
+        yes: 'Turn on Invoices',
+    },
+    invoices_enable: {
+        other: 'quotes_enable',
+        title: 'Turn on Quotes as well?', titleKey: 'lang_turn_on_quotes_as_well',
+        text: 'Invoices bill for work you have done; quotes price it beforehand, so the '
+            + 'customer agrees before you start. Shops that use one usually want both.',
+        yes: 'Turn on Quotes',
+    },
+};
+PosnicPro.settings._partnerAsked = {};
+
+PosnicPro.settings.suggestPartner = function (checkbox) {
+    var pair = PosnicPro.settings._partners[checkbox && checkbox.id];
+    if (!pair || !checkbox.checked) return;
+    if (PosnicPro.settings._partnerAsked[checkbox.id]) return;
+
+    var $other = $('#' + pair.other);
+    if (!$other.length || $other.is(':checked')) return;
+
+    PosnicPro.settings._partnerAsked[checkbox.id] = true;
+    swal({
+        title: pair.titleKey ? PosnicPro.i18n.t(pair.titleKey, pair.title) : pair.title,
+        text: pair.text,
+        showCancelButton: true,
+        confirmButtonClass: 'btn btn-primary',
+        cancelButtonClass: 'btn btn-light m-l-10',
+        confirmButtonText: pair.yes,
+        cancelButtonText: 'Not now'
+        /* SweetAlert v6 REJECTS on cancel. Without the second handler, saying
+           "Not now" is an unhandled rejection on a screen where the person
+           did nothing wrong. */
+    }).then(function () {
+        $other.prop('checked', true).trigger('change');
+    }, function () {
+        /* Declined. The flag above means we do not ask again this visit. */
+    });
+};
+
+PosnicPro.settings.confirmDemoOff = function (checkbox, alsoRevert) {
+    swal({
+        title: PosnicPro.i18n.t('lang_switch_off_demo_data_and_remove_the_sample', 'Switch off Demo Data and remove the samples?'),
+        text: 'The sample records created for the demo - products, sales, purchases, quotes, customers and suppliers - will be removed. '
+            + 'Nothing you created yourself is removed: your own products, sales and purchases stay, and any sample you have edited, sold or received is kept.',
+        showCancelButton: true,
+        confirmButtonClass: 'btn btn-danger',
+        cancelButtonClass: 'btn btn-light m-l-10',
+        confirmButtonText: 'Switch off and remove',
+        cancelButtonText: 'Keep the samples'
+        /* SweetAlert v6: Cancel REJECTS - without the second handler it is an
+           unhandled rejection on a screen where nothing happened. */
+    }).then(function () {
+        PosnicPro.settings._demoPurgeArmed = true;
+    }, function () {
+        $(checkbox).prop('checked', true);
+        (alsoRevert || []).forEach(function (sel) { $(sel).prop('checked', true); });
+        PosnicPro.settings.refreshModuleCards();
+    });
+};
+
+/*
+ * After a successful features save: seed on off->on with nothing there, and
+ * DELETE on on->off when the person consented. Both directions live in one
+ * place because they share the same guard - only when the switch actually
+ * moved, never on every save, or a tax change puts a progress bar in front
+ * of somebody who asked for nothing.
+ */
+PosnicPro.settings.syncDemoDataAfterSave = function (nowOnArg, options) {
+    var on = nowOnArg !== undefined ? !!nowOnArg : $('#module_demo_data_enable').is(':checked');
+    var was = PosnicPro.settings._demoWasOn;
+    PosnicPro.settings._demoWasOn = on;
+
+    if (!on && was !== false && PosnicPro.settings._demoPurgeArmed) {
+        PosnicPro.settings._demoPurgeArmed = false;
+        PosnicPro.settings.demoProgress.open('Removing the sample data');
+        PosnicPro.settings.demoProgress.step('Removing sample sales, quotes and people…');
+        PosnicPro.delete({ url: 'items/demo', data: JSON.stringify({}) }, function (response) {
+            /* The message names what was removed and what was kept - the kept
+               list is the whole answer to "why is this product still here". */
+            PosnicPro.settings.demoProgress.close(response.message, response.type === 'success');
+            if (PosnicPro.sales && PosnicPro.sales.itemCache) { PosnicPro.sales.itemCache.clear(); }
+        }, function (xhr) {
+            var resp = {};
+            try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+            var msg = resp.message || '';
+            /* Nothing there to remove is the outcome asked for, not a fault. */
+            var harmless = /nothing|no sample|not found/i.test(msg);
+            PosnicPro.settings.demoProgress.close(harmless ? null : (msg || 'Could not remove the sample data'), harmless);
+        });
+        return;
+    }
+
+    PosnicPro.settings._demoPurgeArmed = false;
+    if (!on || was !== false) { return; }
+
+    PosnicPro.settings.demoProgress.open(options && options.title, options);
+    PosnicPro.post({ url: 'items/demo', data: JSON.stringify({}) }, function (response) {
+        PosnicPro.settings.demoProgress.close(response.message, response.type === 'success');
+    }, function (xhr) {
+        var resp = {};
+        try { resp = JSON.parse(xhr.responseText); } catch (e) { /* plain */ }
+        /*
+         * "Already here" is the ordinary case - the switch only hides, so the
+         * rows are usually still there. Closing quietly is right: the shop
+         * asked to see the samples and they are about to, which is the answer
+         * they wanted.
+         */
+        var msg = resp.message || '';
+        var harmless = /already/i.test(msg);
+        PosnicPro.settings.demoProgress.close(harmless ? null : (msg || 'Could not add the sample data'), harmless);
+    });
+};
+
+/* The kiosk pane pays for its own artwork, on first open only - see the
+   deferPreview comment above. */
+$(document).on('click', '#v-pills-kioskmachine-tab, #manage_sec_kioskmachine', function () {
+    $('#v-pills-kioskmachine img[data-defer-src]').each(function () {
+        var source = $(this).attr('data-defer-src') || '';
+        if (/^static\/images\/[a-z0-9_./-]+$/i.test(source)) {
+            $(this).attr('src', source).removeAttr('data-defer-src');
+        }
+    });
+});
+
+
+/*
+ * The Analytics card (Integrations tab). Loaded when its sub-tab is opened,
+ * saved through the preferences group endpoint - the same door every other
+ * grouped setting uses, so validation and the CSP cache invalidation happen
+ * server-side in one place. Delegated handlers only: this pane lives inside
+ * the settings screen and direct bindings at load are the dead-selector trap.
+ */
+$(document).on('shown.bs.tab', 'a[href="#int-sub-analytics"]', function () {
+    PosnicPro.get({ url: 'settings/group/preferences' }, function (response) {
+        if (response.type !== 'success' || !response.data) { return; }
+        var v = response.data.values || response.data;
+        $('#analytics_enable').prop('checked', v.analytics_enable === true || v.analytics_enable === 'true');
+        $('#analytics_ga_id').val(v.analytics_ga_id || '');
+        $('#analytics_saved_note').hide();
+    }, function () { /* the card still lets you type and save */ });
+});
+
+$(document).on('click', '#analytics_save', function () {
+    var payload = {
+        analytics_enable: $('#analytics_enable').is(':checked'),
+        analytics_ga_id: String($('#analytics_ga_id').val() || '').trim().toUpperCase()
+    };
+    if (payload.analytics_enable && !/^G-[A-Z0-9]{4,14}$/.test(payload.analytics_ga_id)) {
+        PosnicPro.alert('error', PosnicPro.i18n.t('lang_the_google_analytics_id_should_look_like_g', 'The Google Analytics id should look like G-XXXXXXXXXX'));
+        return;
+    }
+    PosnicPro.put({
+        url: 'settings/group/preferences',
+        data: JSON.stringify(payload)
+    }, function (response) {
+        if (response.type === 'success') {
+            $('#analytics_saved_note').show();
+        } else {
+            PosnicPro.alert(response.type, response.message);
+        }
+    }, function () {
+        PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_save_the_analytics_settings', 'Could not save the analytics settings'));
+    });
+});
+
+/*
+ * The Voice ordering card (Integrations tab).
+ *
+ * It has its own TAB on the Captain App page, which is where a setting goes.
+ *
+ * It got there the long way and the two wrong homes are worth naming, because
+ * both are easy mistakes to repeat. Integrations, on the grounds that it can
+ * hold a third-party key - that is filing a thing by how it is BUILT rather
+ * than by what it IS. Then inside the Captain App card on the Features list,
+ * which is worse: that list is a row of switches a shopkeeper scans to see
+ * what is on, and a card carrying a dropdown, a text field and a Save button
+ * is twice the height of its neighbours and breaks the grid it lives in.
+ *
+ * THE RULE, written down in AGENTS.md so it stops being rediscovered: the
+ * Features list holds ON and OFF and nothing else. Every setting belongs on
+ * the module's own page.
+ *
+ * ONE dropdown for the shopkeeper, because they are choosing a thing they can
+ * name - nothing, the phone, or a company they have an account with - not an
+ * architecture. What that means for where the audio travels is derived on the
+ * server; see api/src/utils/voice-settings.js for why those two vocabularies
+ * must not be the same field.
+ *
+ * The key goes through the SECRETS group, which is write-only: it is read back
+ * as "configured" and never as a value, so a saved key cannot be recovered
+ * from this screen by anybody who can open it. Sending an empty key means
+ * LEAVE IT ALONE, or the first person to change the language would blank the
+ * shop's credential.
+ *
+ * Delegated handlers only: this pane is part of the settings module and is not
+ * in the DOM when this file runs, which is the dead-selector trap.
+ */
+PosnicPro.settings = PosnicPro.settings || {};
+PosnicPro.settings.voice = {
+    /* The key field only means something for a provider that needs one. A
+       control that cannot affect anything should not ask for a decision. */
+    syncKeyRow: function () {
+        /* Every provider but the phone itself needs a key. Listed rather
+           than "not device and not off", so a value added to the dropdown
+           without being added here hides the field it depends on instead of
+           silently showing one for a provider that has no use for it. */
+        var paid = ['openai', 'google', 'deepgram', 'assembly'];
+        var needsKey = paid.indexOf($('#voice_provider').val() || '') !== -1;
+        var onFile = PosnicPro.settings.voice._onFile === true && !PosnicPro.settings.voice._editing;
+        /* A saved key folds the box away and shows the card instead; the two
+           are never both up, and neither is up for a provider with no use
+           for a key. */
+        $('#voice_key_saved').toggle(needsKey && onFile);
+        $('#voice_key_row').toggle(needsKey && !onFile);
+    },
+
+    /* Must match CLEAR_SECRET in api/src/services/settings-groups.js: an
+       empty value means "leave the saved one alone", so removal has to be
+       said out loud. */
+    CLEAR_SECRET: '__posnic_clear__',
+    _onFile: false,
+    _editing: false,
+
+    /* Which provider the saved key belongs to, in the words of the dropdown,
+       so the card says what it is a key FOR. */
+    _providerWords: function () {
+        var chosen = $('#voice_provider').val() || '';
+        var label = $('#voice_provider option[value="' + chosen + '"]').text() || chosen;
+        return String(label).split(' - ')[0].trim();
+    },
+
+    edit: function () {
+        PosnicPro.settings.voice._editing = true;
+        PosnicPro.settings.voice.syncKeyRow();
+        $('#voice_api_key').val('').focus();
+    },
+
+    removeKey: function () {
+        /* Asked the way the AI card asks, with the same dialog: there is no
+           PosnicPro.confirm, and a call to a helper nobody wrote is a button
+           that quietly does nothing. */
+        swal({
+            title: PosnicPro.i18n.t('lang_int_voice_key_remove_q', 'Remove the saved key?'),
+            text: PosnicPro.i18n.t('lang_int_voice_key_remove_text', 'Handsets fall back to the phone\'s own recognition until a new key is saved. Your provider account is not touched.'),
+            showCancelButton: true,
+            confirmButtonClass: 'btn btn-danger',
+            cancelButtonClass: 'btn btn-secondary m-l-10',
+            confirmButtonText: PosnicPro.i18n.t('lang_ai_key_remove', 'Remove'),
+            cancelButtonText: PosnicPro.i18n.t('lang_cancel', 'Cancel')
+        }).then(function () {
+            PosnicPro.put({
+                url: 'settings/group/secrets',
+                data: JSON.stringify({ voice_api_key: PosnicPro.settings.voice.CLEAR_SECRET })
+            }, function (response) {
+                if (response.type !== 'success') {
+                    PosnicPro.alert(response.type, response.message);
+                    return;
+                }
+                PosnicPro.settings.voice._onFile = false;
+                PosnicPro.settings.voice._editing = false;
+                PosnicPro.settings.voice.syncKeyRow();
+                PosnicPro.alert('success', PosnicPro.i18n.t('lang_int_voice_key_removed', 'The key is removed.'));
+            }, function () {
+                PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_save_the_voice_key', 'Could not save the voice key'));
+            });
+        });
+    },
+
+    load: function () {
+        PosnicPro.get({ url: 'settings/group/preferences' }, function (response) {
+            if (response.type !== 'success' || !response.data) { return; }
+            var v = response.data.values || response.data;
+            $('#voice_provider').val(v.voice_provider || 'device');
+            $('#voice_language').val(v.voice_language || 'en-IN');
+            PosnicPro.settings.voice.syncKeyRow();
+        }, function () { /* the card still lets you choose and save */ });
+
+        /* Which secrets EXIST, never what they are. */
+        PosnicPro.get({ url: 'settings/group/secrets' }, function (response) {
+            if (response.type !== 'success' || !response.data) { return; }
+            var saved = (response.data.configured || {}).voice_api_key === true;
+            PosnicPro.settings.voice._onFile = saved;
+            PosnicPro.settings.voice._editing = false;
+            $('#voice_key_provider').text(PosnicPro.settings.voice._providerWords());
+            PosnicPro.settings.voice.syncKeyRow();
+            $('#voice_api_key').attr('placeholder', saved
+                ? PosnicPro.i18n.t('lang_int_voice_key_saved', 'A key is saved. Type a new one to replace it.')
+                : PosnicPro.i18n.t('lang_paste_the_key_from_your_provider', 'Paste the key from your provider'));
+        }, function () { /* the card is a courtesy, not the feature */ });
+
+        $('#voice_saved_note').hide();
+    },
+
+    save: function () {
+        var provider = $('#voice_provider').val() || 'device';
+        var key = String($('#voice_api_key').val() || '');
+
+        PosnicPro.put({
+            url: 'settings/group/preferences',
+            data: JSON.stringify({
+                voice_provider: provider,
+                voice_language: String($('#voice_language').val() || '').trim() || 'en-IN'
+            })
+        }, function (response) {
+            if (response.type !== 'success') {
+                PosnicPro.alert(response.type, response.message);
+                return;
+            }
+            /* An empty key means LEAVE THE SAVED ONE ALONE. The field loads
+               blank because the value is never sent to a browser, so writing
+               that emptiness through would blank the shop's credential the
+               first time anybody changed the language. */
+            if (!key) {
+                $('#voice_saved_note').show();
+                $('#voice_api_key').val('');
+                return;
+            }
+            PosnicPro.put({
+                url: 'settings/group/secrets',
+                data: JSON.stringify({ voice_api_key: key })
+            }, function (second) {
+                if (second.type === 'success') {
+                    $('#voice_saved_note').show();
+                    $('#voice_api_key').val('');
+                    /* Folded away again: the save has to look like something
+                       happened, which was the whole complaint. */
+                    PosnicPro.settings.voice._editing = false;
+                    PosnicPro.settings.voice.load();
+                } else {
+                    PosnicPro.alert(second.type, second.message);
+                }
+            }, function () {
+                PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_save_the_voice_key', 'Could not save the voice key'));
+            });
+        }, function () {
+            PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_save_the_voice_settings', 'Could not save the voice settings'));
+        });
+    }
+};
+
+/* Loaded when its own tab is opened, on the Captain App page. */
+$(document).on('shown.bs.tab', 'a[href="#captainvoice-line"]', function () {
+    PosnicPro.settings.voice.load();
+});
+$(document).on('change', '#voice_provider', function () {
+    $('#voice_key_provider').text(PosnicPro.settings.voice._providerWords());
+    PosnicPro.settings.voice.syncKeyRow();
+});
+$(document).on('click', '#voice_key_edit', function () {
+    PosnicPro.settings.voice.edit();
+});
+$(document).on('click', '#voice_key_remove', function () {
+    PosnicPro.settings.voice.removeKey();
+});
+$(document).on('click', '#voice_save', function () {
+    PosnicPro.settings.voice.save();
+});
+
+/*
+ * Online ordering controls on the kiosk account tab.
+ *
+ * Delegated from document because the tab's markup is part of the settings
+ * module and is not in the DOM when this file runs.
+ */
+$(document).on('change', '#kiosk_hours_enable', function () {
+    PosnicPro.settings.onlineOrdering.syncMode();
+});
+
+/*
+ * Pausing writes a moment, not a flag, and the presets are the only way to set
+ * it. "Rest of today" is the end of the day in the browser's own zone, which is
+ * the shop's zone in every case that matters; the server re-reads the branch
+ * timezone when it decides whether the pause is still running.
+ */
+$(document).on('click', '.kiosk-pause-btn', function () {
+    var minutes = Number($(this).data('minutes'));
+    var until;
+    if (minutes > 0) {
+        until = new Date(Date.now() + minutes * 60000);
+    } else {
+        /* End of today, not for ever. The one-click version of the same rule
+           the whole control is built on. */
+        until = new Date();
+        until.setHours(23, 59, 59, 999);
+    }
+    PosnicPro.settings.onlineOrdering.renderPause(until.toISOString(), true);
+});
+
+$(document).on('click', '#kiosk_pause_resume', function () {
+    PosnicPro.settings.onlineOrdering.renderPause('', true);
+});
+
+/*
+ * Sales channels: the ways this shop takes orders, and the outside businesses
+ * that send it some.
+ *
+ * Reads and writes the `channels` settings group, so this screen cannot touch
+ * a key belonging to another one. The vocabulary is the server's - see
+ * api/src/utils/sales-channels.js - and is mirrored here only for labels.
+ */
+PosnicPro.salesChannels = {
+    /* Labels as <lang> markup, not t(): this object is built when the module
+       loads, before any language pack has arrived, and the rows are drawn as
+       HTML so the observer translates them on screen. Same rule, and the same
+       reason, as PosnicPro.dashboard.SETUP_CARDS. */
+    CHANNELS: [
+        { id: 'pos', label: '<lang class="lang_channel_pos">Point of sale</lang>' },
+        { id: 'kiosk', label: '<lang class="lang_channel_kiosk">Kiosk machine</lang>' },
+        { id: 'tableside', label: '<lang class="lang_channel_tableside">Captain app</lang>' },
+        { id: 'online', label: '<lang class="lang_channel_online">Online and QR</lang>' },
+        { id: 'phone', label: '<lang class="lang_channel_phone">Phone order</lang>' },
+        { id: 'whatsapp', label: '<lang class="lang_channel_whatsapp">WhatsApp</lang>' },
+        { id: 'marketplace', label: '<lang class="lang_channel_marketplace">Delivery partner</lang>' },
+        { id: 'ecommerce', label: '<lang class="lang_channel_ecommerce">Own webshop</lang>' }
+    ],
+
+    /* The only two that mean nothing without naming the business involved. */
+    PARTNER_CHANNELS: ['marketplace', 'ecommerce'],
+
+    /*
+     * CHANNELS stays, renderChannels went.
+     *
+     * The list is still the vocabulary - partnerRow labels its kinds from it -
+     * but a shop no longer ticks channels on a settings screen. The Features
+     * page decides which channels exist; a second set of checkboxes behind it
+     * was the duplicate that made this page feel like one big "Sales Channels"
+     * screen in the first place.
+     */
+
+    partnerRow: function (partner) {
+        var self = PosnicPro.salesChannels;
+        var p = partner || {};
+        var options = self.PARTNER_CHANNELS.map(function (id) {
+            var match = self.CHANNELS.filter(function (c) { return c.id === id; })[0];
+            var sel = String(p.channel || 'marketplace') === id ? ' selected' : '';
+            return '<option value="' + id + '"' + sel + '>' + (match ? match.label : id) + '</option>';
+        }).join('');
+
+        /* The name is escaped through jQuery rather than interpolated raw: it
+           is whatever the shop typed, and it comes back out into markup. */
+        var safeLabel = $('<div>').text(p.label || '').html();
+
+        return '<div class="form-row align-items-end mb-2 channel-partner-row">' +
+            '<div class="form-group col-md-4">' +
+            '<input type="text" class="form-control form-control-sm partner-label" placeholder="' + PosnicPro.i18n.t('lang_partner_name', 'Partner name') + '" value="' + safeLabel + '">' +
+            '</div>' +
+            '<div class="form-group col-md-3">' +
+            '<select class="form-control form-control-sm partner-channel">' + options + '</select>' +
+            '</div>' +
+            '<div class="form-group col-md-3">' +
+            '<div class="input-group input-group-sm">' +
+            '<input type="number" min="0" max="100" step="0.01" class="form-control partner-commission" placeholder="0" value="' + (Number(p.commission_percent) || '') + '">' +
+            '<div class="input-group-append"><span class="input-group-text">%</span></div>' +
+            '</div></div>' +
+            '<div class="form-group col-md-2">' +
+            '<button type="button" class="btn btn-outline-danger btn-sm remove-channel-partner" aria-label="' + PosnicPro.i18n.t('lang_remove_partner', 'Remove partner') + '"><i class="feather icon-trash-2" aria-hidden="true"></i></button>' +
+            '</div></div>';
+    },
+
+    /*
+     * ONE list of partners, drawn into two screens.
+     *
+     * A partner row already says which kind it is - an aggregator that
+     * delivers, or a webshop the shop runs itself - so Delivery Partners and
+     * Webshop are two views of the same stored list rather than two lists to
+     * keep in step. collect() reads `.channel-partner-row` wherever it sits,
+     * so a save from either screen still writes both.
+     */
+    renderPartners: function (partners) {
+        var self = PosnicPro.salesChannels;
+        var list = Array.isArray(partners) ? partners : [];
+        var apps = [];
+        var shops = [];
+        list.forEach(function (p) {
+            (String((p || {}).channel) === 'ecommerce' ? shops : apps).push(p);
+        });
+        $('#sales_channel_partner_rows').html(apps.map(self.partnerRow).join(''));
+        $('#webshop_partner_rows').html(shops.map(self.partnerRow).join(''));
+    },
+
+    /*
+     * A venue: a hotel, an office, anywhere that is not this shop's own floor.
+     *
+     * THE CODE IS THE IDENTITY. It is what a printed QR carries
+     * (/order/AZ100/venue/RC/123), so it has to survive a rename of the
+     * building - which is why it is typed rather than derived from the name
+     * the way a partner id is.
+     *
+     * MARKUP AND COMMISSION ARE TWO FIELDS. The obvious design gives a venue
+     * one percentage and uses it for both. That is one common deal and not the
+     * only one: a restaurant may mark up 12 and pay 10, keeping two points; it
+     * may mark up nothing and pay 8 out of its own margin to win the tie-up.
+     * One field would decide that negotiation on the shop's behalf.
+     */
+    venueRow: function (venue) {
+        var v = venue || {};
+        var safe = function (value) { return $('<div>').text(value || '').html(); };
+        var t = function (key, fallback) { return PosnicPro.i18n.t(key, fallback); };
+        var floorId = 'venue_floor_' + Math.random().toString(36).slice(2, 9);
+
+        return '<div class="card border mb-2 partner-venue-row"><div class="card-body py-2">' +
+            '<div class="form-row align-items-end">' +
+            '<div class="form-group col-md-4">' +
+            '<label class="small mb-1">' + t('lang_venue_name', 'Venue name') + '</label>' +
+            '<input type="text" class="form-control form-control-sm venue-name" value="' + safe(v.name) + '">' +
+            '</div>' +
+            '<div class="form-group col-md-2">' +
+            '<label class="small mb-1">' + t('lang_venue_code', 'Code') + '</label>' +
+            '<input type="text" class="form-control form-control-sm venue-code" maxlength="12" placeholder="RC" data-t-placeholder="lang_rc" value="' + safe(v.code) + '">' +
+            '</div>' +
+            '<div class="form-group col-md-2">' +
+            '<label class="small mb-1">' + t('lang_venue_unit_label', 'Calls a unit') + '</label>' +
+            '<input type="text" class="form-control form-control-sm venue-unit-label" maxlength="20" placeholder="Room" data-t-placeholder="lang_room" value="' + safe(v.unit_label || 'Room') + '">' +
+            '</div>' +
+            '<div class="form-group col-md-2">' +
+            '<label class="small mb-1">' + t('lang_venue_markup', 'Guest pays extra') + '</label>' +
+            '<div class="input-group input-group-sm">' +
+            '<input type="number" min="-100" max="100" step="0.01" class="form-control venue-markup" placeholder="0" value="' + (Number(v.price_adjust_percent) || '') + '">' +
+            '<div class="input-group-append"><span class="input-group-text">%</span></div>' +
+            '</div></div>' +
+            '<div class="form-group col-md-2">' +
+            '<label class="small mb-1">' + t('lang_venue_commission', 'You owe them') + '</label>' +
+            '<div class="input-group input-group-sm">' +
+            '<input type="number" min="0" max="100" step="0.01" class="form-control venue-commission" placeholder="0" value="' + (Number(v.commission_percent) || '') + '">' +
+            '<div class="input-group-append"><span class="input-group-text">%</span></div>' +
+            '</div></div>' +
+            '</div>' +
+            '<div class="form-row align-items-end">' +
+            '<div class="form-group col-md-4">' +
+            '<label class="small mb-1">' + t('lang_venue_address', 'Address') + '</label>' +
+            '<input type="text" class="form-control form-control-sm venue-address" maxlength="300" value="' + safe(v.address) + '">' +
+            '</div>' +
+            '<div class="form-group col-md-4">' +
+            '<label class="small mb-1">' + t('lang_venue_delivery_note', 'Note for whoever delivers') + '</label>' +
+            '<input type="text" class="form-control form-control-sm venue-note" maxlength="300" placeholder="' + t('lang_venue_delivery_note_hint', 'Use the service lift') + '" value="' + safe(v.delivery_note) + '">' +
+            '</div>' +
+            '<div class="form-group col-md-3">' +
+            '<div class="custom-control custom-checkbox">' +
+            '<input type="checkbox" class="custom-control-input venue-ask-floor" id="' + floorId + '"' + (v.ask_floor === true ? ' checked' : '') + '>' +
+            '<label class="custom-control-label small" for="' + floorId + '">' + t('lang_venue_ask_floor', 'Ask for a floor') + '</label>' +
+            '</div>' +
+            '</div>' +
+            '<div class="form-group col-md-1 text-right">' +
+            '<button type="button" class="btn btn-outline-danger btn-sm remove-partner-venue" aria-label="' + t('lang_remove_venue', 'Remove venue') + '"><i class="feather icon-trash-2" aria-hidden="true"></i></button>' +
+            '</div>' +
+            '<div class="col-12"><small class="text-muted venue-link"></small></div>' +
+            '</div></div></div>';
+    },
+
+    /*
+     * Where a venue is SEEN once it is saved.
+     *
+     * Owner: "added venue not listed. where to see and edit if needed". The
+     * rows on this page are the list and the editor; what was missing was
+     * the thing a venue is FOR - the address printed on its QR codes. Each
+     * saved venue now shows it, built the same way the storefront address is
+     * (API_URL, else this origin, plus the shop's storefront id), with the
+     * unit left for the printer: /order/<shop>/venue/<CODE>/<room>.
+     */
+    fillVenueLinks: function () {
+        var id = String($('#kioskstore_id').val() || '').trim();
+        if (!/^[A-Za-z0-9]{3,6}$/.test(id)) { $('.venue-link').text(''); return; }
+        var base = String((typeof API_URL === 'string' && API_URL) || '').replace(/\/+$/, '');
+        if (!base) { base = String(window.location.origin || '').replace(/\/+$/, ''); }
+        $('.partner-venue-row').each(function () {
+            var $row = $(this);
+            var code = String($row.find('.venue-code').val() || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+            var unit = String($row.find('.venue-unit-label').val() || 'Room').trim().toLowerCase() || 'room';
+            $row.find('.venue-link').text(code
+                ? PosnicPro.i18n.t('lang_venue_guests_scan', 'Guests scan:') + ' ' + base + '/order/' + id + '/venue/' + code.toUpperCase() + '/<' + unit + '>'
+                : '');
+        });
+    },
+    renderVenues: function (venues) {
+        var self = PosnicPro.salesChannels;
+        var list = Array.isArray(venues) ? venues : [];
+        $('#partner_venue_rows').html(list.map(self.venueRow).join(''));
+        self.fillVenueLinks();
+    },
+
+    /*
+     * What a customer pays on top of the food, per FULFILMENT.
+     *
+     * Not per channel, and that is the part that is easy to get wrong and
+     * expensive to change later. A delivery fee exists because somebody drives
+     * the food somewhere, not because the order came through a particular app:
+     * the same storefront serves a table, a takeaway and a hotel room.
+     */
+    /* Ids only. The names are looked up inside chargeRow, because a literal
+       here would be built when this file loads - before the language pack has
+       arrived - and every shop would see English whatever it chose. */
+    FULFILMENTS: ['dine_in', 'takeaway', 'pickup', 'delivery'],
+
+    chargeRow: function (id, rule) {
+        var r = rule || {};
+        var t = function (key, fallback) { return PosnicPro.i18n.t(key, fallback); };
+        var money = function (value) { return Number(value) > 0 ? Number(value) : ''; };
+        var names = {
+            dine_in: t('lang_fulfilment_dine_in', 'Dine in'),
+            takeaway: t('lang_fulfilment_takeaway', 'Takeaway'),
+            pickup: t('lang_fulfilment_pickup', 'Pickup'),
+            delivery: t('lang_fulfilment_delivery', 'Delivery')
+        };
+
+        return '<div class="form-row align-items-end mb-2 channel-charge-row" data-fulfilment="' + id + '">' +
+            '<div class="form-group col-md-3 mb-1">' +
+            '<span class="small">' + (names[id] || id) + '</span>' +
+            '</div>' +
+            '<div class="form-group col-md-3 mb-1">' +
+            '<input type="number" min="0" step="0.01" class="form-control form-control-sm charge-fee" placeholder="' + t('lang_charge_fee', 'Fee') + '" value="' + money(r.fee) + '">' +
+            '</div>' +
+            '<div class="form-group col-md-3 mb-1">' +
+            '<input type="number" min="0" step="0.01" class="form-control form-control-sm charge-free-above" placeholder="' + t('lang_charge_free_above', 'Free above') + '" value="' + money(r.free_above) + '">' +
+            '</div>' +
+            '<div class="form-group col-md-3 mb-1">' +
+            '<input type="number" min="0" step="0.01" class="form-control form-control-sm charge-min-order" placeholder="' + t('lang_charge_min_order', 'Minimum order') + '" value="' + money(r.min_order) + '">' +
+            '</div>' +
+            '</div>';
+    },
+
+    renderCharges: function (charges) {
+        var self = PosnicPro.salesChannels;
+        var table = charges || {};
+        $('#channel_charge_rows').html(self.FULFILMENTS.map(function (id) {
+            return self.chargeRow(id, table[id]);
+        }).join(''));
+    },
+
+    load: function () {
+        var self = PosnicPro.salesChannels;
+        PosnicPro.get({ url: 'settings/group/channels', data: {} }, function (response) {
+            var values = (response && response.data && response.data.values) || {};
+            /* The rows below are now on screen and hold what the shop stored.
+               Until this is true, collect() must not claim to speak for them -
+               see the guard there. */
+            self._loaded = true;
+            self.renderPartners(values.sales_channel_partners);
+            self.renderVenues(values.partner_venues);
+            self.renderCharges(values.channel_charges);
+            $("#online_ordering_default_store").val(values.online_ordering_default_store || "");
+            /* Anything that is not exactly "manual" is auto, which is what the
+               server makes of it too - see utils/order-approval for why that is
+               the survivable direction. */
+            var approval = values.online_order_approval === 'manual' ? 'manual' : 'auto';
+            $("#online_order_approval").val(approval);
+            /*
+             * How long a customer may still change what they ordered.
+             *
+             * An unset shop is thirty seconds, which is what the server falls
+             * back to; a stored value that is not one of the offered lengths
+             * is shown as the nearest one rather than blanking the box and
+             * silently rewriting the shop's choice on the next save.
+             */
+            /*
+             * WHAT HAPPENS WHEN NOBODY ANSWERS. Empty is "leave it waiting",
+             * which is what a shop that has never been asked reads as and what
+             * every shop does today. The minutes only mean something once a
+             * choice has been made, so the row is hidden until then.
+             */
+            $("#online_order_on_silence").val(
+                ["accept", "cancel"].indexOf(String(values.online_order_on_silence || "")) > -1
+                    ? String(values.online_order_on_silence)
+                    : ""
+            );
+            $("#online_order_decide_after_minutes").val(
+                String(Number(values.online_order_decide_after_minutes) || 10)
+            );
+            /*
+             * ABSENT IS ON.
+             *
+             * The notice ships on for every restaurant with table service, so
+             * a screen that drew this unticked for a shop that has never saved
+             * would be telling them they had switched something off. Only an
+             * explicit false unticks it, and the STRING 'false' counts - the
+             * group endpoint has carried both shapes for years.
+             */
+            $("#online_kitchen_notice").prop(
+                "checked",
+                values.online_kitchen_notice !== false && values.online_kitchen_notice !== "false"
+            );
+            PosnicPro.salesChannels.showSilenceRule();
+            $("#online_order_change_seconds").val(
+                PosnicPro.salesChannels.nearestWindow(values.online_order_change_seconds)
+            );
+            /* Serving periods are NOT drawn here any more - they moved to the
+               Restaurant page. Rendering them into markup that no longer
+               exists is harmless; COLLECTING them from it is not, which is
+               why the save below no longer sends them. */
+            /* Remembered so the sidebar can decide without a request on every
+               page load: the approval queue is only worth a menu entry for a
+               shop that actually holds orders. */
+            PosnicPro.local.set('online_order_approval', approval);
+            PosnicPro.applyOrderQueueVisibility();
+        }, function () {
+            /* A shop that has never saved these has nothing stored yet, which
+               is not an error. Draw the till, which every shop has. */
+            self.renderPartners([]);
+            self.renderVenues([]);
+            self.renderCharges({});
+        });
+    },
+
+    /**
+     * What the screens are showing, in the shape the group endpoint stores.
+     *
+     * EVERY KEY HERE IS READ OUT OF THE DOM, which makes this function a
+     * loaded gun whenever the DOM is not what it will be. The rows are drawn by
+     * load(); if that request is still in flight, or failed, or was never made
+     * because somebody reached a Save without passing through an entry point,
+     * the containers are empty and every one of these keys would go to the
+     * server as "none" - erasing the shop's partners, venues and charges.
+     *
+     * That is not a hypothetical shape in this codebase. menu_dayparts was
+     * caught doing it once and sales_channels_enabled a second time, both after
+     * markup moved. So: no load, no claim. The group endpoint writes only the
+     * keys it is given, and omitting one keeps what is stored.
+     */
+    collect: function () {
+        var partners = [];
+        $('.channel-partner-row').each(function () {
+            var $row = $(this);
+            var label = String($row.find('.partner-label').val() || '').trim();
+            if (!label) return;
+            partners.push({
+                /* Derived from the name exactly as the server derives it, so
+                   "Swiggy" and "swiggy " cannot become two partners and two
+                   half-totals in one report. */
+                id: label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''),
+                label: label,
+                channel: $row.find('.partner-channel').val(),
+                commission_percent: Number($row.find('.partner-commission').val()) || 0,
+                enabled: true
+            });
+        });
+
+        var venues = [];
+        $('.partner-venue-row').each(function () {
+            var $row = $(this);
+            var name = String($row.find('.venue-name').val() || '').trim();
+            /* Normalised here exactly as the server normalises it: a venue
+               typed as "RC " and a code printed as "rc" have to be the same
+               venue, or a hotel's orders split across two half-totals. */
+            var code = String($row.find('.venue-code').val() || '')
+                .trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+            /* A venue with a name and no code used to be skipped here, and
+               the toast still said Saved. The owner typed a hotel, pressed
+               Save, came back, and it was gone. The code is what the printed
+               QR carries, so it has to exist; derived from the name once, and
+               written back into the box so it is seen and kept. */
+            if (name && !code) {
+                code = name.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 24);
+                $row.find('.venue-code').val(code);
+            }
+            if (!name || !code) return;
+            venues.push({
+                code: code,
+                name: name,
+                unit_label: String($row.find('.venue-unit-label').val() || 'Room').trim() || 'Room',
+                price_adjust_percent: Number($row.find('.venue-markup').val()) || 0,
+                commission_percent: Number($row.find('.venue-commission').val()) || 0,
+                address: String($row.find('.venue-address').val() || '').trim(),
+                delivery_note: String($row.find('.venue-note').val() || '').trim(),
+                ask_floor: $row.find('.venue-ask-floor').is(':checked'),
+                enabled: true
+            });
+        });
+
+        var charges = {};
+        $('.channel-charge-row').each(function () {
+            var $row = $(this);
+            charges[$row.data('fulfilment')] = {
+                fee: Number($row.find('.charge-fee').val()) || 0,
+                free_above: Number($row.find('.charge-free-above').val()) || 0,
+                min_order: Number($row.find('.charge-min-order').val()) || 0
+            };
+        });
+
+        var out = {
+            /*
+             * sales_channels_enabled is DELIBERATELY ABSENT, for exactly the
+             * reason menu_dayparts is below.
+             *
+             * The "ways this shop takes orders" checkboxes were a second place
+             * to choose channels after the Features cards, so they went. Their
+             * markup is gone, which means collecting the key here would send an
+             * empty list and quietly wipe whatever a shop had chosen - the
+             * item channel picker reads it. The group endpoint writes only
+             * what it is given, so leaving it out keeps the stored value.
+             */
+            sales_channel_partners: partners,
+            /* Empty is a real answer: it means "work it out", which is right
+               for the one-branch shops that are most of them. */
+            online_ordering_default_store: String($("#online_ordering_default_store").val() || "").trim(),
+            /*
+             * menu_dayparts is DELIBERATELY ABSENT.
+             *
+             * The serving-period rows moved to the Restaurant page, so
+             * dayparts.collect() finds no markup here and returns an empty
+             * list. Sending that would have wiped every period a shop had set,
+             * on every save of this screen, with no error and nothing to
+             * explain it. The group endpoint writes only what it is given, so
+             * leaving the key out keeps the stored value safe.
+             */
+            partner_venues: venues,
+            channel_charges: charges,
+            online_order_approval: $("#online_order_approval").val() === 'manual' ? 'manual' : 'auto'
+        };
+
+        /*
+         * The window, ONLY when the box on screen actually holds one.
+         *
+         * An empty select reads as 0, and 0 means "no changes after
+         * ordering". Sending that from a screen that never loaded would
+         * switch the feature off for a shop that never touched it, with a
+         * green toast on top. The group endpoint writes only what it is
+         * given, so leaving the key out keeps the stored value safe.
+         */
+        var window_ = $("#online_order_change_seconds").val();
+        /* Both halves or neither. A time sent with no choice is a rule nobody
+           finished writing, and the server treats it as nothing anyway. */
+        var onSilence = $("#online_order_on_silence").val() || "";
+        var decideAfter = onSilence ? Number($("#online_order_decide_after_minutes").val()) || 0 : 0;
+        if (window_ !== undefined && window_ !== null && String(window_) !== '') {
+            out.online_order_change_seconds = Number(window_);
+        }
+        /* Same guard, same reason: a screen that never drew this control must
+           not post an empty one and switch a shop's rule off. */
+        if ($("#online_order_on_silence").length) {
+            out.online_order_on_silence = onSilence;
+            out.online_order_decide_after_minutes = decideAfter;
+        }
+        /* Same guard again: a screen that never drew the switch must not post
+           a false for it and hide a notice the shop never asked to hide. */
+        if ($("#online_kitchen_notice").length) {
+            out.online_kitchen_notice = $("#online_kitchen_notice").is(":checked");
+        }
+        return out;
+    },
+
+    /*
+     * The offered length closest to what is stored.
+     *
+     * A shop whose value was set by hand, or by an older build, must not have
+     * it quietly rewritten to 30 the next time somebody saves this page for
+     * an unrelated reason.
+     */
+    /*
+     * The minutes only mean something once a shop has chosen what to do, and
+     * the whole rule only means something while orders are being HELD.
+     *
+     * Hidden rather than disabled. A greyed control says "you may not touch
+     * me" about something that is simply not part of this choice, and a shop
+     * on automatic reading "If nobody answers" has been asked a question about
+     * a queue it does not have.
+     *
+     * ON THIS MODULE, not on PosnicPro.settings. It is a control on the
+     * channels screen and `load()` calls it, so reaching across to another
+     * namespace made drawing the whole screen depend on that namespace being
+     * there. It was not, in the harness that lifts this module out - and a
+     * `load()` that throws leaves Delivery Partners and Restaurant blank,
+     * which the next Save would write back over the real rows.
+     */
+    showSilenceRule: function () {
+        var holding = $("#online_order_approval").val() === "manual";
+        $("#online_order_silence_row").toggle(holding);
+        $("#online_order_decide_after_row").toggle(
+            holding && ($("#online_order_on_silence").val() || "") !== ""
+        );
+    },
+
+    nearestWindow: function (stored) {
+        var offered = [0, 30, 60, 120, 300, 600, 900];
+        /* An unset shop is one minute, which is what the server falls back
+           to; the two must agree or the screen shows a shop a window it does
+           not have. */
+        if (stored === undefined || stored === null || String(stored).trim() === '') return '60';
+        var want = Math.round(Number(stored));
+        if (!isFinite(want) || want < 0) return '60';
+        var best = offered[0];
+        offered.forEach(function (one) {
+            if (Math.abs(one - want) < Math.abs(best - want)) best = one;
+        });
+        return String(best);
+    },
+
+    /**
+     * collect(), with the keys nobody can vouch for taken out.
+     *
+     * Callers save through this rather than collect() so the guard cannot be
+     * forgotten at one of the four Save buttons.
+     */
+    payload: function () {
+        var self = PosnicPro.salesChannels;
+        var out = self.collect();
+        if (self._loaded) { return out; }
+
+        /* Nothing was ever read back, so these rows are empty because the page
+           has not filled them - not because the shop deleted everything. */
+        delete out.sales_channel_partners;
+        delete out.partner_venues;
+        delete out.channel_charges;
+        return out;
+    },
+
+    /*
+     * What would stop this save from meaning what the screen shows.
+     *
+     * Returns a sentence, or null. Checked before the request rather than
+     * after, because the server normalises quietly and a venue that merges
+     * into another one on save is data lost with a green toast on top.
+     */
+    venueProblems: function () {
+        var seen = {};
+        var clash = null;
+        $('.partner-venue-row').each(function () {
+            var $row = $(this);
+            var name = String($row.find('.venue-name').val() || '').trim();
+            var code = String($row.find('.venue-code').val() || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+            if (!name) { return; }
+            if (!code) { code = name.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 24); }
+            if (seen[code] && !clash) { clash = [seen[code], name, code]; }
+            seen[code] = seen[code] || name;
+        });
+        if (clash) {
+            return PosnicPro.i18n.t('lang_venue_code_clash', 'Two venues would share the code "{0}": "{1}" and "{2}". Give one of them a different code.')
+                .replace('{0}', clash[2]).replace('{1}', clash[0]).replace('{2}', clash[1]);
+        }
+        return null;
+    },
+    save: function () {
+        var problem = PosnicPro.salesChannels.venueProblems();
+        if (problem) { PosnicPro.alert('warning', problem); return; }
+        var loader = $('.loader-view-saleschannels');
+        loader.find('.loadingSpinner').remove();
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+
+        PosnicPro.put({
+            url: 'settings/group/channels',
+            data: JSON.stringify(PosnicPro.salesChannels.payload())
+        }, function (response) {
+            loader.find('.loadingSpinner').remove();
+            if (response.type === 'success') {
+                /* The menu follows the setting immediately: turning approval on
+                   and then hunting for where the orders went is exactly the
+                   confusion this screen exists to prevent. */
+                PosnicPro.local.set('online_order_approval', $("#online_order_approval").val() === 'manual' ? 'manual' : 'auto');
+                PosnicPro.applyOrderQueueVisibility();
+                PosnicPro.alert('success', response.message || PosnicPro.i18n.t('lang_settings_saved', 'Settings saved'));
+                /* Re-read, so the rows show exactly what the server kept.
+                   A row the server normalised or dropped must not sit on
+                   the screen looking saved until the next visit. */
+                PosnicPro.salesChannels.load();
+            } else {
+                PosnicPro.alert('error', response.message);
+            }
+        }, function () {
+            loader.find('.loadingSpinner').remove();
+            PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_save_the_channel_settings', 'Could not save the channel settings'));
+        });
+        return false;
+    }
+};
+
+/*
+ * Every screen that shows part of the channels group has to load it.
+ *
+ * This hung off '#channels-tab-line' - the one combined tab the split deleted.
+ * Nothing called load() after that, so Delivery Partners came up with no
+ * partners, Restaurant with no venues and no delivery charges, and the default
+ * branch and approval boxes empty. Worse than looking broken: collect() reads
+ * those same rows out of the DOM, so the next Save would have written the
+ * empty screen back and erased every partner, venue and charge the shop had.
+ *
+ * Restaurant is in this list because the venues and charges live there now.
+ * Loaded on entry rather than on every settings view: a shop may never open
+ * these, and the request would be wasted.
+ */
+PosnicPro.salesChannels.ENTRIES =
+    '#v-pills-onlineordering-tab, #manage_sec_onlineordering, ' +
+    '#v-pills-kioskmachine-tab, #manage_sec_kioskmachine, ' +
+    '#v-pills-captainapp-tab, #manage_sec_captainapp, ' +
+    '#v-pills-deliverypartners-tab, #manage_sec_deliverypartners, ' +
+    '#v-pills-webshop-tab, #manage_sec_webshop, ' +
+    '#v-pills-tableorder-tab, #manage_sec_tableorder';
+
+$(document).on('click', PosnicPro.salesChannels.ENTRIES, function () {
+    PosnicPro.salesChannels.load();
+});
+
+$(document).on('input', '.venue-code, .venue-unit-label, .venue-name', function () {
+    PosnicPro.salesChannels.fillVenueLinks();
+});
+$(document).on('click', '#add_partner_venue', function () {
+    $('#partner_venue_rows').append(PosnicPro.salesChannels.venueRow({}));
+});
+
+$(document).on('click', '.remove-partner-venue', function () {
+    $(this).closest('.partner-venue-row').remove();
+});
+
+$(document).on('click', '#add_channel_partner', function () {
+    $('#sales_channel_partner_rows').append(PosnicPro.salesChannels.partnerRow({}));
+});
+
+/*
+ * The pairing screen lives on the API, not in this bundle.
+ *
+ * A relative /pair resolves against wherever the console happens to be served
+ * from - which on the packaged desktop build is a file:// path, and the link
+ * would simply do nothing. API_URL is the shop's own server either way. Built
+ * on click rather than at load because API_URL is not set until sign-in.
+ */
+/*
+ * The shop's two public addresses, shown where the store id is typed.
+ *
+ * A shop that has just set a store id has no way to find out what to print on
+ * the table. It was reachable only by knowing the shape of the URL, which is
+ * the kind of thing that gets asked on a support call forever.
+ *
+ * Both are shown at once because they are two pages and not two modes: /order
+ * transacts, /menu is the same catalogue with no cart. Stopping orders leaves
+ * the menu standing, which is the whole point of having both.
+ */
+PosnicPro.settings.storefrontLinks = function () {
+    var id = String($('#kioskstore_id').val() || '').trim();
+    var row = $('#storefront_links_row');
+
+    /*
+     * The box spells out its own answer.
+     *
+     * "Store id" on an empty field asks somebody to supply a value whose
+     * purpose, source and shape are all unstated. Showing the real address it
+     * becomes - this shop's host, not a placeholder - turns the question into
+     * "finish this link", which anybody can answer.
+     */
+    var base = String((typeof API_URL === 'string' && API_URL) || '').replace(/\/+$/, '');
+    if (!base) { base = String(window.location.origin || '').replace(/\/+$/, ''); }
+    /* Written in two steps on purpose. A regex ending in an escaped slash -
+       /^https?:\/\// - finishes with two slashes, and any tool that strips
+       comments without understanding regex literals reads those as the start
+       of one and eats the rest of the line. The test harness does exactly
+       that, and did. */
+    var host = base.replace(/^[a-z]+:/i, '').replace(/^\/+/, '');
+    $('#storefront_url_prefix').text(host + '/order/');
+
+    if (!row.length) { return; }
+    if (!/^[A-Za-z0-9]{3,6}$/.test(id)) {
+        /* Nothing to print yet. An address with a blank where the code goes is
+           worse than no address: somebody will copy it. */
+        row.hide();
+        return;
+    }
+    /* API_URL, never a relative path - the desktop build serves this console
+       from file://, where "/order/AZ100" points at the local disk. */
+    var base = String((typeof API_URL === 'string' && API_URL) || '').replace(/\/+$/, '');
+    if (!base) { base = String(window.location.origin || '').replace(/\/+$/, ''); }
+    $('#storefront_order_url').val(base + '/order/' + id);
+    $('#storefront_menu_url').val(base + '/menu/' + id);
+    /* Lands in the conversation; harmless on a shop with the assistant off,
+       where it is the ordering page. */
+    $('#storefront_talk_url').val(base + '/order/' + id + '?ai=talk');
+    row.show();
+};
+
+/* Redrawn as it is typed, so the address is right before the save rather than
+   after a reload nobody thinks to do. */
+$(document).on('input change', '#kioskstore_id', function () {
+    PosnicPro.settings.storefrontLinks();
+});
+
+$(document).on('click', '#v-pills-onlineordering-tab, #manage_sec_onlineordering, #kioskaccount-tab-line', function () {
+    PosnicPro.settings.storefrontLinks();
+});
+
+$(document).on('click', '.copy-storefront-link', function () {
+    var input = document.getElementById($(this).data('target'));
+    if (!input) { return; }
+    var text = input.value || '';
+    var said = function () {
+        PosnicPro.alert('success', PosnicPro.i18n.t('lang_link_copied', 'Address copied'));
+    };
+    /* navigator.clipboard needs a secure context, which a shop on plain http
+       over its own LAN is not. The textarea fallback is what actually runs
+       there, so it is not dead code. */
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(said, function () { input.select(); });
+        return;
+    }
+    input.select();
+    try { document.execCommand('copy'); said(); } catch (e) { /* the text is selected; they can copy it */ }
+});
+
+$(document).on('click', '.storefront-open', function (e) {
+    e.preventDefault();
+    var input = document.getElementById($(this).data('target'));
+    if (input && input.value) { window.open(input.value, '_blank', 'noopener'); }
+});
+
+$(document).on('click', '#open_pairing_screen', function (e) {
+    e.preventDefault();
+    var base = (typeof API_URL === 'string' && API_URL) || '/';
+    window.open(base.replace(/\/+$/, '') + '/pair', '_blank', 'noopener');
+});
+
+$(document).on('click', '#add_webshop_partner', function () {
+    $('#webshop_partner_rows').append(PosnicPro.salesChannels.partnerRow({ channel: 'ecommerce' }));
+});
+
+/* Change a row's kind and it belongs on the other screen. Moving it there is
+   the honest answer: leaving an "Own webshop" row sitting under Delivery
+   Partners is how a shop ends up believing it saved something it cannot find. */
+/* The silence rule only applies to a queue, and the minutes only to a choice.
+   Bound beside the other channel-screen handlers, and calling the module that
+   owns the control rather than reaching into another namespace. */
+$(document).on('change', '#online_order_approval, #online_order_on_silence', function () {
+    PosnicPro.salesChannels.showSilenceRule();
+});
+
+$(document).on('change', '.partner-channel', function () {
+    var $row = $(this).closest('.channel-partner-row');
+    var target = $(this).val() === 'ecommerce' ? '#webshop_partner_rows' : '#sales_channel_partner_rows';
+    if (!$row.parent().is(target)) { $row.appendTo(target); }
+});
+
+$(document).on('click', '.remove-channel-partner', function () {
+    $(this).closest('.channel-partner-row').remove();
+});
+
+/*
+ * EVERY channel screen saves the whole group, and that is deliberate.
+ *
+ * collect() reads the DOM by class, and the panes are hidden rather than
+ * removed, so it sees every row wherever it sits. That means a save from the
+ * webshop screen still writes the aggregators, the venues and the charges
+ * exactly as they stand - which is what the one big form did before the split.
+ * Collecting only the open pane would be the change that quietly wipes the
+ * others, which is the bug this codebase has already paid for twice.
+ */
+$(document).on(
+    'submit',
+    '#online_orders_form, #delivery_partners_form, #webshop_partners_form',
+    function (e) {
+        e.preventDefault();
+        return PosnicPro.salesChannels.save();
+    }
+);
+
+/* Venues and delivery charges sit on the Restaurant page, as cards with their
+   own Save rather than a form - the same shape the serving periods use. */
+$(document).on('click', '.save-channel-settings', function () {
+    return PosnicPro.salesChannels.save();
+});
+
+/*
+ * WHICH PRODUCTS THIS CHANNEL SELLS, shown inside the channel you are in.
+ *
+ * One copy of the screen, borrowed by whichever pane is open. Four copies
+ * would mean four sets of the same ids, and a duplicate id is how a screen
+ * starts writing to the wrong form - this page already carries one such
+ * landmine and does not need three more.
+ */
+PosnicPro.salesChannels.PANE_CHANNEL = {
+    'v-pills-onlineordering': 'online',
+    'v-pills-kioskmachine': 'kiosk',
+    'v-pills-captainapp': 'tableside',
+    'v-pills-deliverypartners': 'marketplace',
+    'v-pills-webshop': 'ecommerce'
+};
+
+PosnicPro.salesChannels.lendProducts = function (paneId) {
+    var channel = PosnicPro.salesChannels.PANE_CHANNEL[paneId];
+    if (!channel) { return; }
+    var $host = $('#' + paneId + ' .channel-products-host').first();
+    var $block = $('#channel_items_block');
+    if (!$host.length || !$block.length) { return; }
+    if (!$block.parent().is($host)) { $block.appendTo($host); }
+    if (!PosnicPro.channelItems) { return; }
+
+    PosnicPro.channelItems.fillCategories();
+    /*
+     * Preselect AFTER the options exist.
+     *
+     * Setting a value a select has no option for is a silent no-op, so doing
+     * this before the list arrives leaves the box on whatever it was showing
+     * and the shopkeeper edits the wrong channel's items. Same trap as
+     * itemChannels.set() on the item page, and the reason fillChannels takes
+     * a callback at all.
+     */
+    PosnicPro.channelItems.fillChannels(function () {
+        $('#channel_items_channel').val(channel).trigger('change');
+    });
+};
+
+$(document).on(
+    'shown.bs.tab',
+    '#v-pills-onlineordering-tab, #v-pills-kioskmachine-tab, #v-pills-captainapp-tab, ' +
+        '#v-pills-deliverypartners-tab, #v-pills-webshop-tab',
+    function () {
+        PosnicPro.salesChannels.lendProducts(String($(this).attr('href') || '').replace('#', ''));
+    }
+);
+
+/*
+ * Serving periods: breakfast, lunch, dinner.
+ *
+ * Defined once here, and each dish says which it belongs to. The alternative -
+ * hours on every item - is data entry no shop will do, and moving breakfast
+ * half an hour would mean editing two hundred dishes.
+ */
+PosnicPro.dayparts = {
+    /* What a shop almost always means by these words, offered on first use so
+       the common case is one click rather than fourteen time pickers. */
+    SUGGESTED: [
+        { id: 'breakfast', name: 'Breakfast', from: '07:00', to: '11:00' },
+        { id: 'lunch', name: 'Lunch', from: '12:00', to: '15:30' },
+        { id: 'dinner', name: 'Dinner', from: '19:00', to: '23:00' }
+    ],
+
+    DAYS: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
+
+    toClock: function (minutes) {
+        if (minutes === null || minutes === undefined || minutes === '') return '';
+        if (typeof minutes === 'string') return minutes;
+        var n = Number(minutes);
+        if (!isFinite(n)) return '';
+        return ('0' + (Math.floor(n / 60) % 24)).slice(-2) + ':' + ('0' + (Math.trunc(n) % 60)).slice(-2);
+    },
+
+    /*
+     * One pair of times for the whole week, because that is what a restaurant
+     * means: lunch is lunch every day. A shop that genuinely varies by day
+     * still gets a correct week stored - the same shape the opening hours use -
+     * it just cannot type it here yet.
+     */
+    firstWindow: function (hours) {
+        var self = PosnicPro.dayparts;
+        if (!hours) return { from: '', to: '' };
+        for (var i = 0; i < self.DAYS.length; i++) {
+            var list = hours[self.DAYS[i]];
+            if (list && list.length) {
+                return { from: self.toClock(list[0].open), to: self.toClock(list[0].close) };
+            }
+        }
+        return { from: '', to: '' };
+    },
+
+    weekOf: function (from, to) {
+        var self = PosnicPro.dayparts;
+        if (!from || !to) return null;
+        var week = {};
+        self.DAYS.forEach(function (d) { week[d] = [{ open: from, close: to }]; });
+        return week;
+    },
+
+    rowHtml: function (part) {
+        var self = PosnicPro.dayparts;
+        var p = part || {};
+        var win = self.firstWindow(p.hours);
+        var safeName = $('<div>').text(p.name || '').html();
+
+        return '<div class="form-row align-items-end mb-2 daypart-row" data-id="' +
+            $('<div>').text(p.id || '').html() + '">' +
+            '<div class="form-group col-md-4">' +
+            '<input type="text" class="form-control form-control-sm daypart-name" value="' + safeName + '">' +
+            '</div>' +
+            '<div class="form-group col-md-3">' +
+            '<input type="time" class="form-control form-control-sm daypart-from" value="' + win.from + '">' +
+            '</div>' +
+            '<div class="form-group col-md-3">' +
+            '<input type="time" class="form-control form-control-sm daypart-to" value="' + win.to + '">' +
+            '</div>' +
+            '<div class="form-group col-md-2">' +
+            '<button type="button" class="btn btn-outline-danger btn-sm remove-daypart" aria-label="' +
+            PosnicPro.i18n.t('lang_remove_period', 'Remove period') +
+            '"><i class="feather icon-trash-2" aria-hidden="true"></i></button>' +
+            '</div></div>';
+    },
+
+    render: function (parts) {
+        var self = PosnicPro.dayparts;
+        var list = Array.isArray(parts) && parts.length ? parts : [];
+        $('#menu_daypart_rows').html(list.map(self.rowHtml).join(''));
+        /* Offer the usual three only when there are none: a shop that has
+           deliberately deleted lunch should not be handed it back. */
+        $('#suggest_dayparts').toggle(list.length === 0);
+    },
+
+    collect: function () {
+        var self = PosnicPro.dayparts;
+        var out = [];
+        $('.daypart-row').each(function () {
+            var $row = $(this);
+            var name = String($row.find('.daypart-name').val() || '').trim();
+            if (!name) return;
+            var from = $row.find('.daypart-from').val();
+            var to = $row.find('.daypart-to').val();
+            out.push({
+                /* The id survives a rename, so calling Breakfast "Morning"
+                   does not silently unassign every breakfast dish. */
+                id: $row.data('id') || name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''),
+                name: name,
+                hours: self.weekOf(from, to)
+            });
+        });
+        return out;
+    }
+};
+
+$(document).on('click', '#add_daypart', function () {
+    $('#menu_daypart_rows').append(PosnicPro.dayparts.rowHtml({}));
+    $('#suggest_dayparts').hide();
+});
+
+$(document).on('click', '#suggest_dayparts', function () {
+    var self = PosnicPro.dayparts;
+    self.render(self.SUGGESTED.map(function (s) {
+        return { id: s.id, name: s.name, hours: self.weekOf(s.from, s.to) };
+    }));
+});
+
+$(document).on('click', '.remove-daypart', function () {
+    $(this).closest('.daypart-row').remove();
+});
+
+/*
+ * Stop taking orders, in one click.
+ *
+ * Sets the pause to the end of today rather than for ever. A switch with no
+ * end is one somebody flips during a Friday rush and finds still off the
+ * following Tuesday, with nobody able to say why the orders stopped - which is
+ * why the underlying field is a moment and not a flag.
+ */
+/*
+ * The separate "Stop taking orders" button is gone, and this handler with it.
+ *
+ * It did exactly what "Rest of today" already did, and announced it with a
+ * SUCCESS toast reading "Orders stopped for today" - on a screen where nothing
+ * is stored until Save. A kitchen under water reads that as done, walks away,
+ * and the orders keep arriving. Stopping is now the red button in the group
+ * above, beside a marker that stays on screen until the form is saved.
+ */
+
+/*
+ * WHAT EACH CHANNEL SELLS.
+ *
+ * An item is on every channel the shop runs unless somebody says otherwise, so
+ * this screen records exceptions - and it records them in BULK, because a shop
+ * with four hundred lines is never going to open four hundred item pages to
+ * keep cigarettes off Swiggy.
+ *
+ * The filters are the ones a shop already thinks in: a category, or part of a
+ * name. Not a page number.
+ */
+PosnicPro.channelItems = {
+    /* Filled from the shop's own channels and partners, so a shop that does
+       not use Swiggy is never offered it. */
+    fillChannels: function (done) {
+        var channels = (PosnicPro.itemChannels && PosnicPro.itemChannels._options) || null;
+        var draw = function (options) {
+            $('#channel_items_channel').html(options.map(function (o) {
+                return '<option value="' + $('<div>').text(o.id).html() + '">'
+                    + $('<div>').text(o.label).html() + '</option>';
+            }).join(''));
+            if (done) { done(); }
+        };
+        if (channels) { draw(channels); return; }
+        if (PosnicPro.itemChannels) {
+            PosnicPro.itemChannels.load(function () {
+                draw(PosnicPro.itemChannels._options || []);
+            });
+        } else if (done) {
+            done();
+        }
+    },
+
+    fillCategories: function () {
+        PosnicPro.get({ url: 'categories', data: { limit: 500 } }, function (response) {
+            var rows = (response && response.data && (response.data.list || response.data)) || [];
+            if (!Array.isArray(rows)) { return; }
+            var all = '<option value="">' + PosnicPro.i18n.t('lang_report_all', 'All') + '</option>';
+            $('#channel_items_category').html(all + rows.map(function (c) {
+                return '<option value="' + $('<div>').text(c._id || c.id).html() + '">'
+                    + $('<div>').text(c.name || '').html() + '</option>';
+            }).join(''));
+        }, function () { /* no categories is not an error */ });
+    },
+
+    find: function () {
+        var self = PosnicPro.channelItems;
+        var channel = $('#channel_items_channel').val();
+        if (!channel) { return; }
+
+        PosnicPro.get({
+            url: 'items/channel',
+            data: {
+                channel: channel,
+                category_id: $('#channel_items_category').val() || '',
+                search: $('#channel_items_search').val() || ''
+            }
+        }, function (response) {
+            var data = (response && response.data) || { items: [] };
+            self.render(data.items || []);
+        }, function () {
+            $('#channel_items_rows').html('');
+            $('#channel_items_wrap').hide();
+            PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_load_the_items', 'Could not load the items.'));
+        });
+    },
+
+    render: function (items) {
+        var esc = function (v) { return $('<div>').text(v == null ? '' : v).html(); };
+        var t = function (k, f) { return PosnicPro.i18n.t(k, f); };
+
+        $('#channel_items_rows').html(items.map(function (item) {
+            /* The state shown is what the shop DECIDED, not what happens to be
+               true at four in the afternoon: somebody configuring a catalogue
+               is not asking about the clock. */
+            var mark = item.on
+                ? '<span class="badge badge-success-inverse">' + t('lang_sold_here', 'Sold here') + '</span>'
+                : '<span class="badge badge-danger-inverse">' + t('lang_not_sold_here', 'Not sold here') + '</span>';
+            var hours = item.hours
+                ? ' <span class="small text-muted">' + esc(item.hours.from) + ' - ' + esc(item.hours.to) + '</span>'
+                : '';
+
+            return '<tr>'
+                + '<td style="width:36px;"><div class="custom-control custom-checkbox">'
+                + '<input type="checkbox" class="custom-control-input channel-item-pick" '
+                + 'id="ci_' + esc(item.id) + '" value="' + esc(item.id) + '">'
+                + '<label class="custom-control-label" for="ci_' + esc(item.id) + '"></label>'
+                + '</div></td>'
+                + '<td>' + esc(item.name) + hours + '</td>'
+                + '<td class="text-muted small">' + esc(item.category_name) + '</td>'
+                + '<td class="text-right">' + mark + '</td>'
+                + '</tr>';
+        }).join(''));
+
+        $('#channel_items_count').text(items.length + ' ' + t('lang_items_found', 'items'));
+        $('#channel_items_all').prop('checked', false);
+        $('#channel_items_wrap').toggle(items.length > 0);
+        if (!items.length) {
+            PosnicPro.alert('info', t('lang_no_items_match', 'Nothing matches that filter.'));
+        }
+    },
+
+    apply: function (on) {
+        var self = PosnicPro.channelItems;
+        var ids = $('.channel-item-pick:checked').map(function () { return this.value; }).get();
+        if (!ids.length) {
+            PosnicPro.alert('error', PosnicPro.i18n.t('lang_select_at_least_one_item', 'Select at least one item.'));
+            return;
+        }
+
+        PosnicPro.post({
+            url: 'items/channel',
+            data: JSON.stringify({
+                channel: $('#channel_items_channel').val(),
+                item_ids: ids,
+                on: on
+            })
+        }, function (response) {
+            if (response && response.type === 'success') {
+                /* Says how many actually moved, not how many were selected:
+                   "40 selected, 3 changed" is the honest answer when most were
+                   already where the shop wanted them. */
+                var d = response.data || {};
+                PosnicPro.alert('success', response.message + ' (' + (d.changed || 0) + ')');
+                self.find();
+            } else {
+                PosnicPro.alert('error', (response && response.message) || '');
+            }
+        }, function (xhr) {
+            var body = xhr && xhr.responseJSON;
+            PosnicPro.alert('error', (body && body.message)
+                || PosnicPro.i18n.t('lang_could_not_update_the_items', 'Could not update the items.'));
+        });
+    }
+};
+
+/*
+ * The screen fills when a channel pane lends it, not on a tab that is gone.
+ *
+ * This used to hang off '#channels-tab-line', the tab id of the one combined
+ * "Channels and products" screen. The split deleted that tab, so nothing ever
+ * called fillChannels again: the Channel box came up empty, Show found nothing,
+ * and the whole tab read as broken - which is exactly how it was reported.
+ *
+ * Binding to the pane that borrows the screen means it cannot come apart the
+ * same way again: the thing that shows the screen is the thing that fills it.
+ */
+
+$(document).on('click', '#channel_items_find', function () {
+    PosnicPro.channelItems.find();
+});
+
+$(document).on('change', '#channel_items_all', function () {
+    $('.channel-item-pick').prop('checked', $(this).is(':checked'));
+});
+
+$(document).on('click', '#channel_items_on', function () { PosnicPro.channelItems.apply(true); });
+$(document).on('click', '#channel_items_off', function () { PosnicPro.channelItems.apply(false); });
+
+/*
+ * Serving periods, saved from the Restaurant page.
+ *
+ * They MOVED there from the channels tab because breakfast is breakfast
+ * wherever the menu is shown - on a QR code, on the kiosk, in the app. They
+ * are the kitchen's clock, not one channel's, and leaving them inside a
+ * channel would have meant copying them into the next channel within a month.
+ *
+ * They still LIVE in the channels settings group, because that is where the
+ * server keeps menu_dayparts and moving a stored key is a migration for no
+ * gain. The screen they are edited on and the group they are stored in do not
+ * have to agree, and pretending otherwise would be a database change to fix a
+ * layout problem.
+ */
+PosnicPro.servingPeriods = {
+    load: function () {
+        PosnicPro.get({ url: 'settings/group/channels', data: {} }, function (response) {
+            var values = (response && response.data && response.data.values) || {};
+            PosnicPro.dayparts.render(values.menu_dayparts);
+        }, function () {
+            PosnicPro.dayparts.render([]);
+        });
+    },
+
+    save: function () {
+        var loader = $('.loader-view-dayparts');
+        loader.find('.loadingSpinner').remove();
+        $("<div class='loadingSpinner'></div>").appendTo(loader);
+
+        /*
+         * Only menu_dayparts is sent.
+         *
+         * The group endpoint writes what it is given and leaves the rest, so
+         * this cannot reach across and blank the store address or the partner
+         * list that live in the same group and are edited on another screen.
+         */
+        PosnicPro.put({
+            url: 'settings/group/channels',
+            data: JSON.stringify({ menu_dayparts: PosnicPro.dayparts.collect() })
+        }, function (response) {
+            loader.find('.loadingSpinner').remove();
+            if (response && response.type === 'success') {
+                PosnicPro.alert('success', response.message
+                    || PosnicPro.i18n.t('lang_settings_saved', 'Settings saved'));
+                /* The item form caches this group for the session. A period
+                   saved here must be offered on the next dish opened, not on
+                   the next sign-in. Both boxes come from the same request. */
+                if (PosnicPro.itemChannels) { PosnicPro.itemChannels._options = null; }
+                if (PosnicPro.itemDayparts) { PosnicPro.itemDayparts._options = null; }
+            } else {
+                PosnicPro.alert('error', (response && response.message) || '');
+            }
+        }, function () {
+            loader.find('.loadingSpinner').remove();
+            PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_save_the_serving_periods',
+                'Could not save the serving periods'));
+        });
+    }
+};
+
+$(document).on('click', '#v-pills-tableorder-tab, #manage_sec_tableorder', function () {
+    PosnicPro.servingPeriods.load();
+});
+
+$(document).on('click', '#save_dayparts', function () {
+    PosnicPro.servingPeriods.save();
+});
+
+/*
+ * The delivery platforms and webshops most shops actually mean.
+ *
+ * Mirrors KNOWN_PARTNERS in api/src/utils/sales-channels.js. The ids have to
+ * match, because they are what a sale stores and what the commission report
+ * groups by: a shop that types "Swiggy" one day and "swiggy" the next ends up
+ * with two rows holding half a month each.
+ *
+ * A preset is a starting point, not a restriction. A shop with a local
+ * aggregator nobody has heard of still adds one by hand - the whole reason
+ * partners are DATA rather than features is that a new one must never be a
+ * release.
+ */
+PosnicPro.partnerPresets = {
+    /*
+     * BRAND NAMES, NOT UI TEXT.
+     *
+     * Swiggy is Swiggy in Tamil. These are never translated and never wrapped
+     * in t() - which also keeps them out of the load-time trap, because a t()
+     * call in a literal here runs before any language pack exists.
+     *
+     * The auto-tagger will offer to wrap them every time somebody runs it.
+     * Say no. They belong beside the other proper nouns in _glossary.json,
+     * not in a translator's queue.
+     */
+    LIST: [
+        { id: 'swiggy', label: 'Swiggy', channel: 'marketplace' },
+        { id: 'zomato', label: 'Zomato', channel: 'marketplace' },
+        { id: 'ondc', label: 'ONDC', channel: 'marketplace' },
+        { id: 'magicpin', label: 'magicpin', channel: 'marketplace' },
+        { id: 'opencart', label: 'OpenCart', channel: 'ecommerce' },
+        { id: 'woocommerce', label: 'WooCommerce', channel: 'ecommerce' },
+        { id: 'shopify', label: 'Shopify', channel: 'ecommerce' }
+    ],
+
+    render: function () {
+        var esc = function (v) { return $('<div>').text(v == null ? '' : v).html(); };
+        var t = function (k, f) { return PosnicPro.i18n.t(k, f); };
+
+        $('#partner_presets').html(
+            '<span class="small text-muted mr-2">' + t('lang_add_quickly', 'Add quickly') + ':</span>'
+            + PosnicPro.partnerPresets.LIST.map(function (p) {
+                return '<button type="button" class="btn btn-outline-secondary btn-sm mr-1 mb-1 partner-preset" '
+                    + 'data-id="' + esc(p.id) + '" data-label="' + esc(p.label) + '" '
+                    + 'data-channel="' + esc(p.channel) + '">'
+                    + '<i class="feather icon-plus mr-1"></i>' + esc(p.label) + '</button>';
+            }).join('')
+        );
+        PosnicPro.partnerPresets.markUsed();
+    },
+
+    /* A platform already in the list is shown as used rather than hidden: a
+       shop looking for Swiggy should find it either way, and learn that it is
+       already there instead of adding a second one. */
+    markUsed: function () {
+        var taken = {};
+        $('.channel-partner-row .partner-label').each(function () {
+            var name = String($(this).val() || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_');
+            if (name) { taken[name] = true; }
+        });
+        $('.partner-preset').each(function () {
+            var used = !!taken[$(this).data('id')];
+            $(this).prop('disabled', used).toggleClass('btn-outline-secondary', !used)
+                .toggleClass('btn-secondary-rgba', used);
+        });
+    }
+};
+
+$(document).on('click', '.partner-preset', function () {
+    var $b = $(this);
+    $('#sales_channel_partner_rows').append(PosnicPro.salesChannels.partnerRow({
+        label: $b.data('label'),
+        channel: $b.data('channel'),
+        /* No rate guessed. What Swiggy charges this shop is what this shop
+           negotiated, and a plausible default is the kind of number that gets
+           saved unread and then disagrees with an invoice. */
+        commission_percent: 0,
+        enabled: true
+    }));
+    PosnicPro.partnerPresets.markUsed();
+});
+
+$(document).on('input', '.partner-label', function () {
+    PosnicPro.partnerPresets.markUsed();
+});
+
+/* The one-tap Swiggy/Zomato/OpenCart buttons, on the two screens that show
+   partner rows. Bound to the deleted tab, they simply never drew - which is
+   why Delivery Partners offered nothing but "Add another". */
+$(document).on(
+    'click',
+    '#v-pills-deliverypartners-tab, #manage_sec_deliverypartners, ' +
+        '#v-pills-webshop-tab, #manage_sec_webshop',
+    function () {
+        PosnicPro.partnerPresets.render();
+    }
+);
+
+/*
+ * Turning AI on, which is the step that was missing.
+ *
+ * The item screen has had a "Write it for me" button since the seam landed,
+ * hidden until the shop has a provider and a key - and there was nowhere to
+ * put either, so it could never appear. An engine with no ignition.
+ *
+ * Posnic charges nothing for AI. The shop brings its own account and pays the
+ * provider directly, which is why this works on every plan including the free
+ * and self-hosted one, and why the limit below is a courtesy to the shopkeeper
+ * rather than a control on us: it is their money.
+ *
+ * Delegated handlers only: this pane is part of the settings module and is not
+ * in the DOM when this file runs, which is the dead-selector trap.
+ */
+PosnicPro.settings = PosnicPro.settings || {};
+PosnicPro.settings.ai = {
+    /* Must match CLEAR_SECRET in api/src/services/settings-groups.js. An
+       empty value means "leave the saved credential alone", so removing one
+       has to be said on purpose, with a word no empty box can send. */
+    CLEAR_SECRET: '__posnic_clear__',
+    /* True only between pressing Replace and saving or backing out. */
+    _replacing: false,
+    /* True only between pressing Edit on the set-up line and saving. */
+    _editing: false,
+    /*
+     * Where each provider actually hands out a key.
+     *
+     * Deep links rather than a home page: "create an account and find the
+     * API section" is the step people give up on, and every one of these
+     * consoles buries it somewhere different.
+     */
+    KEY_PAGES: {
+        anthropic: {
+            url: 'https://console.anthropic.com/settings/keys', name: 'Anthropic Console',
+            paid: true, shownOnce: true
+        },
+        openai: {
+            url: 'https://platform.openai.com/api-keys', name: 'OpenAI Platform',
+            paid: true, shownOnce: true
+        },
+        /* Gemini has a free tier and shows the key again later, so two of
+           the three steps read differently for it. */
+        google: {
+            url: 'https://aistudio.google.com/apikey', name: 'Google AI Studio',
+            paid: false, shownOnce: false
+        }
+    },
+
+    /* The key, the limit and the meter only mean something once a provider is
+       chosen. Controls that cannot affect anything should not ask for a
+       decision. */
+    syncRows: function () {
+        if (!PosnicPro.settings.ai._switchWired) {
+            PosnicPro.settings.ai._switchWired = true;
+            $(document).on('change', '#ai_ordering_assistant', function () { PosnicPro.settings.ai.syncRows(); });
+            $(document).on('change', '#ai_live_voice', function () { PosnicPro.settings.ai.syncRows(); });
+        }
+        var on = !!$('#ai_provider').val();
+        var where = PosnicPro.settings.ai.KEY_PAGES[$('#ai_provider').val() || ''];
+        /*
+         * Open while there is no key, put away once there is one. Somebody
+         * who has already pasted a key came back for the limit or the
+         * meter, and should not have to scroll past three steps they have
+         * done to reach them.
+         */
+        var needsHelp = on && !!where && !PosnicPro.settings.ai._keySaved;
+        $('#ai_key_help').toggle(needsHelp || PosnicPro.settings.ai._howtoOpen === true);
+        $('#ai_howto_toggle_row').toggle(on && !!where && !!PosnicPro.settings.ai._keySaved
+            && PosnicPro.settings.ai._howtoOpen !== true);
+        if (where) {
+            $('#ai_key_link').attr('href', where.url).text(where.name);
+            $('#ai_howto_2').text(where.paid
+                ? PosnicPro.i18n.t('lang_ai_howto_2_paid', 'Add credit or a payment method. A key with no balance behind it fails on the first press.')
+                : PosnicPro.i18n.t('lang_ai_howto_2_free', 'There is a free allowance to start with, so you can try it before adding any payment method.'));
+            $('#ai_howto_3').text(where.shownOnce
+                ? PosnicPro.i18n.t('lang_ai_howto_3_once', 'Create a key and paste it above. It is shown once, so copy it before closing that page.')
+                : PosnicPro.i18n.t('lang_ai_howto_3_again', 'Create a key and paste it above. You can open that page again later if you need to see it.'));
+        }
+        $('#ai_key_row,#ai_cap_row,#ai_assistant_row').toggle(on);
+        /* The greeting, the house notes and the how-it-works only once the
+           door is open: a shop that has not switched it on is not asked to
+           write for it. */
+        $('#ai_assistant_config').toggle(on && $('#ai_ordering_assistant').is(':checked'));
+        /* Say in one word what the microphone will do, so nobody has to
+           guess from a page of hints why it only transcribed. */
+        var liveOn = $('#ai_live_voice').is(':checked');
+        var openai = $('#ai_provider').val() === 'openai';
+        $('#ai_live_voice_state')
+            .toggleClass('badge-success', liveOn && openai)
+            .toggleClass('badge-secondary', !(liveOn && openai))
+            .text(liveOn && openai
+                ? PosnicPro.i18n.t('lang_ai_live_voice_on', 'Live: the microphone opens a voice call with the assistant')
+                : liveOn
+                    ? PosnicPro.i18n.t('lang_ai_live_voice_needs_openai', 'Live voice needs an OpenAI key; with this provider the microphone works turn by turn')
+                    : PosnicPro.i18n.t('lang_ai_live_voice_off', 'Off: the microphone works turn by turn, with the phone\'s own voice'));
+        /* A saved key and no key must not look the same. The key never comes
+           back to the browser, so "saved" is a badge and two buttons, and the
+           empty box only appears when somebody asks to replace it. */
+        var saved = PosnicPro.settings.ai._keySaved === true;
+        var replacing = PosnicPro.settings.ai._replacing === true;
+        $('#ai_key_status').toggle(on && saved && !replacing);
+        $('#ai_api_key').toggle(on && (!saved || replacing));
+        $('#ai_key_cancel').toggle(on && saved && replacing);
+        $('#ai_spend_row').toggle(on && $('#ai_spend_table').children().length > 0);
+        /*
+         * SET UP: with a key saved, the provider, the key, the how-to and the
+         * limit are answered questions, and the form folds to one line that
+         * says what answers and the limit, with Edit and Remove. Decided
+         * last, so it wins over every toggle above. Save stays: the customer
+         * assistant switch below shares it.
+         */
+        var configured = on && saved && PosnicPro.settings.ai._editing !== true;
+        $('#ai_configured').toggle(configured);
+        if (configured) {
+            $('#ai_configured_provider').text(
+                $('#ai_provider option:selected').text().replace(/\s+-\s.*$/, '').trim());
+            var cap = String($('#ai_monthly_cap').val() || '').trim();
+            $('#ai_configured_cap').text(cap || PosnicPro.i18n.t('lang_ai_no_limit', 'none'));
+            $('#ai_provider_row,#ai_key_row,#ai_howto_toggle_row,#ai_key_help,#ai_cap_row').hide();
+        } else {
+            $('#ai_provider_row').show();
+        }
+    },
+
+    load: function () {
+        /* Collapsed again on every visit. Opening it was a request for this
+           look at the page, not a preference to remember. */
+        PosnicPro.settings.ai._howtoOpen = false;
+        PosnicPro.settings.ai._replacing = false;
+        PosnicPro.settings.ai._editing = false;
+        PosnicPro.get({ url: 'settings/group/preferences' }, function (response) {
+            if (response.type !== 'success' || !response.data) { return; }
+            var v = response.data.values || response.data;
+            $('#ai_provider').val(v.ai_provider || '');
+            $('#ai_monthly_cap').val(v.ai_monthly_cap || '');
+            $('#ai_ordering_assistant').prop('checked', String(v.ai_ordering_assistant) === 'true');
+            $('#ai_assistant_greeting').val(v.ai_assistant_greeting || '');
+            $('#ai_live_voice').prop('checked', String(v.ai_live_voice) === 'true');
+            $('#ai_assistant_instructions').val(v.ai_assistant_instructions || '');
+            PosnicPro.settings.ai.syncRows();
+        }, function () { /* the card still lets you choose and save */ });
+
+        /* Which secrets EXIST, never what they are. */
+        PosnicPro.get({ url: 'settings/group/secrets' }, function (response) {
+            if (response.type !== 'success' || !response.data) { return; }
+            var saved = (response.data.configured || {}).ai_api_key === true;
+            PosnicPro.settings.ai._keySaved = saved;
+            PosnicPro.settings.ai.syncRows();
+            $('#ai_api_key').attr('placeholder', saved
+                ? PosnicPro.i18n.t('lang_ai_key_saved', 'A key is saved. Type a new one to replace it.')
+                : PosnicPro.i18n.t('lang_paste_the_key_from_your_provider', 'Paste the key from your provider'));
+        }, function () { /* the placeholder is a courtesy, not the feature */ });
+
+        PosnicPro.settings.ai.loadSpend();
+    },
+
+    /* The meter's rows are feature keys; a shopkeeper reads what they mean. */
+    featureLabel: function (feature) {
+        var names = {
+            item_description: PosnicPro.i18n.t('lang_ai_feature_item_description', 'Item descriptions'),
+            ordering_assistant: PosnicPro.i18n.t('lang_ai_feature_ordering_assistant', 'Ordering assistant, typed'),
+            voice_order_live: PosnicPro.i18n.t('lang_ai_feature_voice_order_live', 'Talk to order, live voice'),
+            voice_order: PosnicPro.i18n.t('lang_ai_feature_voice_order', 'Voice orders on the handset')
+        };
+        return names[feature] || String(feature || '');
+    },
+
+    /* The server says which currency the figures are in, from the branch
+       record; the sign this screen saved at setup is the fallback. */
+    currencySymbol: function (data) {
+        var fromServer = data && data.currency && data.currency.symbol;
+        return String(fromServer || PosnicPro.local.get('currencySign') || 'Rs.');
+    },
+
+    /*
+     * What it has cost so far, because somebody spending their own money is
+     * entitled to watch the meter without leaving the page. Feature by
+     * feature, with the calls and, for live voice, the minutes of open line
+     * behind the figure; the total against the limit as a bar; the price of
+     * a minute beside the live switch; and the total on the folded line, so
+     * a shop that set up and left still sees the month at a glance.
+     */
+    loadSpend: function () {
+        PosnicPro.get('items/aiSpend', {}, function (response) {
+            var data = (response && response.data) || {};
+            var rows = data.features || [];
+            var host = $('#ai_spend_table').empty();
+            var sym = PosnicPro.settings.ai.currencySymbol(data);
+            var esc = PosnicPro.escapeHtml;
+            if (data.voice && data.voice.per_minute) {
+                $('#ai_live_voice_rate').text(PosnicPro.i18n.t('lang_ai_live_voice_rate', 'About {amount} for each minute of conversation, counted against the monthly limit while the call is on.')
+                    .replace('{amount}', sym + ' ' + data.voice.per_minute));
+            }
+            if (!rows.length) {
+                $('#ai_configured_spent_wrap').hide();
+                PosnicPro.settings.ai.syncRows();
+                return;
+            }
+            var html = '<table class="ai-spend"><thead><tr>'
+                + '<th>' + esc(PosnicPro.i18n.t('lang_ai_spend_feature', 'What')) + '</th>'
+                + '<th class="num">' + esc(PosnicPro.i18n.t('lang_ai_spend_calls', 'Calls')) + '</th>'
+                + '<th class="num">' + esc(PosnicPro.i18n.t('lang_ai_spend_minutes', 'Minutes')) + '</th>'
+                + '<th class="num">' + esc(PosnicPro.i18n.t('lang_ai_spend_cost', 'About')) + '</th>'
+                + '</tr></thead><tbody>';
+            for (var i = 0; i < rows.length; i += 1) {
+                var row = rows[i];
+                var minutes = row.seconds > 0 ? (row.seconds / 60).toFixed(1) : '';
+                html += '<tr><td>' + esc(PosnicPro.settings.ai.featureLabel(row.feature)) + '</td>'
+                    + '<td class="num">' + esc(row.calls != null ? String(row.calls) : '') + '</td>'
+                    + '<td class="num">' + esc(minutes) + '</td>'
+                    + '<td class="num">' + esc(sym + ' ' + row.spent) + '</td></tr>';
+            }
+            html += '</tbody></table>';
+            host.html(html);
+            $('#ai_spend_total').text(sym + ' ' + (data.total || '0.00'));
+            var cap = Number(data.cap) || 0;
+            var total = Number(data.total) || 0;
+            if (cap > 0) {
+                var pct = Math.min(100, Math.round((total / cap) * 100));
+                $('#ai_spend_meter').show();
+                $('#ai_spend_meter_bar').css('width', pct + '%').toggleClass('is-near', pct >= 80);
+                $('#ai_spend_meter_text').text(PosnicPro.i18n.t('lang_ai_spend_of_cap', '{pct}% of the {cap} monthly limit')
+                    .replace('{pct}', String(pct)).replace('{cap}', sym + ' ' + data.cap));
+            } else {
+                $('#ai_spend_meter').hide();
+                $('#ai_spend_meter_text').text(PosnicPro.i18n.t('lang_ai_spend_no_cap', 'No monthly limit is set.'));
+            }
+            $('#ai_configured_spent').text('\u2248 ' + sym + ' ' + (data.total || '0.00'));
+            $('#ai_configured_spent_wrap').show();
+            PosnicPro.settings.ai.syncRows();
+        }, function () { /* no meter is not a broken page */ });
+    },
+
+    /*
+     * Remove the saved key.
+     *
+     * Asked first, because the only thing this page knows about the key is
+     * that it exists, and the person removing it may not have the original to
+     * paste back. The provider account is untouched; only what this shop
+     * holds is cleared, and the AI buttons go with it until a new key is saved.
+     */
+    removeKey: function () {
+        swal({
+            title: PosnicPro.i18n.t('lang_ai_key_remove_q', 'Remove the saved key?'),
+            text: PosnicPro.i18n.t('lang_ai_key_remove_text', 'The AI buttons disappear until a new key is saved. Your provider account is not touched.'),
+            showCancelButton: true,
+            confirmButtonClass: 'btn btn-danger',
+            cancelButtonClass: 'btn btn-secondary m-l-10',
+            confirmButtonText: PosnicPro.i18n.t('lang_ai_key_remove', 'Remove'),
+            cancelButtonText: PosnicPro.i18n.t('lang_cancel', 'Cancel')
+        }).then(function () {
+            PosnicPro.put({
+                url: 'settings/group/secrets',
+                data: JSON.stringify({ ai_api_key: PosnicPro.settings.ai.CLEAR_SECRET })
+            }, function (response) {
+                if (response.type !== 'success') {
+                    PosnicPro.alert(response.type, response.message);
+                    return;
+                }
+                PosnicPro.settings.ai._keySaved = false;
+                PosnicPro.settings.ai._replacing = false;
+                /* The item screen's cached "is AI available" answer is stale
+                   the moment the key is gone. */
+                if (PosnicPro.items) { PosnicPro.items._aiAvailable = null; }
+                PosnicPro.alert('success', PosnicPro.i18n.t('lang_ai_key_removed',
+                    'Key removed. The AI buttons are hidden until a new one is saved.'));
+                PosnicPro.settings.ai.load();
+            }, function () {
+                PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_remove_the_ai_key', 'Could not remove the AI key'));
+            });
+        }, function () { /* kept */ });
+    },
+    save: function () {
+        var provider = $('#ai_provider').val() || '';
+        var key = String($('#ai_api_key').val() || '');
+        var cap = String($('#ai_monthly_cap').val() || '').trim();
+
+        PosnicPro.put({
+            url: 'settings/group/preferences',
+            data: JSON.stringify({
+                ai_provider: provider,
+                /* Empty means no limit, which is a real choice and not the
+                   absence of one, so it is sent as an empty string rather
+                   than skipped. */
+                ai_monthly_cap: cap,
+                /* The ordering page's door, as a word: 'false' is a choice
+                   the reader must not mistake for silence. */
+                ai_ordering_assistant: $('#ai_ordering_assistant').is(':checked') ? 'true' : 'false',
+                ai_assistant_greeting: String($('#ai_assistant_greeting').val() || '').trim().slice(0, 200),
+                ai_live_voice: $('#ai_live_voice').is(':checked') ? 'true' : 'false',
+                ai_assistant_instructions: String($('#ai_assistant_instructions').val() || '').trim().slice(0, 1500)
+            })
+        }, function (response) {
+            if (response.type !== 'success') {
+                PosnicPro.alert(response.type, response.message);
+                return;
+            }
+            /* An empty key means LEAVE THE SAVED ONE ALONE. The field loads
+               blank because the value is never sent to a browser, so writing
+               that emptiness through would blank the shop's credential the
+               first time anybody changed the limit. */
+            if (!key) {
+                PosnicPro.alert('success', PosnicPro.i18n.t('lang_ai_saved',
+                    'Saved. The AI button now appears on the item screen, beside Description.'));
+                /* The item screen asks once per session whether AI is usable; that
+                   answer is now stale, so let it ask again rather than leaving the
+                   button hidden until a reload. */
+                if (PosnicPro.items) { PosnicPro.items._aiAvailable = null; }
+                $('#ai_api_key').val('');
+                return;
+            }
+            PosnicPro.put({
+                url: 'settings/group/secrets',
+                data: JSON.stringify({ ai_api_key: key })
+            }, function (second) {
+                if (second.type === 'success') {
+                    PosnicPro.alert('success', PosnicPro.i18n.t('lang_ai_saved',
+                        'Saved. The AI button now appears on the item screen, beside Description.'));
+                    /* The item screen asks once per session whether AI is usable; that
+                       answer is now stale, so let it ask again rather than leaving the
+                       button hidden until a reload. */
+                    if (PosnicPro.items) { PosnicPro.items._aiAvailable = null; }
+                    $('#ai_api_key').val('');
+                    PosnicPro.settings.ai.load();
+                } else {
+                    PosnicPro.alert(second.type, second.message);
+                }
+            }, function () {
+                PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_save_the_ai_key', 'Could not save the AI key'));
+            });
+        }, function () {
+            PosnicPro.alert('error', PosnicPro.i18n.t('lang_could_not_save_the_ai_settings', 'Could not save the AI settings'));
+        });
+    }
+};
+
+$(document).on('shown.bs.tab', 'a[href="#v-pills-ai"]', function () {
+    PosnicPro.settings.ai.load();
+});
+$(document).on('change', '#ai_provider', function () {
+    PosnicPro.settings.ai.syncRows();
+});
+$(document).on('click', '#ai_howto_toggle', function () {
+    /* One way: opened on request, and it stays open for as long as they
+       are on the page. Closing it again is what leaving the page does. */
+    PosnicPro.settings.ai._howtoOpen = true;
+    PosnicPro.settings.ai.syncRows();
+});
+$(document).on('click', '#ai_save', function () {
+    PosnicPro.settings.ai.save();
+});
+$(document).on('click', '#ai_key_replace', function () {
+    PosnicPro.settings.ai._replacing = true;
+    PosnicPro.settings.ai.syncRows();
+    $('#ai_api_key').val('').trigger('focus');
+});
+$(document).on('click', '#ai_key_cancel', function () {
+    /* Nothing was sent; the saved key was never in danger. */
+    PosnicPro.settings.ai._replacing = false;
+    $('#ai_api_key').val('');
+    PosnicPro.settings.ai.syncRows();
+});
+$(document).on('click', '#ai_key_remove', function () {
+    PosnicPro.settings.ai.removeKey();
+});
+$(document).on('click', '#ai_edit', function () {
+    PosnicPro.settings.ai._editing = true;
+    PosnicPro.settings.ai.syncRows();
+});
+$(document).on('click', '#ai_remove_all', function () {
+    /* The same removal as the key row's: asked first, then the key goes
+       and the form comes back empty for a fresh setup. */
+    PosnicPro.settings.ai.removeKey();
+});
+
+$(document).on('click', '#v-pills-mobilepos-tab', function (e) {
+    e.preventDefault();
+    var base = (typeof API_URL === 'string' && API_URL) || '/api';
+    $('#mobile_pos_frame').attr('src', base.replace(/\/+$/, '') + '/mobile-pos-setup');
+});
+
+window.addEventListener('message', function (event) {
+    var frames = ['mobile_pos_frame', 'branch_payments_frame'].map(function (id) { return document.getElementById(id); });
+    if (!frames.some(function (frame) { return frame && frame.contentWindow === event.source && frame.src && new URL(frame.src, location.href).origin === event.origin; })) return;
+    var data = event.data || {};
+    if (data.type !== 'posnic-settings-nav' || ['modules', 'devices', 'branchpayments'].indexOf(data.section) < 0) return;
+    if (data.section === 'devices') PosnicPro.handsets.filter = 'mobile-pos';
+    location.hash = '#/settings/' + data.section;
+});
+$(document).on('click', '#captain_devices_link', function () { PosnicPro.handsets.filter = 'captain'; });

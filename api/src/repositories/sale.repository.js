@@ -1,0 +1,13645 @@
+const mongoose = require('mongoose');
+const { currentConnection } = require('../db/tenant-context');
+const { ObjectId } = require('mongodb');
+const crypto = require('crypto');
+const BaseModel = require('../models/base.model');
+const datePreference = require('../utils/date-preference');
+const { WALK_IN_NAME } = require('../utils/walk-in');
+const tradingDay = require('../utils/trading-day');
+const demoData = require('../services/demo-data');
+const { ensureIndexOnce } = require('../db/ensure-index');
+const { formatDate } = require('../utils/helpers');
+const { notifyKotReady } = require('../helpers/kot-notify');
+const { notifyBillRequested } = require('../helpers/bill-notify');
+const { queuePrintJob } = require('./print-job.repository');
+const { buildBillPayload, isDialable, sessionName } = require('../helpers/bill-payload');
+const { orderSource } = require('../utils/order-source');
+
+/*
+ * The shop, plus the dayparts if the bill is going to name the service.
+ *
+ * Dayparts live in the settings collection, not on the branch, because they
+ * were defined for the menu. The bill reuses them rather than asking a shop to
+ * write out "Lunch is 12 to 3" a second time in different words - two lists
+ * that can disagree is how a bill comes to say Dinner while the kitchen is
+ * serving lunch.
+ *
+ * Only read when the switch is on, so a shop that does not print the session
+ * pays nothing for it. A failure is not fatal: a bill with no session line is
+ * still a bill.
+ */
+async function withDayparts(shop) {
+  const on =
+    shop &&
+    (shop.bill_print_session === true ||
+      shop.bill_print_session === 'true' ||
+      Object.values(shop.receipt_designs?.layouts || {}).some((layout) =>
+        layout.blocks?.some((block) => block.type === 'field' && block.field === 'session')
+      ));
+  if (!on) return shop;
+  try {
+    const settings = await new BaseModel('settings').getCollection('settings');
+    const doc = await settings.findOne({ menu_dayparts: { $exists: true } });
+    return { ...shop, menu_dayparts: (doc && doc.menu_dayparts) || [] };
+  } catch (e) {
+    console.error('Could not read the dayparts for the bill session:', e && e.message);
+    return shop;
+  }
+}
+
+const { notifyOrderAttention, notifyOrderResolved } = require('../helpers/order-attention');
+/* The one definition of what a code is worth. The till, the handset and the
+   customer's page all price a coupon through this. */
+const CouponService = require('../services/coupon.service');
+const coupons = new CouponService();
+const orderApproval = require('../utils/order-approval');
+const billNumber = require('../utils/bill-number');
+const orderProgress = require('../utils/order-progress');
+const spiceLevel = require('../utils/spice-level');
+const waiterCall = require('../utils/waiter-call');
+const readyBy = require('../utils/ready-by');
+const { kitchenLoad, typicalRound } = require('../utils/kitchen-load');
+const StockLogsRepository = require('./stock-log.repository');
+const { PAYMENT_STATUS } = require('../constants');
+const moment = require('moment-timezone');
+const onlineOrdering = require('../utils/online-ordering');
+
+/*
+ * The two ways this estate spells takeaway.
+ *
+ * Not a tidy-up waiting to happen: both are already in the data, written by
+ * different screens over different years, and getTablesWithActiveOrders has
+ * always read both. Anything that filters on dine_type has to take both or it
+ * silently answers about half the orders.
+ */
+const TAKEAWAY_SAID = ['Take away', 'Takeaway'];
+const salesChannels = require('../utils/sales-channels');
+const itemChannels = require('../utils/item-channels');
+const partnerVenues = require('../utils/partner-venues');
+
+/* The fallback when channelState has no sentence of its own. It never should,
+   but a refusal with an empty message would tell a customer nothing. */
+const ONLINE_ORDERING_DISABLED = 'Online ordering is not enabled for this branch.';
+
+/*
+ * How long a till's claim on a kitchen ticket lasts.
+ *
+ * Long enough to cover a poll, a print and a report on a slow printer; short
+ * enough that a till which died mid-print has its work picked up by the other
+ * one before anybody at a pass notices. The cost of being wrong in the short
+ * direction is a duplicate, and in the long direction a delay, so it is set
+ * where a real print comfortably fits.
+ */
+const KOT_CLAIM_MS = 45 * 1000;
+
+/*
+ * The shop's own answering speed, remembered for a few minutes.
+ *
+ * Every phone watching an order asks for this on every poll, and the answer
+ * is a property of the SHOP that moves over days. Reading fifty sales per
+ * poll per phone to produce the same number would be the whole cost of this
+ * feature, for nothing.
+ */
+const ACCEPT_HISTORY_DAYS = 14;
+const ACCEPT_HISTORY_ORDERS = 50;
+const ACCEPT_ENOUGH_ORDERS = 5;
+const ACCEPT_OUTLIER_MINUTES = 120;
+const ACCEPT_CACHE_MS = 5 * 60 * 1000;
+const ACCEPT_MINUTES_CACHE = new Map();
+
+const activeTenantFilter = () => ({
+  ...(BaseModel.license ? { license: BaseModel.license } : {}),
+  ...(BaseModel.currentBranch ? { branch_id: BaseModel.currentBranch } : {}),
+});
+
+/*
+ * GST place-of-supply code for a B2B invoice.
+ *
+ * A GSTIN's first two digits ARE the state code (35AAAA...), so the
+ * customer's own number is the authoritative source and needs no table.
+ * The stored state NAME is the fallback for rows whose GSTIN is missing
+ * or malformed. Returns '' when neither resolves - better an empty field
+ * the shop can see and fix than a wrong state silently filed.
+ */
+let _gstStateByName = null;
+const gstStateCode = (gstin, stateName) => {
+  const num = String(gstin || '').trim();
+  if (/^\d{2}/.test(num)) return num.slice(0, 2);
+  const name = String(stateName || '')
+    .trim()
+    .toLowerCase();
+  if (!name) return '';
+  if (!_gstStateByName) {
+    _gstStateByName = new Map();
+    try {
+      const list = require('../json/gst_state_code.json').gststate || [];
+      for (const row of list) {
+        _gstStateByName.set(String(row.value || '').toLowerCase(), String(row.id || ''));
+      }
+    } catch (e) {
+      /* file unreadable: GSTIN-derived codes still work */
+    }
+  }
+  return _gstStateByName.get(name) || '';
+};
+
+const round = (value, decimals = 2) => {
+  const num = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(num)) return 0;
+  const factor = Math.pow(10, decimals);
+  return value && !Number.isNaN(value) ? Math.round(value * factor) / factor : 0;
+};
+
+const toNumberSafe = (value, fallback = 0) => {
+  if (value === null || typeof value === 'undefined') {
+    return 0;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : 0;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim().toLowerCase();
+    if (!trimmed || trimmed === 'null' || trimmed === 'nan') {
+      return 0;
+    }
+    const num = Number(trimmed);
+    return Number.isFinite(num) ? num : 0;
+  }
+
+  const fb = Number(fallback);
+  return Number.isFinite(fb) ? fb : 0;
+};
+
+const roundQty = (value) => Math.round(toNumberSafe(value, 0) * 1000) / 1000;
+
+const normalizeReturnItemKey = (item = {}) =>
+  String(item.item_id || item.item || item.id || item._id || '');
+
+const addQtyToMap = (map, key, qty) => {
+  if (!key) return;
+  map.set(key, roundQty((map.get(key) || 0) + roundQty(qty)));
+};
+
+const buildReturnedQtyMap = (itemsReturnBlocks = []) => {
+  const returned = new Map();
+  if (!Array.isArray(itemsReturnBlocks)) return returned;
+
+  for (const block of itemsReturnBlocks) {
+    const values = block?.returnArray?.returnValue;
+    if (!Array.isArray(values)) continue;
+
+    for (const item of values) {
+      addQtyToMap(returned, normalizeReturnItemKey(item), item.item_quantity);
+    }
+  }
+
+  return returned;
+};
+
+const buildReturnSignature = (saleObjectId, returnItems = [], payload = {}) => {
+  const normalizedItems = (Array.isArray(returnItems) ? returnItems : [])
+    .map((item) => ({
+      item_id: normalizeReturnItemKey(item),
+      qty: roundQty(item.item_quantity),
+      price: round(toNumberSafe(item.item_price, 0), 2),
+      total: round(toNumberSafe(item.total_amount, 0), 2),
+    }))
+    .filter((item) => item.item_id && item.qty > 0)
+    .sort((a, b) => a.item_id.localeCompare(b.item_id));
+
+  return crypto
+    .createHash('sha256')
+    .update(
+      JSON.stringify({
+        sale_id: String(saleObjectId),
+        items: normalizedItems,
+        extra_discount: round(toNumberSafe(payload.extra_discount, 0), 2),
+        extra_discount_type: payload.extra_discount_type || '',
+        round_off_check: Boolean(payload.round_off_check),
+      })
+    )
+    .digest('hex');
+};
+
+/**
+ * How many copies of a floor-requested bill this shop wants.
+ *
+ * A count, not a switch, and read defensively: the settings form posts a
+ * string, a branch saved before this existed has nothing at all, and neither
+ * may turn into NaN copies. One is the answer to every unclear case, because
+ * one is what every shop prints today.
+ *
+ * Capped at three so a number that arrived by some other route cannot spend a
+ * roll of paper on a single table.
+ */
+function billCopies(branch, asked) {
+  /*
+   * THE HANDSET DECIDES, THE SHOP IS THE FALLBACK.
+   *
+   * Owner: "its better two copies from captain itself... if its from desktop
+   * sometimes... then configuration change reequired pos guy wont have
+   * permission. lets keep in app itself."
+   *
+   * He is right about who should hold it. The person who wants a second copy
+   * is the one holding the phone, and making them find somebody with access to
+   * the till's settings page is how a setting stays wrong for a year.
+   *
+   * So a request may name a number and it is honoured. When it does not - an
+   * older handset, a request from anywhere else - the shop's own setting
+   * answers, and that defaults to one. Nothing prints twice by surprise.
+   *
+   * CLAMPED HERE, WHEREVER IT CAME FROM. A phone is not allowed to spend a
+   * roll of paper on one table, and neither is a stray value in a branch
+   * document.
+   */
+  const said = Number(asked);
+  if (Number.isFinite(said) && said >= 1) return Math.min(Math.floor(said), 3);
+
+  const shopSays = Number(branch && branch.bill_print_copies);
+  if (!Number.isFinite(shopSays) || shopSays < 1) return 1;
+  return Math.min(Math.floor(shopSays), 3);
+}
+
+class SalesRepository {
+  constructor(defaultModel) {
+    this.defaultModel = defaultModel || null;
+  }
+
+  getModel(SaleModel) {
+    if (SaleModel) {
+      return SaleModel;
+    }
+
+    if (!this.defaultModel) {
+      this.defaultModel = require('../models/sale.model');
+    }
+
+    return this.defaultModel;
+  }
+
+  async create(data, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    const doc = new Model(data);
+    await doc.save();
+    return doc;
+  }
+
+  async paginate(filter, options, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.paginate(filter, options);
+  }
+
+  async getLegacyDetails(id, { SaleModel } = {}) {
+    try {
+      if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+        return { status: false, data: null, message: 'Invalid sale id' };
+      }
+
+      const saleObjectId = new mongoose.Types.ObjectId(id);
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+      const recycleBinCollection = db.collection('recycle_bin');
+      const customersCollection = db.collection('customers');
+      const branchesCollection = db.collection('branches');
+
+      const filter = {
+        _id: saleObjectId,
+        ...(BaseModel.license ? { license: BaseModel.license } : {}),
+        ...(BaseModel.currentBranch ? { branch_id: BaseModel.currentBranch } : {}),
+      };
+
+      let saleDoc = await salesCollection.findOne(filter);
+
+      // Fallback for deleted sales: if the sale is not present in the live
+      // `sales` collection, try to load a backup copy from the
+      // `recycle_bin`. This enables viewing / printing sales that have been
+      // moved to the Recycle Bin while keeping the primary behaviour
+      // unchanged for active sales.
+      if (!saleDoc) {
+        const recycleFilter = {
+          _id: saleObjectId,
+          document_name: 'sales',
+          ...(BaseModel.license ? { license: BaseModel.license } : {}),
+        };
+
+        const backupDoc = await recycleBinCollection.findOne(recycleFilter);
+
+        if (!backupDoc) {
+          return { status: false, data: null, message: 'Sale not found' };
+        }
+
+        saleDoc = backupDoc;
+      }
+
+      const doc = { ...saleDoc };
+
+      // Normalise legacy extra discount fields so that the sales edit and
+      // return screens always receive meaningful values, even for older
+      // PHP-created sales that only stored sale_extra_discount.
+      const rawExtraDiscValue =
+        doc.extra_discount !== undefined && doc.extra_discount !== null
+          ? Number(doc.extra_discount)
+          : 0;
+      const rawSaleExtraDiscValue =
+        doc.sale_extra_discount !== undefined && doc.sale_extra_discount !== null
+          ? Number(doc.sale_extra_discount)
+          : 0;
+
+      const extraDiscNum = Number.isFinite(rawExtraDiscValue) ? rawExtraDiscValue : 0;
+      const saleExtraDiscNum = Number.isFinite(rawSaleExtraDiscValue) ? rawSaleExtraDiscValue : 0;
+
+      let extraDiscountTypeRaw =
+        typeof doc.extra_discount_type === 'string'
+          ? doc.extra_discount_type.toLowerCase().trim()
+          : '';
+
+      // Map legacy labels to the values expected by the frontend helpers
+      if (extraDiscountTypeRaw === 'percentage') {
+        extraDiscountTypeRaw = 'percent';
+      } else if (extraDiscountTypeRaw === 'fixed' || extraDiscountTypeRaw === 'amount') {
+        extraDiscountTypeRaw = 'price';
+      }
+
+      if (extraDiscountTypeRaw) {
+        doc.extra_discount_type = extraDiscountTypeRaw;
+      }
+
+      // For legacy amount-based discounts that only persisted the final
+      // sale_extra_discount, backfill extra_discount so the edit form can
+      // display the correct value. Percent-based discounts already store the
+      // input percentage in extra_discount, so we leave those untouched.
+      if (
+        (typeof doc.extra_discount === 'undefined' ||
+          doc.extra_discount === null ||
+          extraDiscNum === 0) &&
+        saleExtraDiscNum > 0 &&
+        extraDiscountTypeRaw !== 'percent'
+      ) {
+        doc.extra_discount = saleExtraDiscNum;
+      }
+
+      const rawSaleGst =
+        doc.gst !== undefined && doc.gst !== null ? String(doc.gst).toLowerCase() : '';
+      const isSaleGstEnabled = rawSaleGst === 'enable' || rawSaleGst === 'gst_on';
+
+      // Backfill legacy note fields for Node-created sales so that
+      // sales_view.js can always rely on sales_description and
+      // payment_description even when only generic notes + payments
+      // were stored by the Node controllers.
+      if (
+        (typeof doc.sales_description === 'undefined' ||
+          doc.sales_description === null ||
+          (typeof doc.sales_description === 'string' && !doc.sales_description.trim())) &&
+        typeof doc.notes === 'string' &&
+        doc.notes.trim()
+      ) {
+        doc.sales_description = doc.notes;
+      }
+
+      if (
+        typeof doc.payment_description === 'undefined' ||
+        doc.payment_description === null ||
+        (typeof doc.payment_description === 'string' && !doc.payment_description.trim())
+      ) {
+        let paymentNote = '';
+        if (Array.isArray(doc.payments) && doc.payments.length > 0) {
+          const firstPayment = doc.payments[0] || {};
+          if (typeof firstPayment.reference === 'string' && firstPayment.reference.trim()) {
+            paymentNote = firstPayment.reference.trim();
+          } else if (typeof firstPayment.notes === 'string' && firstPayment.notes.trim()) {
+            paymentNote = firstPayment.notes.trim();
+          }
+        }
+
+        if (paymentNote) {
+          doc.payment_description = paymentNote;
+        }
+      }
+
+      // Legacy screens expect these identifiers
+      if (!doc.sales_id && doc.invoice_number) {
+        doc.sales_id = doc.invoice_number;
+      }
+      if (!doc.invoice_number && doc.sales_id) {
+        doc.invoice_number = doc.sales_id;
+      }
+      if (!doc.sale_no) {
+        doc.sale_no = doc.sales_id || doc.invoice_number || (doc._id ? doc._id.toString() : '');
+      }
+
+      let branchDoc = null;
+      let branchHasGstOn = false;
+      const branchId = doc.branch_id || doc.branch || BaseModel.currentBranch || null;
+
+      if (branchId) {
+        let normalizedBranchId = branchId;
+        if (branchId instanceof mongoose.Types.ObjectId) {
+          normalizedBranchId = branchId;
+        } else if (mongoose.Types.ObjectId.isValid(String(branchId))) {
+          normalizedBranchId = new mongoose.Types.ObjectId(String(branchId));
+        }
+
+        branchDoc = await branchesCollection.findOne({
+          _id: normalizedBranchId,
+          ...(BaseModel.license ? { license: BaseModel.license } : {}),
+        });
+        if (branchDoc && branchDoc._id) {
+          doc.branch_id = branchDoc._id;
+
+          // Track whether this branch has Indian GST enabled so that the
+          // legacy sales view model can mirror PHP behaviour and always
+          // enable the GST card whenever GST is configured for the branch.
+          //
+          // Primary signal: explicit indian_gst === 'gst_on'.
+          const rawIndianGst =
+            typeof branchDoc.indian_gst === 'string' ? branchDoc.indian_gst.toLowerCase() : '';
+          const hasExplicitGstOn = rawIndianGst === 'gst_on';
+
+          // Fallback signal: Indian branch with a configured GSTIN number.
+          // Some historical records or UI flows may persist only the GSTIN
+          // without explicitly updating indian_gst. In that scenario PHP
+          // still treats the branch as GST-enabled, so we mirror that here.
+          const country = (branchDoc.country || '').toString().toLowerCase().trim();
+          const rawBranchGstin =
+            typeof branchDoc.branch_gstin_number === 'string'
+              ? branchDoc.branch_gstin_number.trim()
+              : '';
+          const hasGstinNumber = rawBranchGstin !== '';
+
+          if (hasExplicitGstOn || (country === 'india' && hasGstinNumber)) {
+            branchHasGstOn = true;
+          }
+
+          // Expose branch-level GSTIN and printing address on the sale doc so that
+          // legacy frontend views (sales_view.js) and print templates can access
+          // them without issuing a separate branch query. Only backfill these
+          // fields when the sale document itself does not already carry values.
+          if (
+            hasGstinNumber &&
+            (typeof doc.branch_gstin_number === 'undefined' ||
+              doc.branch_gstin_number === null ||
+              (typeof doc.branch_gstin_number === 'string' && !doc.branch_gstin_number.trim()))
+          ) {
+            doc.branch_gstin_number = rawBranchGstin;
+          }
+
+          if (
+            typeof doc.printing_address === 'undefined' ||
+            doc.printing_address === null ||
+            (typeof doc.printing_address === 'string' && !doc.printing_address.trim())
+          ) {
+            if (typeof branchDoc.printing_address === 'string') {
+              doc.printing_address = branchDoc.printing_address;
+            }
+          }
+        }
+      }
+
+      let print_sale_notes = false;
+      let customer_print = true;
+      let print_logoimg = false;
+      let receipt_barcode = true;
+      let logo = '';
+      if (branchDoc) {
+        if (typeof branchDoc.print_sale_notes === 'boolean') {
+          print_sale_notes = branchDoc.print_sale_notes;
+        }
+        if (typeof branchDoc.customer_print === 'boolean') {
+          customer_print = branchDoc.customer_print;
+        }
+        if (typeof branchDoc.print_logoimg === 'boolean') {
+          print_logoimg = branchDoc.print_logoimg;
+        }
+        if (typeof branchDoc.receipt_barcode === 'boolean') {
+          receipt_barcode = branchDoc.receipt_barcode;
+        }
+        if (branchDoc.logo) {
+          logo = branchDoc.logo;
+        }
+      }
+
+      doc.customer_print = customer_print;
+      doc.print_logoimg = print_logoimg;
+      doc.print_sale_notes = print_sale_notes;
+      doc.receipt_barcode = receipt_barcode;
+      // Read the saved footer for every print, including an explicit removal.
+      // A browser's settings cache may still contain an older shop image.
+      doc.footer_image = String(branchDoc?.footer_image || '');
+      doc.footer_image_caption = String(branchDoc?.footer_image_caption || '');
+      doc.receipt_designs = branchDoc?.receipt_designs || null;
+      if (doc.receipt_designs) {
+        for (const key of [
+          'branch_name',
+          'printing_address',
+          'store_telephone',
+          'store_email',
+          'website',
+          'table_options',
+          'branch_fssai_number',
+          'country',
+          'invoice_terms',
+          'quote_default_signature',
+        ]) {
+          doc[key] = branchDoc[key];
+        }
+        doc.logo = branchDoc.logo || '';
+        doc.order_source = orderSource(doc);
+        doc.serving_session = sessionName(doc, await withDayparts(branchDoc));
+      }
+      if (logo && !doc.logo) {
+        doc.logo = logo;
+      }
+
+      let customerObjectId = null;
+      if (doc.customer_id) {
+        if (doc.customer_id instanceof mongoose.Types.ObjectId) {
+          customerObjectId = doc.customer_id;
+        } else if (mongoose.Types.ObjectId.isValid(String(doc.customer_id))) {
+          customerObjectId = new mongoose.Types.ObjectId(String(doc.customer_id));
+        }
+      } else if (doc.customer) {
+        if (doc.customer instanceof mongoose.Types.ObjectId) {
+          customerObjectId = doc.customer;
+        } else if (mongoose.Types.ObjectId.isValid(String(doc.customer))) {
+          customerObjectId = new mongoose.Types.ObjectId(String(doc.customer));
+        }
+        if (customerObjectId && !doc.customer_id) {
+          doc.customer_id = customerObjectId;
+        }
+      }
+
+      if (customerObjectId) {
+        const customerFilter = {
+          _id: customerObjectId,
+          ...(BaseModel.license ? { license: BaseModel.license } : {}),
+          ...(BaseModel.currentBranch ? { branch_id: BaseModel.currentBranch } : {}),
+        };
+
+        const customerData = await customersCollection.findOne(customerFilter);
+
+        if (customerData) {
+          doc.customer_name = doc.customer_name || customerData.name || '';
+          doc.customer_phone = doc.customer_phone || customerData.phone || '';
+          doc.customer_email = doc.customer_email || customerData.email || '';
+          doc.customer_address = doc.customer_address || customerData.address || '';
+          doc.customer_state = doc.customer_state || customerData.state || '';
+          doc.customer_country = customerData.country || doc.customer_country || '';
+          doc.customer_gst_type = doc.customer_gst_type || customerData.gst_type || '';
+          doc.customer_gst_number = doc.customer_gst_number || customerData.gst_number || '';
+          doc.customer_company_name = doc.customer_company_name || customerData.company_name || '';
+          const balanceValue =
+            typeof customerData.balance === 'number'
+              ? customerData.balance
+              : Number(customerData.balance || 0) || 0;
+          doc.customer_balance = balanceValue;
+
+          const rawPartial = customerData.partial_balance;
+          let customerPartial = false;
+          if (typeof rawPartial === 'boolean') {
+            customerPartial = rawPartial;
+          } else if (typeof rawPartial === 'string') {
+            const trimmed = rawPartial.trim().toLowerCase();
+            customerPartial = trimmed === 'true' || trimmed === '1';
+          } else if (typeof rawPartial === 'number') {
+            customerPartial = rawPartial === 1;
+          }
+          doc.customer_partial = customerPartial;
+        }
+      }
+
+      if (typeof doc.customer_balance === 'undefined') {
+        doc.customer_balance = 0.0;
+      }
+
+      // Normalize nested structures to match legacy PHP Extended JSON expectations
+      // used by sales_view.js, particularly for tax fields and return items.
+
+      // Helper to wrap ObjectId/string into { $oid: "..." }
+      const wrapObjectIdForLegacy = (value) => {
+        if (!value) return value;
+        // If already in { $oid: ... } form, keep as-is
+        if (typeof value === 'object' && value.$oid) {
+          return value;
+        }
+
+        let hex = null;
+        if (value instanceof mongoose.Types.ObjectId) {
+          hex = value.toString();
+        } else if (typeof value === 'string') {
+          hex = value;
+        } else if (
+          typeof value === 'object' &&
+          value._bsontype === 'ObjectID' &&
+          typeof value.toString === 'function'
+        ) {
+          // Raw BSON ObjectId from mongodb driver
+          hex = value.toString();
+        }
+
+        if (!hex) return value;
+        return { $oid: hex };
+      };
+
+      // Helper to wrap Date/number/string into { $date: { $numberLong: "..." } }
+      const wrapDateForLegacy = (value) => {
+        if (!value) return value;
+
+        // Already in legacy extended JSON
+        if (
+          typeof value === 'object' &&
+          value.$date &&
+          typeof value.$date === 'object' &&
+          Object.prototype.hasOwnProperty.call(value.$date, '$numberLong')
+        ) {
+          return value;
+        }
+
+        let dateObj = null;
+        if (value instanceof Date) {
+          dateObj = value;
+        } else if (typeof value === 'number') {
+          const d = new Date(value);
+          if (!Number.isNaN(d.getTime())) dateObj = d;
+        } else if (typeof value === 'string') {
+          const ts = Date.parse(value);
+          if (!Number.isNaN(ts)) {
+            dateObj = new Date(ts);
+          }
+        }
+
+        if (!dateObj) return value;
+
+        return {
+          $date: {
+            $numberLong: String(dateObj.getTime()),
+          },
+        };
+      };
+
+      // Helper to safely coerce discount/tax/amount fields that may be
+      // null, empty strings, or legacy string values like "null" into
+      // numeric zeros. This prevents the sales_view.js templates from
+      // rendering "null%" in the Return Line Item card.
+      const toNumberSafeLocal = (value, fallback = 0) => {
+        if (value === null || typeof value === 'undefined') {
+          return 0;
+        }
+        if (typeof value === 'number') {
+          return Number.isFinite(value) ? value : 0;
+        }
+        if (typeof value === 'string') {
+          const trimmed = value.trim().toLowerCase();
+          if (!trimmed || trimmed === 'null' || trimmed === 'nan') {
+            return 0;
+          }
+          const num = Number(trimmed);
+          return Number.isFinite(num) ? num : 0;
+        }
+
+        const fb = Number(fallback);
+        return Number.isFinite(fb) ? fb : 0;
+      };
+
+      // Build a lookup of item_id -> item_price from return line items so that
+      // fully returned lines in the main items array (which may have quantity 0
+      // and item_price 0) can still display a meaningful price in the Line Item
+      // section of sales_view.js.
+      const returnPriceByItemId = new Map();
+      if (Array.isArray(doc.items_return)) {
+        doc.items_return.forEach((entry) => {
+          if (!entry || typeof entry !== 'object') return;
+          const ra =
+            entry.returnArray && typeof entry.returnArray === 'object' ? entry.returnArray : null;
+          if (!ra || !Array.isArray(ra.returnValue)) return;
+
+          ra.returnValue.forEach((line) => {
+            if (!line || typeof line !== 'object') return;
+            const rawId = line.item_id || line.item || line.itemId;
+            if (!rawId) return;
+            const key = String(rawId);
+            const price = toNumberSafeLocal(line.item_price, 0);
+            if (price > 0 && !returnPriceByItemId.has(key)) {
+              returnPriceByItemId.set(key, price);
+            }
+          });
+        });
+      }
+
+      // Build a lookup of item_id -> HSN/tax code from the items collection so
+      // that legacy sales that never persisted tax_name on line items (only
+      // hsncode on the item master) can still display the correct HSN-like code
+      // in the Tax Details block.
+      const itemHsnById = new Map();
+      if (Array.isArray(doc.items) && doc.items.length) {
+        const uniqueItemObjectIds = [];
+        const seenItemIds = new Set();
+
+        for (const line of doc.items) {
+          if (!line || typeof line !== 'object') continue;
+          const rawId = line.item_id || line.item || line.itemId;
+          if (!rawId) continue;
+          const idStr = String(rawId);
+          if (!mongoose.Types.ObjectId.isValid(idStr)) continue;
+          if (seenItemIds.has(idStr)) continue;
+          seenItemIds.add(idStr);
+          uniqueItemObjectIds.push(new mongoose.Types.ObjectId(idStr));
+        }
+
+        if (uniqueItemObjectIds.length) {
+          const itemsCollection = db.collection('items');
+          const itemFilter = { _id: { $in: uniqueItemObjectIds } };
+          if (BaseModel.license) {
+            itemFilter.license = BaseModel.license;
+          }
+          if (BaseModel.currentBranch) {
+            itemFilter.branch_id = BaseModel.currentBranch;
+          }
+          if (BaseModel.currentBranchName) {
+            itemFilter.branch_name = BaseModel.currentBranchName;
+          }
+
+          const itemDocs = await itemsCollection.find(itemFilter).toArray();
+
+          itemDocs.forEach((it) => {
+            if (!it || !it._id) return;
+            const key = String(it._id);
+
+            // Only treat explicit HSN fields as HSN/tax codes for the
+            // purposes of non-GST Tax Details. Falling back to tax_name here
+            // would incorrectly classify simple percentage taxes (e.g. "5% Tax")
+            // as HSN-based and cause the Tax Details block to appear even when
+            // there is no HSN.
+            const hsn = (it.hsncode || it.hsn_code || '').toString().trim();
+            if (hsn) {
+              itemHsnById.set(key, hsn);
+            }
+          });
+        }
+      }
+
+      // For legacy PHP parity under non-GST flows we need to selectively
+      // expose per-line tax_fields arrays:
+      //   - When GST is enabled for the sale, always expose tax_fields so the
+      //     GST / Tax Details cards can be built.
+      //   - When GST is disabled, expose tax_fields only for:
+      //       * HSN-based tax without group (single line in Tax Details)
+      //       * Group tax (split component rows).
+      //     Plain single-rate tax (no HSN / group) should not produce any Tax
+      //     Details rows, so we will normalise tax_fields to a neutral object
+      //     for those lines.
+
+      if (Array.isArray(doc.items)) {
+        doc.items = doc.items.map((item) => {
+          if (!item || typeof item !== 'object') return item;
+          const cloned = { ...item };
+
+          // Frontend legacy sales view expects PHP-style keys
+          // Map from the Mongoose sale item schema fields if needed.
+          if (typeof cloned.item_name === 'undefined' && typeof cloned.name !== 'undefined') {
+            cloned.item_name = cloned.name;
+          }
+          if (
+            typeof cloned.item_quantity === 'undefined' &&
+            typeof cloned.quantity !== 'undefined'
+          ) {
+            cloned.item_quantity = cloned.quantity;
+          }
+          if (
+            typeof cloned.item_price === 'undefined' &&
+            typeof cloned.unit_price !== 'undefined'
+          ) {
+            cloned.item_price = cloned.unit_price;
+          }
+          if (
+            typeof cloned.item_discount === 'undefined' &&
+            typeof cloned.discount !== 'undefined'
+          ) {
+            cloned.item_discount = cloned.discount;
+          }
+          if (typeof cloned.gst === 'undefined' && typeof cloned.tax_amount !== 'undefined') {
+            cloned.gst = cloned.tax_amount;
+          }
+          if (typeof cloned.tax_rate === 'undefined') {
+            // keep
+            cloned.tax_rate = cloned.item_tax_rate;
+          }
+          if (typeof cloned.total_amount === 'undefined' && typeof cloned.total !== 'undefined') {
+            cloned.total_amount = cloned.total;
+          }
+
+          // Provide tax / discount fields used by Frontend sales_view.js.
+          // Normalise tax to a pure numeric value (e.g. "0%" -> 0) so that
+          // the legacy JS calculations do not end up dividing by NaN, which
+          // would render the line price as 0.00 in the view modal.
+          const rawTaxValue =
+            typeof cloned.tax !== 'undefined'
+              ? cloned.tax
+              : (cloned.item_tax_rate ?? cloned.tax_rate ?? 0);
+          cloned.tax = toNumberSafe(rawTaxValue, 0);
+
+          // Canonicalise tax_type to 'exclusive' | 'inclusive' regardless of
+          // how it was stored (e.g. 'Exc', 'Inc', 'exclusive', 'inclusive').
+          const taxTypeSource = cloned.tax_type ?? cloned.taxType ?? 'exclusive';
+          const taxTypeStr = taxTypeSource.toString().trim().toLowerCase();
+          if (taxTypeStr.startsWith('inc')) {
+            cloned.tax_type = 'inclusive';
+          } else {
+            // Default / all other prefixes map to exclusive to match PHP.
+            cloned.tax_type = 'exclusive';
+          }
+          const hasLegacyTaxFields =
+            Array.isArray(cloned.tax_fields) && cloned.tax_fields.length > 0;
+          const numericTaxValue = toNumberSafe(cloned.tax, 0);
+
+          // Prefer the existing tax_name set at save-time (PHP stores
+          // $documents['tax_name'] on each line). Only backfill when
+          // the sale document truly has no tax_name/HSN information.
+          let currentTaxName = typeof cloned.tax_name === 'string' ? cloned.tax_name.trim() : '';
+
+          let hsnCandidate = '';
+
+          // Only derive HSN labels when either GST is enabled for this sale
+          // or when there are no per-line tax_fields to drive the Tax Details
+          // breakdown. When GST is off and tax_fields are present (group tax),
+          // PHP leaves the HSN blank so the frontend shows each component
+          // rate (e.g. "3% Tax", "5% Tax") instead of collapsing them under a
+          // single generic "TAX X%" label.
+          const shouldApplyHsnLabel = isSaleGstEnabled || !hasLegacyTaxFields;
+
+          if (numericTaxValue > 0 && shouldApplyHsnLabel) {
+            // First, prefer HSN/tax_name from the line itself
+            hsnCandidate = (cloned.hsncode ?? cloned.hsn_code ?? '').toString().trim();
+
+            if (!hsnCandidate) {
+              const rawItemId = cloned.item_id || cloned.item || cloned.itemId;
+              const itemKey = rawItemId ? String(rawItemId) : '';
+              if (itemKey && itemHsnById.has(itemKey)) {
+                hsnCandidate = itemHsnById.get(itemKey) || '';
+              }
+            }
+
+            // Expose resolved HSN to the frontend so that sales_view.js can
+            // reliably display HSN-based Tax Details even when legacy sales
+            // never stored hsncode on the line items.
+            if (hsnCandidate && !cloned.hsncode && !cloned.hsn_code) {
+              cloned.hsncode = hsnCandidate;
+            }
+
+            if (!currentTaxName) {
+              // No tax_name persisted: mirror PHP by using the HSN code when
+              // available, otherwise fall back to a generic TAX <rate>% label.
+              currentTaxName = hsnCandidate || `TAX ${numericTaxValue}%`;
+            } else if (hsnCandidate) {
+              // Whenever we can resolve an HSN/tax code from the item master
+              // or item document, prefer that over any existing generic
+              // "TAX X%" style labels so the Tax Details block matches the
+              // PHP UI which shows the HSN code.
+              currentTaxName = hsnCandidate;
+            }
+          }
+
+          if (typeof cloned.tax_name === 'undefined' || cloned.tax_name === null) {
+            cloned.tax_name = (currentTaxName || cloned.taxName || '').toString();
+          } else if (currentTaxName && cloned.tax_name !== currentTaxName) {
+            // Keep the upgraded HSN label if we resolved one above.
+            cloned.tax_name = currentTaxName;
+          }
+          if (typeof cloned.igst_tax === 'undefined') {
+            cloned.igst_tax = Number(cloned.igst_tax ?? cloned.igstTax ?? 0) || 0;
+          }
+          if (typeof cloned.cgst_tax === 'undefined') {
+            cloned.cgst_tax = Number(cloned.cgst_tax ?? cloned.cgstTax ?? 0) || 0;
+          }
+
+          // For Indian GST-enabled sales that do not carry an explicit
+          // IGST/CGST/SGST breakdown on the stored line item (common in
+          // legacy PHP data where only a per-line GST amount was persisted),
+          // reconstruct the component amounts so that the GST Tax Details
+          // card in sales_view.js can mirror the PHP UI (CGST/SGST for
+          // intra-state, IGST for inter-state).
+          if (isSaleGstEnabled) {
+            const currentIgst = toNumberSafe(cloned.igst_tax, 0);
+            const currentCgst = toNumberSafe(cloned.cgst_tax, 0);
+            const currentSgst = toNumberSafe(cloned.sgst_tax, 0);
+
+            if (!currentIgst && !currentCgst && !currentSgst) {
+              const perLineGstAmount = toNumberSafe(
+                cloned.gst ?? cloned.tax_amount ?? cloned.item_tax ?? 0,
+                0
+              );
+
+              if (perLineGstAmount > 0) {
+                const customerState = (doc.customer_state || '').toString().trim();
+                const branchState = (branchDoc?.state || '').toString().trim();
+
+                const isInterState =
+                  customerState &&
+                  branchState &&
+                  customerState.toLowerCase() !== branchState.toLowerCase();
+
+                if (isInterState) {
+                  cloned.igst_tax = perLineGstAmount;
+                  cloned.cgst_tax = 0;
+                  cloned.sgst_tax = 0;
+                } else {
+                  const half = perLineGstAmount / 2;
+                  cloned.igst_tax = 0;
+                  cloned.cgst_tax = half;
+                  cloned.sgst_tax = half;
+                }
+              }
+            }
+          }
+
+          // Frontend KOT updateTotalDisplay expects selling_price field
+          if (typeof cloned.selling_price === 'undefined') {
+            cloned.selling_price =
+              Number(cloned.sale_inline_item_price ?? cloned.item_price ?? cloned.price ?? 0) || 0;
+          }
+
+          // Normalize discount fields for frontend calculations
+          if (typeof cloned.discount_amount === 'undefined') {
+            cloned.discount_amount =
+              Number(
+                cloned.sale_inline_discount_value ?? cloned.item_discount ?? cloned.discount ?? 0
+              ) || 0;
+          }
+          if (typeof cloned.discount_percentage === 'undefined') {
+            cloned.discount_percentage =
+              Number(
+                cloned.sale_inline_discount_pervalue ?? cloned.item_discount_percentage ?? 0
+              ) || 0;
+          }
+          if (typeof cloned.item_discount_percentage === 'undefined') {
+            cloned.item_discount_percentage =
+              Number(cloned.discount_percentage ?? cloned.sale_inline_discount_pervalue ?? 0) || 0;
+          }
+          if (typeof cloned.item_discount === 'undefined') {
+            cloned.item_discount =
+              Number(
+                cloned.discount_amount ?? cloned.sale_inline_discount_value ?? cloned.discount ?? 0
+              ) || 0;
+          }
+          if (typeof cloned.item_unit === 'undefined') {
+            cloned.item_unit = (
+              cloned.item_unit ??
+              cloned.unit ??
+              cloned.unit_name ??
+              'qty'
+            ).toString();
+          }
+
+          if (typeof cloned.item_id === 'undefined') {
+            if (cloned.item) cloned.item_id = cloned.item;
+            else if (cloned.itemId) cloned.item_id = cloned.itemId;
+            // A third branch assigned item_id to itself. It sat inside a block
+            // that only runs when item_id is undefined, so it could never be
+            // reached, and it did nothing if it had been.
+          }
+
+          if (typeof cloned.item_tax === 'undefined') {
+            if (typeof cloned.gst !== 'undefined') cloned.item_tax = cloned.gst;
+            else if (typeof cloned.tax_amount !== 'undefined') {
+              cloned.item_tax = cloned.tax_amount;
+            }
+          }
+
+          if (
+            typeof cloned.item_discount_amount === 'undefined' &&
+            typeof cloned.item_discount !== 'undefined'
+          ) {
+            cloned.item_discount_amount = cloned.item_discount;
+          }
+
+          if (typeof cloned.item_total === 'undefined') {
+            if (typeof cloned.total_amount !== 'undefined') {
+              cloned.item_total = cloned.total_amount;
+            } else if (typeof cloned.total !== 'undefined') {
+              cloned.item_total = cloned.total;
+            }
+          }
+
+          // Additional aliases used by some legacy JS templates
+          const qtyNum = toNumberSafe(cloned.item_quantity, 0);
+          // Normalise quantity to a number so frontend code that calls
+          // item_quantity.toFixed(2) (e.g. in addSalesLineItems for return
+          // flows) never throws when we loaded quantities as strings like
+          // "1.00" from Mongo.
+          cloned.item_quantity = qtyNum;
+
+          let priceNum = toNumberSafe(cloned.item_price, 0);
+
+          // First, try to reconstruct price from total / quantity whenever
+          // quantity is positive.
+          if ((priceNum === 0 || !Number.isFinite(priceNum)) && qtyNum > 0) {
+            const lineTotalCandidate =
+              typeof cloned.item_total !== 'undefined'
+                ? cloned.item_total
+                : typeof cloned.total_amount !== 'undefined'
+                  ? cloned.total_amount
+                  : cloned.total;
+            const lineTotalNum = toNumberSafe(lineTotalCandidate, 0);
+            if (lineTotalNum > 0) {
+              priceNum = lineTotalNum / qtyNum;
+              cloned.item_price = priceNum;
+            }
+          }
+
+          // If price is still zero (for example, fully returned items where
+          // quantity is 0), fall back to the price recorded on the
+          // corresponding return line.
+          if (priceNum === 0 || !Number.isFinite(priceNum)) {
+            let mappedPrice;
+
+            // Primary match: by item id
+            const rawItemId = cloned.item_id || cloned.item || cloned.itemId;
+            if (rawItemId) {
+              mappedPrice = returnPriceByItemId.get(String(rawItemId));
+            }
+
+            // Safe fallback: when there is only a single distinct return price
+            // recorded (common case: one-line sale with one return), reuse that
+            // price even if ids do not line up perfectly.
+            if ((!mappedPrice || mappedPrice <= 0) && returnPriceByItemId.size === 1) {
+              const first = returnPriceByItemId.values().next().value;
+              if (typeof first !== 'undefined') {
+                mappedPrice = first;
+              }
+            }
+
+            if (mappedPrice && mappedPrice > 0) {
+              priceNum = mappedPrice;
+              cloned.item_price = mappedPrice;
+            }
+          }
+
+          // At this point, ensure item_price is always a pure number. The
+          // legacy sales_view.js code calls price.toFixed(2) on
+          // data.items[i].item_price; if we leave item_price as a string such
+          // as "25000" the browser will throw a TypeError. Keeping this field
+          // numeric also matches the original PHP JSON output.
+          cloned.item_price = Number.isFinite(priceNum) ? priceNum : 0;
+
+          if (typeof cloned.price === 'undefined') {
+            cloned.price = priceNum;
+          }
+
+          if (
+            cloned.total_amount === null ||
+            typeof cloned.total_amount === 'undefined' ||
+            !Number.isFinite(Number(cloned.total_amount))
+          ) {
+            const effectivePrice = Number.isFinite(priceNum) ? priceNum : 0;
+            cloned.total_amount = qtyNum * effectivePrice;
+          } else {
+            cloned.total_amount = toNumberSafe(cloned.total_amount, 0);
+          }
+
+          // Decide how to expose tax_fields to the legacy frontend.
+          // When GST is enabled we always expose arrays so the GST / IGST
+          // breakdown cards can be built. When GST is disabled we only want
+          // Tax Details for HSN-based and group-tax lines:
+          //   - Group tax  -> keep component tax_fields array
+          //   - HSN single -> expose empty array so sales_view.js uses the
+          //                   "length === 0 && tax > 0" branch
+          //   - Plain rate -> expose neutral object so `.length` is undefined
+          const hasGroupTax = hasLegacyTaxFields;
+          const hasHsnLabel = Boolean(hsnCandidate);
+          const hasAnyTax = numericTaxValue > 0;
+          const hasTaxFieldMatchingTopLevelRate =
+            Array.isArray(cloned.tax_fields) &&
+            cloned.tax_fields.some((taxItem) => {
+              if (!taxItem || typeof taxItem !== 'object') return false;
+              const fieldValue =
+                typeof taxItem.tax_value !== 'undefined'
+                  ? toNumberSafe(taxItem.tax_value, NaN)
+                  : toNumberSafe(taxItem.tax, NaN);
+              const fieldName = (taxItem.tax_name || '').toString().trim();
+              const matchesValue = Number.isFinite(fieldValue) && fieldValue === numericTaxValue;
+              const matchesName = !!currentTaxName && fieldName === currentTaxName;
+              return matchesValue || matchesName;
+            });
+
+          let treatAsGroupTax = hasGroupTax;
+          if (
+            !isSaleGstEnabled &&
+            treatAsGroupTax &&
+            hasAnyTax &&
+            !hasHsnLabel &&
+            hasTaxFieldMatchingTopLevelRate
+          ) {
+            treatAsGroupTax = false;
+          }
+
+          if (isSaleGstEnabled) {
+            // GST enabled: keep arrays and wrap tax_id for legacy Extended JSON.
+            if (Array.isArray(cloned.tax_fields)) {
+              cloned.tax_fields = cloned.tax_fields.map((taxItem) => {
+                if (!taxItem || typeof taxItem !== 'object') return taxItem;
+                const t = { ...taxItem };
+                t.tax_id = wrapObjectIdForLegacy(t.tax_id);
+                return t;
+              });
+            } else {
+              // No array stored: normalise to empty array so `.length` checks
+              // in sales_view.js remain safe.
+              cloned.tax_fields = [];
+            }
+          } else {
+            // GST disabled: mirror PHP behaviour for non-GST sales.
+            if (treatAsGroupTax) {
+              // Group tax: keep split component breakdown.
+              if (Array.isArray(cloned.tax_fields)) {
+                cloned.tax_fields = cloned.tax_fields.map((taxItem) => {
+                  if (!taxItem || typeof taxItem !== 'object') return taxItem;
+                  const t = { ...taxItem };
+                  t.tax_id = wrapObjectIdForLegacy(t.tax_id);
+                  return t;
+                });
+              } else {
+                cloned.tax_fields = [];
+              }
+            } else if (hasAnyTax && hasHsnLabel) {
+              // HSN-coded tax without group: force an empty array so the
+              // frontend uses the HSN fallback branch.
+              cloned.tax_fields = [];
+            } else if (hasAnyTax) {
+              // Plain single tax rate (no HSN / group): neutral object hides
+              // the Tax Details card because `.length` is undefined.
+              cloned.tax_fields = {};
+            } else {
+              // No tax at all: still normalise to a neutral object so access is
+              // always safe.
+              cloned.tax_fields = {};
+            }
+          }
+
+          return cloned;
+        });
+      }
+
+      // Ensure items_return[].returnArray fields follow legacy shape and
+      // normalise individual return line items early so no consumer ever
+      // sees null discount/tax values.
+      if (Array.isArray(doc.items_return)) {
+        doc.items_return = doc.items_return.map((entry) => {
+          if (!entry || typeof entry !== 'object') return entry;
+          const clonedEntry = { ...entry };
+
+          if (clonedEntry.returnArray && typeof clonedEntry.returnArray === 'object') {
+            const ra = { ...clonedEntry.returnArray };
+            ra.returnDate = wrapDateForLegacy(ra.returnDate);
+            ra.returnObjId = wrapObjectIdForLegacy(ra.returnObjId);
+
+            const values = Array.isArray(ra.returnValue) ? ra.returnValue : [];
+            ra.returnValue = values.map((item) => {
+              if (!item || typeof item !== 'object') return item;
+              const line = { ...item };
+
+              // Coerce legacy string/null values into safe numbers so the
+              // frontend never sees "null" or NaN for discount / tax fields.
+              line.item_discount = toNumberSafe(line.item_discount, 0);
+              line.item_discount_percentage = toNumberSafe(line.item_discount_percentage, 0);
+              line.tax = toNumberSafe(line.tax, 0);
+              line.igst_tax = toNumberSafe(line.igst_tax, 0);
+              line.cgst_tax = toNumberSafe(line.cgst_tax, 0);
+              line.sgst_tax = toNumberSafe(line.sgst_tax, 0);
+
+              // Canonicalise tax_type and tax_name to the same shapes used by
+              // the main items array so sales_view.js can safely rely on them
+              // for price / GST breakdown calculations.
+              const taxTypeSource = line.tax_type ?? line.taxType ?? 'exclusive';
+              const taxTypeStr = taxTypeSource.toString().trim().toLowerCase();
+              if (taxTypeStr.startsWith('inc')) {
+                line.tax_type = 'inclusive';
+              } else {
+                // Default / all other prefixes map to exclusive to match PHP.
+                line.tax_type = 'exclusive';
+              }
+
+              if (typeof line.tax_name === 'undefined') {
+                line.tax_name = (line.tax_name ?? line.taxName ?? '').toString();
+              }
+
+              // Decide how to expose tax_fields for return lines. Behaviour
+              // mirrors the main items array so that the Tax Details card shows
+              // rows only for HSN-based and group-tax returns when GST is
+              // disabled.
+              const hasGroupTax = Array.isArray(line.tax_fields) && line.tax_fields.length > 0;
+              const numericReturnTax = toNumberSafe(line.tax, 0);
+              const hasAnyReturnTax = numericReturnTax > 0;
+              const taxNameStr = (line.tax_name || '').toString().trim();
+              const looksLikeGenericTax = /^tax\s+/i.test(taxNameStr);
+              const hasHsnLabel =
+                hasAnyReturnTax && !hasGroupTax && !!taxNameStr && !looksLikeGenericTax;
+
+              if (isSaleGstEnabled) {
+                if (Array.isArray(line.tax_fields)) {
+                  line.tax_fields = line.tax_fields.map((taxItem) => {
+                    if (!taxItem || typeof taxItem !== 'object') return taxItem;
+                    const t = { ...taxItem };
+                    t.tax_id = wrapObjectIdForLegacy(t.tax_id);
+                    return t;
+                  });
+                } else {
+                  line.tax_fields = [];
+                }
+              } else {
+                if (hasGroupTax) {
+                  if (Array.isArray(line.tax_fields)) {
+                    line.tax_fields = line.tax_fields.map((taxItem) => {
+                      if (!taxItem || typeof taxItem !== 'object') return taxItem;
+                      const t = { ...taxItem };
+                      t.tax_id = wrapObjectIdForLegacy(t.tax_id);
+                      return t;
+                    });
+                  } else {
+                    line.tax_fields = [];
+                  }
+                } else if (hasAnyReturnTax && hasHsnLabel) {
+                  // HSN-based return line without group
+                  line.tax_fields = [];
+                } else if (hasAnyReturnTax) {
+                  // Plain tax-rate return: hide Tax Details card rows.
+                  line.tax_fields = {};
+                } else {
+                  line.tax_fields = {};
+                }
+              }
+
+              if (
+                line.total_amount === null ||
+                typeof line.total_amount === 'undefined' ||
+                !Number.isFinite(Number(line.total_amount))
+              ) {
+                const qty = toNumberSafe(line.item_quantity, 0);
+                const price = toNumberSafe(line.item_price, 0);
+                line.total_amount = qty * price;
+              } else {
+                line.total_amount = toNumberSafe(line.total_amount, 0);
+              }
+
+              // Normalise item_unit for safety in the return line item table.
+              if (typeof line.item_unit === 'undefined' || line.item_unit === null) {
+                line.item_unit = 'qty';
+              }
+
+              return line;
+            });
+
+            clonedEntry.returnArray = ra;
+          }
+
+          return clonedEntry;
+        });
+      }
+
+      const normalized = BaseModel.simplifyFields(doc);
+
+      // Ensure legacy note fields are always strings for frontend checks and
+      // mirror PHP behaviour, where Sale Note / Payment Note are stored on the
+      // main sales document and reused for partial/full returns.
+      if (normalized && typeof normalized === 'object') {
+        const firstNonEmptyString = (...values) => {
+          for (const value of values) {
+            if (typeof value === 'string' && value.trim() !== '') {
+              return value;
+            }
+          }
+          return '';
+        };
+
+        normalized.sales_description = firstNonEmptyString(
+          normalized.sales_description,
+          doc.sales_description,
+          doc.notes
+        );
+
+        normalized.payment_description = firstNonEmptyString(
+          normalized.payment_description,
+          doc.payment_description
+        );
+
+        normalized.discount_description = firstNonEmptyString(
+          normalized.discount_description,
+          doc.discount_description
+        );
+      }
+
+      // Ensure expected top-level totals exist for the sales view modal
+      if (normalized && typeof normalized === 'object') {
+        if (!Array.isArray(normalized.items_return)) {
+          normalized.items_return = [];
+        }
+
+        // Ensure every items_return entry has the expected legacy shape
+        if (Array.isArray(normalized.items_return) && normalized.items_return.length) {
+          normalized.items_return = normalized.items_return
+            .map((entry) => {
+              if (!entry || typeof entry !== 'object') return null;
+              const cloned = { ...entry };
+              const raRaw =
+                cloned.returnArray && typeof cloned.returnArray === 'object'
+                  ? cloned.returnArray
+                  : {};
+
+              const ra = { ...raRaw };
+
+              if (!ra.returnDate) {
+                const dt = normalized.date || normalized.createdAt || new Date();
+                const t = dt instanceof Date ? dt.getTime() : Date.parse(dt);
+                ra.returnDate = {
+                  $date: {
+                    $numberLong: String(Number.isFinite(t) ? t : Date.now()),
+                  },
+                };
+              }
+
+              if (!ra.returnObjId) {
+                const oid =
+                  (ra.returnObjId && ra.returnObjId.$oid) ||
+                  (normalized._id && normalized._id.$oid) ||
+                  normalized._id ||
+                  '';
+                ra.returnObjId = { $oid: String(oid) };
+              }
+
+              if (!ra.returnId) {
+                ra.returnId = String(ra.return_id || ra.returnId || '');
+              }
+
+              if (!Array.isArray(ra.returnValue)) {
+                ra.returnValue = [];
+              }
+
+              // Normalise individual return line items so the view never
+              // displays `null%` for discount or tax and always has a
+              // sensible total_amount.
+              ra.returnValue = ra.returnValue.map((item) => {
+                if (!item || typeof item !== 'object') return item;
+                const line = { ...item };
+
+                // Coerce legacy string/null values into safe numbers so the
+                // frontend never sees "null" for discount/tax fields.
+                line.item_discount = toNumberSafe(line.item_discount, 0);
+                line.item_discount_percentage = toNumberSafe(line.item_discount_percentage, 0);
+                line.tax = toNumberSafe(line.tax, 0);
+
+                if (
+                  line.total_amount === null ||
+                  typeof line.total_amount === 'undefined' ||
+                  !Number.isFinite(Number(line.total_amount))
+                ) {
+                  const qty = toNumberSafe(line.item_quantity, 0);
+                  const price = toNumberSafe(line.item_price, 0);
+                  line.total_amount = qty * price;
+                } else {
+                  line.total_amount = toNumberSafe(line.total_amount, 0);
+                }
+
+                return line;
+              });
+
+              if (typeof ra.roundOff === 'undefined') ra.roundOff = 0;
+              if (typeof ra.extraDiscount === 'undefined') ra.extraDiscount = 0;
+              if (typeof ra.itemsTotalAmount === 'undefined') ra.itemsTotalAmount = 0;
+
+              cloned.returnArray = ra;
+              return cloned;
+            })
+            .filter(Boolean);
+        }
+
+        if (typeof normalized.items_return_total === 'undefined') {
+          normalized.items_return_total = 0;
+        }
+        if (typeof normalized.items_return_subtotal === 'undefined') {
+          normalized.items_return_subtotal = 0;
+        }
+        if (typeof normalized.return_discount === 'undefined') {
+          normalized.return_discount = 0;
+        }
+        if (typeof normalized.return_tax === 'undefined') {
+          normalized.return_tax = 0;
+        }
+        if (typeof normalized.return_round_off === 'undefined') {
+          normalized.return_round_off = 0;
+        }
+        if (typeof normalized.return_extra_discount === 'undefined') {
+          normalized.return_extra_discount = 0;
+        }
+        if (typeof normalized.items_subtotal === 'undefined') {
+          normalized.items_subtotal = normalized.subtotal ?? normalized.sales_sub_total ?? 0;
+        }
+
+        const gstItems = Array.isArray(normalized.items) ? normalized.items : [];
+        if (gstItems.length) {
+          let igstTotal = 0;
+          let cgstTotal = 0;
+          let sgstTotal = 0;
+
+          for (const it of gstItems) {
+            if (!it || typeof it !== 'object') continue;
+            igstTotal += Number(it.igst_tax || 0);
+            cgstTotal += Number(it.cgst_tax || 0);
+            sgstTotal += Number(it.sgst_tax || 0);
+          }
+
+          if (igstTotal || cgstTotal || sgstTotal) {
+            if (typeof normalized.igst === 'undefined') {
+              normalized.igst = round(igstTotal, 2);
+            }
+            if (typeof normalized.cgst === 'undefined') {
+              normalized.cgst = round(cgstTotal, 2);
+            }
+            if (typeof normalized.sgst === 'undefined') {
+              normalized.sgst = round(sgstTotal, 2);
+            }
+          }
+
+          const rawGstDoc =
+            doc.gst !== undefined && doc.gst !== null ? String(doc.gst).toLowerCase() : '';
+          const rawGstNorm =
+            normalized.gst !== undefined && normalized.gst !== null
+              ? String(normalized.gst).toLowerCase()
+              : '';
+
+          // Detect whether this sale already carries an explicit GST flag
+          // ("enable" / "disable" / "gst_on" / "gst_off"). When present,
+          // we must respect it exactly as stored so that gst=disable sales
+          // continue to show the non-GST Tax Details block, mirroring the
+          // original PHP behaviour.
+          const hasExplicitGstFlag = Boolean(rawGstDoc || rawGstNorm);
+
+          let gstEnabled = false;
+
+          if (hasExplicitGstFlag) {
+            gstEnabled =
+              rawGstDoc === 'enable' ||
+              rawGstDoc === 'gst_on' ||
+              rawGstNorm === 'enable' ||
+              rawGstNorm === 'gst_on';
+          } else if (igstTotal || cgstTotal || sgstTotal) {
+            // Legacy sales that never persisted a gst flag but clearly use
+            // IGST / CGST / SGST should behave as GST-enabled in the view
+            // modal so the Indian GST card appears.
+            gstEnabled = true;
+          } else if (branchHasGstOn) {
+            // Fallback: very old sales without a gst flag or GST tax values
+            // on a branch that is configured for Indian GST. In this narrow
+            // case, follow the branch configuration.
+            gstEnabled = true;
+          }
+
+          normalized.gst = gstEnabled ? 'enable' : 'disable';
+        } else if (typeof normalized.gst === 'undefined' || normalized.gst === null) {
+          normalized.gst = 'disable';
+        }
+
+        if (
+          typeof normalized.sales_total !== 'undefined' &&
+          typeof normalized.items_total === 'undefined'
+        ) {
+          normalized.items_total = normalized.sales_total;
+        }
+        if (
+          typeof normalized.total !== 'undefined' &&
+          typeof normalized.items_total === 'undefined'
+        ) {
+          normalized.items_total = normalized.total;
+        }
+        if (
+          typeof normalized.subtotal === 'undefined' &&
+          typeof normalized.sales_sub_total !== 'undefined'
+        ) {
+          normalized.subtotal = normalized.sales_sub_total;
+        }
+
+        // Ensure sale_no and status exist
+        if (typeof normalized.sale_no === 'undefined') {
+          normalized.sale_no =
+            normalized.sales_id || normalized.invoice_number || normalized._id || '';
+        }
+        if (typeof normalized.status === 'undefined') {
+          normalized.status = normalized.payment_status || '';
+        }
+
+        // PHP-style payment_status label normalization for view modal
+        const rawStatus = (normalized.payment_status ?? '').toString().trim().toLowerCase();
+        const paidAmt = Number(normalized.paid_amount ?? normalized.paidAmount ?? 0) || 0;
+        if (rawStatus === 'completed' || rawStatus === 'paid') {
+          normalized.payment_status = 'Paid';
+        } else if (rawStatus === 'cancelled' || rawStatus === 'canceled') {
+          normalized.payment_status = 'Cancelled';
+        } else if (rawStatus === 'pending') {
+          normalized.payment_status = paidAmt <= 0 ? 'Unpaid' : 'Pending';
+        }
+
+        // As a final safeguard, recompute item totals if the document is missing them.
+        const items = Array.isArray(normalized.items) ? normalized.items : [];
+        if (items.length) {
+          const sum = items.reduce((acc, it) => {
+            const line = Number(it?.item_total ?? it?.total_amount ?? it?.total ?? 0) || 0;
+            return acc + line;
+          }, 0);
+
+          if (
+            typeof normalized.items_total === 'undefined' ||
+            Number(normalized.items_total) === 0
+          ) {
+            normalized.items_total = round(sum, 2);
+          }
+          if (typeof normalized.sales_total === 'undefined') {
+            normalized.sales_total = normalized.items_total;
+          }
+          if (typeof normalized.total === 'undefined') {
+            normalized.total = normalized.sales_total;
+          }
+        }
+
+        // Normalise the primary date fields using the business timezone so
+        // that the sale details modal matches the Sales History list. For
+        // normal sales we keep the original sale date, but for
+        // PartialReturn / FullReturn we prefer the last updated timestamp
+        // (the time the return was completed), which is what the Sales
+        // History grid displays.
+        const tz = BaseModel.currentTimeZone || 'Asia/Kolkata';
+
+        let dateSource = null;
+        const process = (doc.sale_process || '').toString();
+        if (process === 'PartialReturn' || process === 'FullReturn') {
+          dateSource =
+            doc.updated_date ||
+            doc.updatedAt ||
+            doc.date ||
+            doc.created_date ||
+            doc.createdAt ||
+            null;
+        } else {
+          dateSource =
+            doc.date ||
+            doc.created_date ||
+            doc.createdAt ||
+            doc.updated_date ||
+            doc.updatedAt ||
+            null;
+        }
+
+        if (dateSource) {
+          const formatted = formatDate(dateSource, { timeZone: tz });
+          if (formatted) {
+            normalized.date = formatted;
+            if (!normalized.created_date) {
+              normalized.created_date = formatted;
+            }
+          }
+        }
+      }
+
+      return {
+        status: true,
+        data: normalized,
+        message: 'get successfully',
+      };
+    } catch (error) {
+      console.error('Error in getSalesDetailsLegacy:', error);
+      return { status: false, data: null, message: error.message };
+    }
+  }
+
+  async deleteSales(ids, { SaleModel } = {}) {
+    try {
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return { status: false, data: null, message: 'No IDs provided' };
+      }
+
+      // Ensure BaseModel has an initialized Mongo connection for recycle_bin
+      // backups and data_change_log.
+      const base = new BaseModel('sales');
+      await base.getCollection('recycle_bin');
+
+      const objectIds = ids
+        .map((id) => {
+          if (!id) return null;
+          const str = String(id).trim();
+          return mongoose.Types.ObjectId.isValid(str) ? new mongoose.Types.ObjectId(str) : null;
+        })
+        .filter((oid) => oid);
+
+      if (objectIds.length === 0) {
+        return { status: false, data: null, message: 'No valid IDs provided' };
+      }
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+      const transactionCollection = db.collection('transaction');
+      const customersCollection = db.collection('customers');
+      const cashRegisterCollection = db.collection('cashregister');
+      const branchesCollection = db.collection('branches');
+      const itemsCollection = db.collection('items');
+      const stockLogsRepository = new StockLogsRepository();
+
+      // Write change logs for each sale id (PHP BaseModel::changeLog parity)
+      for (const oid of objectIds) {
+        try {
+          await base.changeLog('sales', BaseModel.loggedUser, oid, 'delete');
+        } catch (e) {
+          // changeLog is non-throwing by design; ignore failures.
+        }
+      }
+
+      const licenseFilter = BaseModel.license ? { license: BaseModel.license } : {};
+
+      const salesFilter = {
+        _id: { $in: objectIds },
+        ...licenseFilter,
+        ...(BaseModel.currentBranch ? { branch_id: BaseModel.currentBranch } : {}),
+      };
+
+      // Clean register_sales references in cashregister collection
+      try {
+        await cashRegisterCollection.updateMany(
+          {
+            'register_sales.sales_id': { $in: objectIds },
+            ...licenseFilter,
+          },
+          {
+            $pull: {
+              register_sales: {
+                sales_id: { $in: objectIds },
+              },
+            },
+          }
+        );
+      } catch (e) {
+        // Do not block delete flow on register cleanup issues
+        console.error('Error cleaning cashregister for deleted sales:', e);
+      }
+
+      const salesDocs = await salesCollection.find(salesFilter).toArray();
+      const now = new Date();
+
+      for (const doc of salesDocs) {
+        if (!doc) continue;
+
+        const saleId = doc._id;
+        const customerId = doc.customer_id || doc.customer || null;
+        const branchId = doc.branch_id || doc.branch || BaseModel.currentBranch || null;
+        const licenseId = doc.license || BaseModel.license || null;
+
+        // Handle partial customer transactions (wallet) when partial_check is true
+        const partialCheck = doc.partial_check === 'true' || doc.partial_check === true;
+
+        if (partialCheck && customerId) {
+          try {
+            const txFilter = {
+              sale_id: saleId,
+              customer_id: customerId,
+            };
+            if (branchId) {
+              txFilter.branch_id = branchId;
+            }
+            if (licenseId) {
+              txFilter.license = licenseId;
+            }
+
+            const txDocs = await transactionCollection.find(txFilter).toArray();
+            for (const tx of txDocs) {
+              await BaseModel.deletedDocumentBackup('transaction', tx);
+            }
+
+            await transactionCollection.deleteMany(txFilter);
+
+            const customerMatchAnd = [{ customer_id: customerId }];
+            if (branchId) {
+              customerMatchAnd.push({ branch_id: branchId });
+            }
+            if (licenseId) {
+              customerMatchAnd.push({ license: licenseId });
+            }
+
+            const aggregateMatch = customerMatchAnd.length > 0 ? { $and: customerMatchAnd } : {};
+
+            const walletAgg = await transactionCollection
+              .aggregate([
+                { $match: aggregateMatch },
+                {
+                  $group: {
+                    _id: null,
+                    totalInAmount: {
+                      $sum: {
+                        $cond: [{ $eq: ['$type', 'in'] }, '$amount', 0],
+                      },
+                    },
+                    totalOutAmount: {
+                      $sum: {
+                        $cond: [{ $eq: ['$type', 'out'] }, '$amount', 0],
+                      },
+                    },
+                  },
+                },
+                {
+                  $addFields: {
+                    totalAmountDue: {
+                      $subtract: ['$totalInAmount', '$totalOutAmount'],
+                    },
+                  },
+                },
+              ])
+              .toArray();
+
+            let totalWalletAmount = 0;
+            if (walletAgg.length > 0) {
+              const row = walletAgg[0];
+              totalWalletAmount =
+                typeof row.totalAmountDue === 'number'
+                  ? row.totalAmountDue
+                  : Number(row.totalAmountDue || 0) || 0;
+            }
+
+            const customerFilter = {
+              _id: customerId,
+            };
+            if (branchId) {
+              customerFilter.branch_id = branchId;
+            }
+            if (licenseId) {
+              customerFilter.license = licenseId;
+            }
+
+            await customersCollection.updateOne(customerFilter, {
+              $set: { balance: totalWalletAmount },
+            });
+          } catch (e) {
+            console.error('Error updating customer wallet during sale delete:', e);
+          }
+        }
+
+        // Backup sales document to recycle_bin
+        try {
+          await BaseModel.deletedDocumentBackup('sales', doc);
+        } catch (e) {
+          console.error('Error backing up deleted sale document:', e);
+        }
+
+        // Restore stock quantities and write stock logs (skip Hold sales)
+        const saleProcess = doc.sale_process || null;
+        if (saleProcess && String(saleProcess).toLowerCase() === 'hold') {
+          continue;
+        }
+
+        const branchForStock = branchId || BaseModel.currentBranch || doc.branch_id || doc.branch;
+        let branchSettings = null;
+        if (branchForStock) {
+          try {
+            let normalizedBranchId = branchForStock;
+            if (branchForStock instanceof mongoose.Types.ObjectId) {
+              normalizedBranchId = branchForStock;
+            } else if (mongoose.Types.ObjectId.isValid(String(branchForStock))) {
+              normalizedBranchId = new mongoose.Types.ObjectId(String(branchForStock));
+            }
+
+            branchSettings = await branchesCollection.findOne({
+              _id: normalizedBranchId,
+            });
+          } catch (e) {
+            console.error('Error loading branch settings for sale delete stock log:', e);
+          }
+        }
+
+        const stockLogStatus = !!(branchSettings && branchSettings.stock_management_log);
+
+        const items = Array.isArray(doc.items) ? doc.items : [];
+        const salesIdentifier = doc.sales_id || doc.invoice_number || (saleId && saleId.toString());
+
+        for (const item of items) {
+          try {
+            const rawItemId = item.item_id || item.item || item.id;
+            if (!rawItemId) continue;
+
+            const quantity =
+              item.item_quantity != null
+                ? item.item_quantity
+                : item.quantity != null
+                  ? item.quantity
+                  : 0;
+            const itemQty = Number(quantity || 0);
+            if (!itemQty || itemQty <= 0) continue;
+
+            let itemObjectId = null;
+            if (
+              rawItemId &&
+              typeof rawItemId === 'object' &&
+              rawItemId._bsontype === 'ObjectID' &&
+              typeof rawItemId.toString === 'function'
+            ) {
+              itemObjectId = new mongoose.Types.ObjectId(rawItemId.toString());
+            } else if (mongoose.Types.ObjectId.isValid(String(rawItemId))) {
+              itemObjectId = new mongoose.Types.ObjectId(String(rawItemId));
+            }
+
+            if (!itemObjectId) continue;
+
+            const itemFilter = {
+              _id: itemObjectId,
+            };
+            if (licenseId) {
+              itemFilter.license = licenseId;
+            }
+
+            const itemDoc = await itemsCollection.findOne(itemFilter);
+            if (!itemDoc) continue;
+
+            const openingBalance = Number(itemDoc.available_quantity || 0);
+            const availableQuantity = openingBalance + itemQty;
+
+            // PHP checks: $itemdocuments['track_inventory'] === true (boolean or string 'true')
+            if (
+              stockLogStatus &&
+              (itemDoc.track_inventory === true || itemDoc.track_inventory === 'true')
+            ) {
+              const countStr = String(itemQty);
+
+              await stockLogsRepository.createStockLog({
+                stocklog: stockLogStatus,
+                branch_id: branchForStock,
+                view_item_id: itemObjectId,
+                item_barcode_id: itemDoc.barcode_id || '',
+                item_name: item.item_name || item.name || itemDoc.name || '',
+                item_quantity: itemQty,
+                process: 'Delete Sale',
+                reference: salesIdentifier || '',
+                opening_balance: openingBalance,
+                closing_balance: availableQuantity,
+                count: countStr,
+                date: now,
+                action: 'Add',
+                changed_by_userid: BaseModel.loggedUser,
+                changed_by: BaseModel.loggedUserName || 'System',
+              });
+
+              await itemsCollection.updateOne(itemFilter, {
+                $set: {
+                  available_quantity: availableQuantity,
+                },
+              });
+            }
+          } catch (e) {
+            console.error('Error restoring stock for deleted sale item:', e);
+          }
+        }
+      }
+
+      await salesCollection.deleteMany(salesFilter);
+
+      return {
+        status: true,
+        data: objectIds.map((oid) => oid.toString()),
+        message: 'success',
+      };
+    } catch (error) {
+      console.error('Error in deleteSaleCollectionData:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async getById(id, { SaleModel } = {}) {
+    if (!id) return null;
+    const Model = this.getModel(SaleModel);
+    const tenant = activeTenantFilter();
+    return Object.keys(tenant).length ? Model.findOne({ _id: id, ...tenant }) : Model.findById(id);
+  }
+
+  async findById(id, { projection, populate, SaleModel } = {}) {
+    if (!id) return null;
+    const Model = this.getModel(SaleModel);
+
+    const tenant = activeTenantFilter();
+    let query = Object.keys(tenant).length
+      ? Model.findOne({ _id: id, ...tenant })
+      : Model.findById(id);
+
+    if (projection) {
+      query = query.select(projection);
+    }
+
+    if (populate) {
+      // Allow single path or array of populate specs
+      if (Array.isArray(populate)) {
+        populate.forEach((pop) => {
+          query = query.populate(pop);
+        });
+      } else {
+        query = query.populate(populate);
+      }
+    }
+
+    return query.lean();
+  }
+
+  async save(sale) {
+    if (!sale) return null;
+    return sale.save();
+  }
+
+  async updateWalletAmount(saleId, walletAmount) {
+    try {
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const result = await salesCollection.updateOne(
+        {
+          _id: new mongoose.Types.ObjectId(saleId),
+          license: BaseModel.license,
+        },
+        {
+          $set: {
+            wallet_amount: parseFloat(walletAmount),
+          },
+        }
+      );
+
+      return result.modifiedCount > 0;
+    } catch (error) {
+      console.error('Error updating wallet amount:', error);
+      return false;
+    }
+  }
+
+  async aggregate(pipeline, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.aggregate(pipeline);
+  }
+
+  async find(match, projection, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    let query = Model.find(match);
+    if (projection) {
+      query = query.select(projection);
+    }
+    return query.lean();
+  }
+
+  async findOne(match, projection, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    let query = Model.findOne(match);
+    if (projection) {
+      query = query.select(projection);
+    }
+    return query.lean();
+  }
+
+  async countDocuments(match, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.countDocuments(match);
+  }
+
+  async getSaleForReceipt(id, { SaleModel } = {}) {
+    if (!id) return null;
+    const Model = this.getModel(SaleModel);
+    return Model.findOne({
+      $or: [{ _id: id }, { sales_id: id }],
+    }).populate('branch_id');
+  }
+
+  async getSaleForCustomerPrint(id, { SaleModel } = {}) {
+    if (!id) return null;
+    const Model = this.getModel(SaleModel);
+    return Model.findOne({
+      $or: [{ _id: id }, { sales_id: id }],
+    })
+      .populate('branch_id')
+      .populate('items.item_id')
+      .lean();
+  }
+
+  async userReportPage(data, options, { SaleModel } = {}) {
+    try {
+      const timeZone = BaseModel.currentTimeZone || 'Asia/Kolkata';
+      const fromTimestamp = BaseModel.startingDate(data.starting_date, timeZone);
+      const toTimestamp = BaseModel.endingDate(data.ending_date, timeZone);
+
+      const fromDate = new Date(fromTimestamp || 0);
+      const toDate = new Date(toTimestamp || Date.now());
+
+      const rawBranch = data.branchid;
+      const branchIds = Array.isArray(rawBranch) ? rawBranch : rawBranch ? [rawBranch] : [];
+
+      const branchObjectIds = (branchIds || [])
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      const andConditions = [
+        { branch_id: { $in: branchObjectIds } },
+        { updated_date: { $gte: fromDate, $lte: toDate } },
+      ];
+      if (BaseModel.license) {
+        andConditions.push({ license: BaseModel.license });
+      }
+
+      /** @type {Record<string, any>} */
+      const filters = { $and: andConditions };
+      if (data.user_id && mongoose.Types.ObjectId.isValid(data.user_id)) {
+        filters.user_id = new mongoose.Types.ObjectId(data.user_id);
+      }
+
+      const limit = parseInt(options.limit, 10) > 0 ? parseInt(options.limit, 10) : 5;
+      const page = parseInt(options.page, 10) > 0 ? parseInt(options.page, 10) : 1;
+      const skip = Math.max(0, (page - 1) * limit);
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const pipeline = [
+        { $unwind: '$items' },
+        { $match: filters },
+        {
+          $addFields: {
+            sales_total_num: {
+              $toDouble: { $ifNull: ['$items_total', 0] },
+            },
+            tax_num: { $toDouble: { $ifNull: ['$tax', 0] } },
+            company_price_total_num: {
+              $toDouble: { $ifNull: ['$items.company_price_total', 0] },
+            },
+          },
+        },
+        {
+          $group: {
+            _id: { user_id: '$user_id', user_name: '$user_name', sale_id: '$_id' },
+            profit: {
+              $sum: {
+                $subtract: [
+                  {
+                    $subtract: ['$sales_total_num', { $add: ['$tax_num'] }],
+                  },
+                  '$company_price_total_num',
+                ],
+              },
+            },
+            sales_total: { $first: '$items_total' },
+            refund_total: { $first: '$items_return_total' },
+          },
+        },
+        {
+          $group: {
+            _id: { user_id: '$_id.user_id', user_name: '$_id.user_name' },
+            profit: { $sum: '$profit' },
+            sales_total: { $sum: '$sales_total' },
+            sales_avg: { $avg: '$sales_total' },
+            refund_total: { $sum: '$refund_total' },
+            sales_count: { $sum: 1 },
+          },
+        },
+        { $sort: { sales_total: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+      ];
+
+      const salesList = await salesCollection.aggregate(pipeline, { allowDiskUse: true }).toArray();
+
+      const list = salesList.map((doc) => {
+        const id = doc._id || {};
+        return {
+          user_name: id.user_name,
+          user_id: id.user_id,
+          sales_payment: round(doc.sales_total || 0, 2),
+          refund_payment: round(doc.refund_total || 0, 2),
+          sales_count: doc.sales_count || 0,
+          sales_profit: round(doc.profit || 0, 2),
+          sales_avg: round(doc.sales_avg || 0, 2),
+        };
+      });
+
+      const countPipeline = [
+        { $match: filters },
+        {
+          $group: {
+            _id: { user_id: '$user_id' },
+          },
+        },
+      ];
+
+      const salesCountList = await salesCollection.aggregate(countPipeline).toArray();
+      const total = salesCountList.length;
+
+      return {
+        status: true,
+        list,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.max(Math.ceil(total / (limit || 1)), 1),
+        },
+        message: 'Get Successfully',
+      };
+    } catch (error) {
+      console.error('Error in userReportPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async getUserGraphicalReports(value = {}, { SaleModel } = {}) {
+    try {
+      const timeZone = BaseModel.currentTimeZone || 'Asia/Kolkata';
+      const fromTimestamp = BaseModel.startingDate(value.starting_date, timeZone);
+      const toTimestamp = BaseModel.endingDate(value.ending_date, timeZone);
+
+      const fromDate = new Date(fromTimestamp || 0);
+      const toDate = new Date(toTimestamp || Date.now());
+
+      const rawBranch = value.branchid;
+      const branchIds = Array.isArray(rawBranch) ? rawBranch : rawBranch ? [rawBranch] : [];
+
+      const branchObjectIds = (branchIds || [])
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      const andConditions = [
+        {
+          branch_id: { $in: branchObjectIds },
+          sale_process: { $in: ['Add', 'Edit', 'PartialReturn'] },
+        },
+        {
+          updated_date: { $gte: fromDate, $lte: toDate },
+          ...(BaseModel.license ? { license: BaseModel.license } : {}),
+        },
+      ];
+
+      const condition = { $and: andConditions };
+      if (value.user_id && mongoose.Types.ObjectId.isValid(value.user_id)) {
+        condition.user_id = new mongoose.Types.ObjectId(value.user_id);
+      }
+
+      const db = await BaseModel.getDb();
+      const collection = db.collection('sales');
+
+      const pipeline = [
+        { $match: condition },
+        {
+          $project: {
+            items_total: 1,
+            h: {
+              $dayOfWeek: {
+                date: '$updated_date',
+                timezone: timeZone,
+              },
+            },
+          },
+        },
+        {
+          $group: {
+            _id: '$h',
+            totalValue: { $sum: '$items_total' },
+          },
+        },
+      ];
+
+      const salesData = await collection.aggregate(pipeline).toArray();
+
+      if (!Array.isArray(salesData) || salesData.length === 0) {
+        return {
+          status: true,
+          data: [],
+          message: '',
+        };
+      }
+
+      const days = ['Sat', 'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+      const totalsByIndex = new Array(7).fill(0);
+
+      for (const doc of salesData) {
+        const dow = typeof doc._id === 'number' ? doc._id : Number(doc._id) || 0;
+        if (dow >= 1 && dow <= 7) {
+          const idx = dow === 7 ? 0 : dow; // 7 -> 0 (Sat), 1..6 -> 1..6
+          totalsByIndex[idx] += Number(doc.totalValue || 0);
+        }
+      }
+
+      const arrSalesPurchase = [];
+      for (let m = 0; m < 7; m++) {
+        arrSalesPurchase.push({
+          week: days[m],
+          sales: round(totalsByIndex[m] || 0, 2),
+        });
+      }
+
+      return {
+        status: true,
+        data: arrSalesPurchase,
+        message: 'Graphical report successfully',
+      };
+    } catch (error) {
+      console.error('Error in getUserGraphicalReports:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async returnSalesReportPage(data = {}, options = {}, { SaleModel } = {}) {
+    try {
+      const timeZone = BaseModel.currentTimeZone || 'Asia/Kolkata';
+      const fromTs = BaseModel.startingDate
+        ? BaseModel.startingDate(data.starting_date, timeZone)
+        : Date.parse(data.starting_date || '') || 0;
+      const toTs = BaseModel.endingDate
+        ? BaseModel.endingDate(data.ending_date, timeZone)
+        : Date.parse(data.ending_date || '') || Date.now();
+
+      const fromDate = new Date(fromTs || 0);
+      const toDate = new Date(toTs || Date.now());
+
+      const branchIds = Array.isArray(data.branchid) ? data.branchid : [];
+      const branchObjectIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      const andConditions = [];
+      if (branchObjectIds.length) {
+        andConditions.push({ branch_id: { $in: branchObjectIds } });
+      }
+      andConditions.push({
+        sale_process: { $in: ['PartialReturn', 'FullReturn'] },
+      });
+
+      const dateAndLicense = {
+        updated_date: { $gte: fromDate, $lte: toDate },
+      };
+      if (BaseModel.license) {
+        dateAndLicense.license = BaseModel.license;
+      }
+      andConditions.push(dateAndLicense);
+
+      const filters = { $and: andConditions };
+
+      const limit = parseInt(options.limit, 10) > 0 ? parseInt(options.limit, 10) : 5;
+      const page = parseInt(options.page, 10) > 0 ? parseInt(options.page, 10) : 1;
+      const skip = Math.max(0, (page - 1) * limit);
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const pipeline = [
+        { $match: filters },
+        { $unwind: '$items_return' },
+        { $unwind: '$items_return.returnArray' },
+        { $unwind: '$items_return.returnArray.returnValue' },
+        {
+          $group: {
+            _id: {
+              id: '$_id',
+              date: '$updated_date',
+              sales_id: '$sales_id',
+              customer_name: '$customer_name',
+              payment_mode: '$payment_mode',
+              return_value: '$items_return_total',
+            },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { '_id.return_value': -1 } },
+        { $skip: skip },
+        { $limit: limit },
+      ];
+
+      const aggResults = await salesCollection.aggregate(pipeline).toArray();
+
+      const list = (aggResults || []).map((doc) => {
+        const id = doc._id || {};
+        const rawDate = id.date;
+        const formattedDate = rawDate ? formatDate(rawDate) : null;
+        const returnTotal = typeof id.return_value === 'number' ? id.return_value : 0;
+
+        return {
+          date: formattedDate,
+          id: id.id,
+          sale_id: id.sales_id,
+          customer_name: id.customer_name,
+          payment_mode: id.payment_mode,
+          return: round(returnTotal || 0, 2),
+          count: doc.count || 0,
+        };
+      });
+
+      const countPipeline = [
+        { $match: filters },
+        {
+          $group: {
+            _id: { sales_id: '$sales_id' },
+          },
+        },
+        { $count: 'total' },
+      ];
+
+      const countDocs = await salesCollection.aggregate(countPipeline).toArray();
+      const total = (countDocs[0] && countDocs[0].total) || 0;
+
+      return {
+        status: true,
+        list,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.max(Math.ceil(total / (limit || 1)), 1),
+        },
+        message: 'Get Successfully',
+      };
+    } catch (error) {
+      console.error('Error in returnSalesReportPage:', error);
+      const limit = parseInt(options.limit, 10) > 0 ? parseInt(options.limit, 10) : 5;
+      return {
+        status: false,
+        list: null,
+        pagination: {
+          page: 1,
+          limit,
+          total: 0,
+          pages: 1,
+        },
+        message: error.message,
+      };
+    }
+  }
+
+  async returnProductReportPage(data = {}, options = {}, { SaleModel } = {}) {
+    try {
+      const rawBranch = data.branchid;
+      const branchIds = Array.isArray(rawBranch) ? rawBranch : rawBranch ? [rawBranch] : [];
+
+      const branchObjectIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      const andConditions = [];
+      if (branchObjectIds.length) {
+        andConditions.push({ branch_id: { $in: branchObjectIds } });
+      }
+
+      if (data.sales_id && mongoose.Types.ObjectId.isValid(data.sales_id)) {
+        andConditions.push({ _id: new mongoose.Types.ObjectId(data.sales_id) });
+      }
+
+      if (BaseModel.license) {
+        andConditions.push({ license: BaseModel.license });
+      }
+
+      const filters = andConditions.length ? { $and: andConditions } : {};
+
+      const limit = parseInt(options.limit, 10) > 0 ? parseInt(options.limit, 10) : BaseModel.limit;
+      const page = parseInt(options.page, 10) > 0 ? parseInt(options.page, 10) : 1;
+      const skip = Math.max(0, (page - 1) * limit);
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const pipeline = [
+        { $unwind: '$items_return' },
+        { $unwind: '$items_return.returnArray' },
+        { $unwind: '$items_return.returnArray.returnValue' },
+        { $match: filters },
+        {
+          $group: {
+            _id: {
+              sales_id: '$sales_id',
+              item_id: '$items_return.returnArray.returnValue.item_id',
+              item_name: '$items_return.returnArray.returnValue.item_name',
+              customer_name: '$customer_name',
+              customer_phone: '$customer_phone',
+              customer_email: '$customer_email',
+              customer_address: '$customer_address',
+              user_name: '$user_name',
+              branch_name: '$branch_name',
+            },
+            item_quantity: {
+              $sum: '$items_return.returnArray.returnValue.item_quantity',
+            },
+            total_amount: {
+              $sum: '$items_return.returnArray.returnValue.total_amount',
+            },
+          },
+        },
+        { $sort: { total_amount: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+      ];
+
+      const aggResults = await salesCollection.aggregate(pipeline).toArray();
+
+      const list = [];
+      const customDetails = {
+        sales_id: null,
+        customer_name: null,
+        customer_phone: null,
+        customer_email: null,
+        customer_address: null,
+        user_name: null,
+        branch_name: null,
+      };
+
+      for (const doc of aggResults) {
+        const id = doc._id || {};
+        list.push({
+          _id: id.item_id ? id.item_id.toString() : '',
+          name: id.item_name || '',
+          total_amount: round(doc.total_amount || 0, 2),
+          item_quantity: round(doc.item_quantity || 0, 2),
+        });
+
+        if (!customDetails.sales_id && id.sales_id) {
+          customDetails.sales_id = id.sales_id;
+          customDetails.customer_name = id.customer_name || '';
+          customDetails.customer_phone = id.customer_phone || '';
+          customDetails.customer_email = id.customer_email || '';
+          customDetails.customer_address = id.customer_address || '';
+          customDetails.user_name = id.user_name || '';
+          customDetails.branch_name = id.branch_name || '';
+        }
+      }
+
+      const countPipeline = [
+        { $unwind: '$items_return' },
+        { $unwind: '$items_return.returnArray' },
+        { $unwind: '$items_return.returnArray.returnValue' },
+        { $match: filters },
+        {
+          $group: {
+            _id: {
+              item_id: '$items_return.returnArray.returnValue.item_id',
+            },
+          },
+        },
+        { $count: 'total' },
+      ];
+
+      const countDocs = await salesCollection.aggregate(countPipeline).toArray();
+      const total = (countDocs[0] && countDocs[0].total) || 0;
+
+      return {
+        status: true,
+        custom_details: customDetails,
+        total,
+        current_page: page,
+        total_pages: limit ? Math.ceil(total / limit) : 0,
+        per_page: limit,
+        list,
+      };
+    } catch (error) {
+      console.error('Error in returnProductReportPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async pendingProductReportPage(data = {}, options = {}, { SaleModel } = {}) {
+    try {
+      const rawBranch = data.branchid;
+      const branchIds = Array.isArray(rawBranch) ? rawBranch : rawBranch ? [rawBranch] : [];
+
+      const branchObjectIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      const andConditions = [];
+      if (branchObjectIds.length) {
+        andConditions.push({ branch_id: { $in: branchObjectIds } });
+      }
+
+      if (data.sales_id && mongoose.Types.ObjectId.isValid(data.sales_id)) {
+        andConditions.push({ _id: new mongoose.Types.ObjectId(data.sales_id) });
+      }
+
+      if (BaseModel.license) {
+        andConditions.push({ license: BaseModel.license });
+      }
+
+      const filters = andConditions.length ? { $and: andConditions } : {};
+
+      const limit = parseInt(options.limit, 10) > 0 ? parseInt(options.limit, 10) : BaseModel.limit;
+      const page = parseInt(options.page, 10) > 0 ? parseInt(options.page, 10) : 1;
+      const skip = Math.max(0, (page - 1) * limit);
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const pipeline = [
+        { $unwind: '$items' },
+        { $match: filters },
+        {
+          $group: {
+            _id: {
+              sales_id: '$sales_id',
+              item_id: '$items.item_id',
+              item_name: '$items.item_name',
+              customer_name: '$customer_name',
+              customer_phone: '$customer_phone',
+              customer_email: '$customer_email',
+              customer_address: '$customer_address',
+              user_name: '$user_name',
+              branch_name: '$branch_name',
+            },
+            item_quantity: { $sum: '$items.item_quantity' },
+            total_amount: { $sum: '$items.total_amount' },
+          },
+        },
+        { $sort: { total_amount: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+      ];
+
+      const aggResults = await salesCollection.aggregate(pipeline).toArray();
+
+      const list = [];
+      const customDetails = {
+        sales_id: null,
+        customer_name: null,
+        customer_phone: null,
+        customer_email: null,
+        customer_address: null,
+        user_name: null,
+        branch_name: null,
+      };
+
+      for (const doc of aggResults) {
+        const id = doc._id || {};
+        list.push({
+          _id: id.item_id ? id.item_id.toString() : '',
+          name: id.item_name || '',
+          total_amount: round(doc.total_amount || 0, 2),
+          item_quantity: round(doc.item_quantity || 0, 2),
+        });
+
+        if (!customDetails.sales_id && id.sales_id) {
+          customDetails.sales_id = id.sales_id;
+          customDetails.customer_name = id.customer_name || '';
+          customDetails.customer_phone = id.customer_phone || '';
+          customDetails.customer_email = id.customer_email || '';
+          customDetails.customer_address = id.customer_address || '';
+          customDetails.user_name = id.user_name || '';
+          customDetails.branch_name = id.branch_name || '';
+        }
+      }
+
+      const countPipeline = [
+        { $unwind: '$items' },
+        { $match: filters },
+        {
+          $group: {
+            _id: { item_id: '$items.item_id' },
+          },
+        },
+        { $count: 'total' },
+      ];
+
+      const countDocs = await salesCollection.aggregate(countPipeline).toArray();
+      const total = (countDocs[0] && countDocs[0].total) || 0;
+
+      return {
+        status: true,
+        custom_details: customDetails,
+        total,
+        current_page: page,
+        total_pages: limit ? Math.ceil(total / limit) : 0,
+        per_page: limit,
+        list,
+      };
+    } catch (error) {
+      console.error('Error in pendingProductReportPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async productBasedReportPage(data, options, { SaleModel } = {}) {
+    try {
+      const timeZone = BaseModel.currentTimeZone || 'Asia/Kolkata';
+      const fromTs = BaseModel.startingDate
+        ? BaseModel.startingDate(data.starting_date, timeZone)
+        : Date.parse(data.starting_date || '') || 0;
+      const toTs = BaseModel.endingDate
+        ? BaseModel.endingDate(data.ending_date, timeZone)
+        : Date.parse(data.ending_date || '') || Date.now();
+
+      const fromDate = new Date(fromTs || 0);
+      const toDate = new Date(toTs || Date.now());
+
+      const branchIds = Array.isArray(data.branchid) ? data.branchid : [];
+      const branchObjectIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      const matchFilter = {
+        branch_id: { $in: branchObjectIds },
+        sale_process: { $in: ['PartialReturn', 'FullReturn'] },
+        updated_date: { $gte: fromDate, $lte: toDate },
+      };
+
+      if (BaseModel.license) {
+        matchFilter.license = BaseModel.license;
+      }
+
+      const limit = parseInt(options.limit, 10) > 0 ? parseInt(options.limit, 10) : 5;
+      const page = parseInt(options.page, 10) > 0 ? parseInt(options.page, 10) : 1;
+      const skip = Math.max(0, (page - 1) * limit);
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const basePipeline = [
+        { $match: matchFilter },
+        { $unwind: '$items_return' },
+        { $unwind: '$items_return.returnArray' },
+        { $unwind: '$items_return.returnArray.returnValue' },
+      ];
+
+      const aggregationPipeline = [
+        ...basePipeline,
+        {
+          $group: {
+            _id: {
+              item_id: '$items_return.returnArray.returnValue.item_id',
+              item_name: '$items_return.returnArray.returnValue.item_name',
+              supplier_id: '$items_return.returnArray.returnValue.supplier_id',
+              supplier_name: '$items_return.returnArray.returnValue.supplier_name',
+              return_id: '$items_return.returnArray.returnValue.return_id',
+              return_date: '$items_return.returnArray.returnValue.return_date',
+            },
+            total_amount: {
+              $sum: '$items_return.returnArray.returnValue.total_amount',
+            },
+            item_quantity: {
+              $sum: '$items_return.returnArray.returnValue.item_quantity',
+            },
+          },
+        },
+        { $sort: { '_id.return_date': -1, total_amount: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+      ];
+
+      const aggResults = await salesCollection.aggregate(aggregationPipeline).toArray();
+
+      const list = (aggResults || []).map((doc) => {
+        const id = doc._id || {};
+        return {
+          supplier_id: id.supplier_id ? id.supplier_id.toString() : '',
+          name: id.item_name || '',
+          supplier_name: id.supplier_name || '',
+          return_id: id.return_id || '',
+          return_date: id.return_date ? formatDate(id.return_date) : null,
+          total_amount: round(doc.total_amount || 0, 2),
+          item_quantity: round(doc.item_quantity || 0, 2),
+        };
+      });
+
+      const countPipeline = [
+        ...basePipeline,
+        {
+          $group: {
+            _id: {
+              item_id: '$items_return.returnArray.returnValue.item_id',
+              supplier_id: '$items_return.returnArray.returnValue.supplier_id',
+              return_id: '$items_return.returnArray.returnValue.return_id',
+            },
+          },
+        },
+        { $count: 'total' },
+      ];
+
+      const countDocs = await salesCollection.aggregate(countPipeline).toArray();
+      const total = (countDocs[0] && countDocs[0].total) || 0;
+
+      return {
+        status: true,
+        list,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.max(Math.ceil(total / (limit || 1)), 1),
+        },
+        message: 'Get Successfully',
+      };
+    } catch (error) {
+      console.error('Error in productBasedReportPage:', error);
+      const limit = parseInt(options.limit, 10) > 0 ? parseInt(options.limit, 10) : 5;
+      return {
+        status: false,
+        list: null,
+        pagination: {
+          page: 1,
+          limit,
+          total: 0,
+          pages: 1,
+        },
+        message: error.message,
+      };
+    }
+  }
+
+  async pendingSalesReportPage(data, options, { SaleModel } = {}) {
+    try {
+      const timeZone = BaseModel.currentTimeZone || 'Asia/Kolkata';
+      const fromTs = BaseModel.startingDate
+        ? BaseModel.startingDate(data.starting_date, timeZone)
+        : Date.parse(data.starting_date || '') || 0;
+      const toTs = BaseModel.endingDate
+        ? BaseModel.endingDate(data.ending_date, timeZone)
+        : Date.parse(data.ending_date || '') || Date.now();
+
+      const fromDate = new Date(fromTs || 0);
+      const toDate = new Date(toTs || Date.now());
+
+      const branchIds = Array.isArray(data.branchid) ? data.branchid : [];
+      const branchObjectIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      const andConditions = [];
+      if (branchObjectIds.length) {
+        andConditions.push({ branch_id: { $in: branchObjectIds } });
+      }
+      andConditions.push({ sale_process: { $in: ['Add', 'Edit', 'PartialReturn'] } });
+
+      const dateAndPayment = {
+        updated_date: { $gte: fromDate, $lte: toDate },
+        $or: [
+          { payment_status: 'Partialy Paid' },
+          { payment_status: PAYMENT_STATUS.PENDING },
+          { payment_pending: { $gt: 0 } },
+        ],
+      };
+      if (BaseModel.license) {
+        dateAndPayment.license = BaseModel.license;
+      }
+      andConditions.push(dateAndPayment);
+
+      const filters = { $and: andConditions };
+
+      const limit = parseInt(options.limit, 10) > 0 ? parseInt(options.limit, 10) : 5;
+      const page = parseInt(options.page, 10) > 0 ? parseInt(options.page, 10) : 1;
+      const skip = Math.max(0, (page - 1) * limit);
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const pipeline = [
+        { $match: filters },
+        {
+          $group: {
+            _id: {
+              date: '$updated_date',
+              id: '$_id',
+              sales_id: '$sales_id',
+              user_name: '$user_name',
+              customer_name: '$customer_name',
+              customer_phone: '$customer_phone',
+              number_of_items: '$number_of_items',
+            },
+            pending_amount: { $sum: '$items_total' },
+            partial_amount: { $sum: '$partial_balance' },
+            due_amount: { $sum: '$payment_pending' },
+          },
+        },
+        { $sort: { pending_amount: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+      ];
+
+      const aggResults = await salesCollection.aggregate(pipeline).toArray();
+
+      const list = (aggResults || []).map((doc) => {
+        const id = doc._id || {};
+        const rawDate = id.date;
+        const formattedDate = rawDate ? formatDate(rawDate) : null;
+        return {
+          date: formattedDate,
+          id: id.id,
+          sale_id: id.sales_id,
+          customer_name: id.customer_name,
+          customer_phone: id.customer_phone,
+          pending_amount: round(doc.pending_amount || 0, 2),
+          partial_amount: round(doc.partial_amount || 0, 2),
+          due_amount: round(doc.due_amount || 0, 2),
+          number_of_items: id.number_of_items,
+        };
+      });
+
+      const total = await salesCollection.countDocuments(filters);
+
+      return {
+        status: true,
+        list,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.max(Math.ceil(total / (limit || 1)), 1),
+        },
+        message: 'Get Successfully',
+      };
+    } catch (error) {
+      console.error('Error in pendingSalesReportPage:', error);
+      const limit = parseInt(options.limit, 10) > 0 ? parseInt(options.limit, 10) : 5;
+      return {
+        status: false,
+        list: null,
+        pagination: {
+          page: 1,
+          limit,
+          total: 0,
+          pages: 1,
+        },
+        message: error.message,
+      };
+    }
+  }
+
+  async pendingCustomerReportPage(data = {}, options = {}, { SaleModel } = {}) {
+    try {
+      const timeZone = BaseModel.currentTimeZone || 'Asia/Kolkata';
+      const fromTs = BaseModel.startingDate
+        ? BaseModel.startingDate(data.starting_date, timeZone)
+        : Date.parse(data.starting_date || '') || 0;
+      const toTs = BaseModel.endingDate
+        ? BaseModel.endingDate(data.ending_date, timeZone)
+        : Date.parse(data.ending_date || '') || Date.now();
+
+      const fromDate = new Date(fromTs || 0);
+      const toDate = new Date(toTs || Date.now());
+
+      const branchIds = Array.isArray(data.branchid) ? data.branchid : [];
+      const branchObjectIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      const andConditions = [];
+      if (branchObjectIds.length) {
+        andConditions.push({ branch_id: { $in: branchObjectIds } });
+      }
+      andConditions.push({ sale_process: { $in: ['Add', 'Edit', 'PartialReturn'] } });
+
+      const dateAndPayment = {
+        updated_date: { $gte: fromDate, $lte: toDate },
+        $or: [
+          { payment_status: 'Partialy Paid' },
+          { payment_status: PAYMENT_STATUS.PENDING },
+          { payment_pending: { $gt: 0 } },
+        ],
+      };
+      if (BaseModel.license) {
+        dateAndPayment.license = BaseModel.license;
+      }
+      andConditions.push(dateAndPayment);
+
+      const filters = { $and: andConditions };
+
+      const limit = parseInt(options.limit, 10) > 0 ? parseInt(options.limit, 10) : 5;
+      const page = parseInt(options.page, 10) > 0 ? parseInt(options.page, 10) : 1;
+      const skip = Math.max(0, (page - 1) * limit);
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const pipeline = [
+        { $match: filters },
+        {
+          $group: {
+            _id: {
+              customer_id: '$customer_id',
+              customer_name: '$customer_name',
+              customer_phone: '$customer_phone',
+              referrer: { $ifNull: ['$referrer_name', '--'] },
+            },
+            number_of_items: { $sum: '$number_of_items' },
+            pending_amount: { $sum: '$items_total' },
+            partial_amount: { $sum: '$partial_balance' },
+            due_amount: { $sum: '$payment_pending' },
+          },
+        },
+        { $sort: { pending_amount: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+      ];
+
+      const aggResults = await salesCollection.aggregate(pipeline).toArray();
+
+      const list = (aggResults || []).map((doc) => {
+        const id = doc._id || {};
+        return {
+          customer_id: id.customer_id ? id.customer_id.toString() : '',
+          customer_name: id.customer_name || '',
+          customer_phone: id.customer_phone || '',
+          sales_payment: round(doc.pending_amount || 0, 2),
+          partial_balance: round(doc.partial_amount || 0, 2),
+          due_balance: round(doc.due_amount || 0, 2),
+          sales_count: doc.number_of_items || 0,
+          referrer: id.referrer || '--',
+        };
+      });
+
+      const countPipeline = [
+        { $match: filters },
+        {
+          $group: {
+            _id: {
+              customer_id: '$customer_id',
+              customer_name: '$customer_name',
+              customer_phone: '$customer_phone',
+            },
+          },
+        },
+        { $count: 'total' },
+      ];
+
+      const countDocs = await salesCollection.aggregate(countPipeline).toArray();
+      const total = (countDocs[0] && countDocs[0].total) || 0;
+
+      return {
+        status: true,
+        list,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.max(Math.ceil(total / (limit || 1)), 1),
+        },
+        message: 'Get Successfully',
+      };
+    } catch (error) {
+      console.error('Error in pendingCustomerReportPage:', error);
+      const limit = parseInt(options.limit, 10) > 0 ? parseInt(options.limit, 10) : 5;
+      return {
+        status: false,
+        list: null,
+        pagination: {
+          page: 1,
+          limit,
+          total: 0,
+          pages: 1,
+        },
+        message: error.message,
+      };
+    }
+  }
+
+  async taxSalesReportPage(data, { SaleModel } = {}) {
+    try {
+      const Model = this.getModel(SaleModel);
+
+      // Match legacy PHP BaseModel::startingDate / endingDate behaviour
+      const timeZone = BaseModel.currentTimeZone || 'Asia/Kolkata';
+      const fromTimestamp = BaseModel.startingDate(data.starting_date, timeZone);
+      const toTimestamp = BaseModel.endingDate(data.ending_date, timeZone);
+
+      const fromDate = new Date(fromTimestamp || 0);
+      const toDate = new Date(toTimestamp || Date.now());
+
+      // Convert branch IDs to ObjectIds (same as PHP array_merge of ObjectIDs)
+      const branchIds = Array.isArray(data.branchid) ? data.branchid : [];
+      const objectBranchIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      // Build filters for items with tax amount > 0, including license scope
+      const firstClause = {
+        branch_id: { $in: objectBranchIds },
+        sale_process: { $in: ['Add', 'Edit', 'PartialReturn'] },
+      };
+
+      const secondClause = {
+        updated_date: { $gte: fromDate, $lte: toDate },
+        'items.tax_amount': { $gt: 0 },
+        ...(BaseModel.license ? { license: BaseModel.license } : {}),
+      };
+
+      const filter = {
+        $and: [firstClause, secondClause],
+      };
+
+      // Aggregate pipeline mirroring PHP implementation
+      const pipeline = [
+        { $unwind: '$items' },
+        { $match: filter },
+        {
+          $group: {
+            _id: { items: '$items' },
+          },
+        },
+        { $sort: { _id: -1 } },
+      ];
+
+      const results = await Model.aggregate(pipeline);
+
+      // Transform results using BaseModel.simplifyFields like PHP simplifyFields
+      const rawTaxData = Array.isArray(results)
+        ? results.map((doc) => BaseModel.simplifyFields(doc))
+        : [];
+
+      // Normalize tax_name for legacy frontend expectations:
+      // when items.tax_fields === null and items.tax > 0, tax_name must be
+      // a non-empty string so existing JS can safely call slice() on it.
+      const taxData = rawTaxData.map((doc) => {
+        try {
+          const items = doc && doc._id && doc._id.items;
+          if (!items) return doc;
+
+          const hasNullTaxFields = items.tax_fields === null;
+          const hasPositiveTax =
+            items.tax !== undefined && items.tax !== null && Number(items.tax) > 0;
+
+          if (hasNullTaxFields && hasPositiveTax) {
+            const currentName = items.tax_name;
+            const isValidString = typeof currentName === 'string' && currentName.trim().length > 0;
+
+            if (!isValidString) {
+              const numericTax = Number(items.tax);
+              if (Number.isFinite(numericTax) && numericTax > 0) {
+                // e.g. "5% Tax" for tax = 5
+                items.tax_name = `${numericTax}% Tax`;
+              } else {
+                items.tax_name = 'Tax';
+              }
+            }
+          }
+        } catch (e) {
+          // Keep original doc if normalization fails
+        }
+        return doc;
+      });
+
+      const responseData = {
+        tax_details: taxData,
+      };
+
+      return {
+        status: true,
+        data: responseData,
+        message: 'Get tax details successfully',
+      };
+    } catch (error) {
+      console.error('Error in taxSalesReportPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  /*
+   * The item/category details tables send these rows to the client RAW, and
+   * the client renders row.items_total.toFixed(2) per row - so one sale
+   * document without the denormalised totals (demo-seeded sales carry
+   * sales_total only; imports and old PHP data vary too) white-paged the
+   * whole details view. The totals are answered here with the same fallbacks
+   * the sales list formatter uses, so every row is renderable.
+   */
+  _renderableSaleRows(rawList) {
+    const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
+    return (rawList || []).map((doc) => ({
+      ...doc,
+      items_total: round2(doc.items_total ?? doc.sales_total ?? doc.total ?? 0),
+      items_return_total: round2(doc.items_return_total ?? 0),
+    }));
+  }
+
+  async itemSaleDetailsPage(value, options = {}, { SaleModel } = {}) {
+    try {
+      const Model = this.getModel(SaleModel);
+
+      // Normalize branch ids (may come as single value or array)
+      const rawBranch = value.branchid;
+      const branchIds = Array.isArray(rawBranch) ? rawBranch : rawBranch ? [rawBranch] : [];
+
+      const objectBranchIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+      const rawItemId = value.item_id;
+
+      // If no item_id is provided at all, mirror PHP shape but return an
+      // empty, successful payload instead of an error so the frontend can
+      // show an empty Activities table without a toast.
+      if (!rawItemId) {
+        const limit = parseInt(options.limit, 10) || 5;
+        const page = parseInt(options.page, 10) || 1;
+
+        const emptyTable = {
+          status: true,
+          data: {
+            list: [],
+            total: 0,
+            current_page: page,
+            total_pages: 0,
+            per_page: limit,
+          },
+          message: 'Get Successfully',
+        };
+
+        return {
+          status: true,
+          data: {
+            sale: [],
+            return: [],
+            table: emptyTable,
+          },
+          message: 'get detail successfully',
+        };
+      }
+
+      // Support both string and ObjectId item_id representations. This keeps
+      // compatibility with legacy PHP data (where item_id was often stored as
+      // a plain string) and newer Node-created sales (which may use ObjectId).
+      const itemIdCandidates = [rawItemId];
+      if (mongoose.Types.ObjectId.isValid(rawItemId)) {
+        itemIdCandidates.push(new mongoose.Types.ObjectId(rawItemId));
+      }
+
+      const branchCondition =
+        objectBranchIds.length > 0 ? { branch_id: { $in: objectBranchIds } } : null;
+
+      // Filters used for the main table (sales that have this item either in items or return items)
+      const tableFilters = {
+        $and: [
+          branchCondition,
+          {
+            $or: [
+              { 'items.item_id': { $in: itemIdCandidates } },
+              {
+                'items_return.returnArray.returnValue.item_id': {
+                  $in: itemIdCandidates,
+                },
+              },
+            ],
+          },
+        ].filter(Boolean),
+      };
+
+      // Filters for sales side (items only)
+      const filters = {
+        $and: [branchCondition, { 'items.item_id': { $in: itemIdCandidates } }].filter(Boolean),
+      };
+
+      // Filters for returns side (items_return only)
+      const returnFilters = {
+        $and: [
+          branchCondition,
+          {
+            'items_return.returnArray.returnValue.item_id': {
+              $in: itemIdCandidates,
+            },
+          },
+        ].filter(Boolean),
+      };
+
+      const limit = parseInt(options.limit, 10) || 5;
+      const page = parseInt(options.page, 10) || 1;
+      const skip = Math.max(0, (page - 1) * limit);
+      const sort = options.sort || { _id: 1 };
+
+      // Fetch paginated list for table (similar to PHP parent::page result)
+      const list = this._renderableSaleRows(
+        await Model.find(tableFilters).sort(sort).skip(skip).limit(limit).lean()
+      );
+
+      const totalCount = await Model.countDocuments(tableFilters);
+
+      const tableData = {
+        status: true,
+        data: {
+          list,
+          total: totalCount,
+          current_page: page,
+          total_pages: limit ? Math.ceil(totalCount / limit) : 0,
+          per_page: limit,
+        },
+        message: 'Get Successfully',
+      };
+
+      // Aggregate total quantity for sales side
+      const salesList = await Model.aggregate([
+        { $unwind: '$items' },
+        { $match: filters },
+        {
+          $group: {
+            _id: null,
+            total_amount: {
+              $sum: {
+                $ifNull: ['$items.total_amount', { $ifNull: ['$items.total', 0] }],
+              },
+            },
+            total_qty: {
+              $sum: {
+                $ifNull: ['$items.item_quantity', '$items.quantity'],
+              },
+            },
+          },
+        },
+      ]);
+
+      const salesValues = salesList.map((doc) =>
+        typeof doc.total_qty === 'number' ? doc.total_qty : 0
+      );
+
+      // Aggregate total quantity for returns side
+      const returnList = await Model.aggregate([
+        { $unwind: '$items_return' },
+        { $unwind: '$items_return.returnArray' },
+        { $unwind: '$items_return.returnArray.returnValue' },
+        { $match: returnFilters },
+        {
+          $group: {
+            _id: null,
+            total_amount: {
+              $sum: '$items_return.returnArray.returnValue.total_amount',
+            },
+            total_qty: {
+              $sum: '$items_return.returnArray.returnValue.item_quantity',
+            },
+          },
+        },
+      ]);
+
+      const returnValues = returnList.map((doc) =>
+        typeof doc.total_qty === 'number' ? doc.total_qty : 0
+      );
+
+      // The item/category's OWN revenue - the sum of its line totals across the
+      // matching sales (and returns) - shown as "Total Sales". Already aggregated
+      // above; it just was not returned, so the client fell back to summing each
+      // sale's whole-bill total over the loaded page, which counted every other
+      // item in those bills and changed as you paged. Rounded to 2dp.
+      const saleAmount = salesList.length ? Number(salesList[0].total_amount) || 0 : 0;
+      const returnAmount = returnList.length ? Number(returnList[0].total_amount) || 0 : 0;
+
+      const arrTableData = {
+        sale: salesValues,
+        return: returnValues,
+        sale_amount: Math.round(saleAmount * 100) / 100,
+        return_amount: Math.round(returnAmount * 100) / 100,
+        table: tableData,
+      };
+
+      return {
+        status: true,
+        data: arrTableData,
+        message: 'get detail successfully',
+      };
+    } catch (error) {
+      console.error('Error in itemSaleDetailsPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async categorySaleDetailsPage(value, options = {}, { SaleModel } = {}) {
+    try {
+      const Model = this.getModel(SaleModel);
+
+      // Normalize branch ids (may come as single value or array)
+      const rawBranch = value.branchid;
+      const branchIds = Array.isArray(rawBranch) ? rawBranch : rawBranch ? [rawBranch] : [];
+
+      const objectBranchIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      if (!value.category_id || !mongoose.Types.ObjectId.isValid(value.category_id)) {
+        return {
+          status: false,
+          data: null,
+          message: 'Invalid category id',
+        };
+      }
+
+      const categoryObjectId = new mongoose.Types.ObjectId(value.category_id);
+
+      // Filters used for the main table (sales that have category either in items or return items)
+      const tableFilters = {
+        $and: [
+          { branch_id: { $in: objectBranchIds } },
+          {
+            $or: [
+              { 'items.category_id': categoryObjectId },
+              {
+                'items_return.returnArray.returnValue.category_id': categoryObjectId,
+              },
+            ],
+          },
+        ],
+      };
+
+      // Filters for sales side (items only)
+      const filters = {
+        $and: [{ branch_id: { $in: objectBranchIds } }, { 'items.category_id': categoryObjectId }],
+      };
+
+      // Filters for returns side (items_return only)
+      const returnFilters = {
+        $and: [
+          { branch_id: { $in: objectBranchIds } },
+          {
+            'items_return.returnArray.returnValue.category_id': categoryObjectId,
+          },
+        ],
+      };
+
+      const limit = parseInt(options.limit, 10) || 5;
+      const page = parseInt(options.page, 10) || 1;
+      const skip = Math.max(0, (page - 1) * limit);
+      const sort = options.sort || { _id: 1 };
+
+      // Fetch paginated list for table (similar to PHP parent::page result)
+      const list = this._renderableSaleRows(
+        await Model.find(tableFilters).sort(sort).skip(skip).limit(limit).lean()
+      );
+
+      const totalCount = await Model.countDocuments(tableFilters);
+
+      const tableData = {
+        status: true,
+        data: {
+          list,
+          total: totalCount,
+          current_page: page,
+          total_pages: limit ? Math.ceil(totalCount / limit) : 0,
+          per_page: limit,
+        },
+        message: 'Get Successfully',
+      };
+
+      // Aggregate total quantity for sales side
+      const salesList = await Model.aggregate([
+        { $unwind: '$items' },
+        { $match: filters },
+        {
+          $group: {
+            _id: null,
+            total_amount: {
+              $sum: {
+                $ifNull: ['$items.total_amount', { $ifNull: ['$items.total', 0] }],
+              },
+            },
+            total_qty: {
+              $sum: {
+                $ifNull: ['$items.item_quantity', '$items.quantity'],
+              },
+            },
+          },
+        },
+      ]);
+
+      const salesValues = salesList.map((doc) =>
+        typeof doc.total_qty === 'number' ? doc.total_qty : 0
+      );
+
+      // Aggregate total quantity for returns side
+      const returnList = await Model.aggregate([
+        { $unwind: '$items_return' },
+        { $unwind: '$items_return.returnArray' },
+        { $unwind: '$items_return.returnArray.returnValue' },
+        { $match: returnFilters },
+        {
+          $group: {
+            _id: null,
+            total_amount: {
+              $sum: '$items_return.returnArray.returnValue.total_amount',
+            },
+            total_qty: {
+              $sum: '$items_return.returnArray.returnValue.item_quantity',
+            },
+          },
+        },
+      ]);
+
+      const returnValues = returnList.map((doc) =>
+        typeof doc.total_qty === 'number' ? doc.total_qty : 0
+      );
+
+      // The item/category's OWN revenue - the sum of its line totals across the
+      // matching sales (and returns) - shown as "Total Sales". Already aggregated
+      // above; it just was not returned, so the client fell back to summing each
+      // sale's whole-bill total over the loaded page, which counted every other
+      // item in those bills and changed as you paged. Rounded to 2dp.
+      const saleAmount = salesList.length ? Number(salesList[0].total_amount) || 0 : 0;
+      const returnAmount = returnList.length ? Number(returnList[0].total_amount) || 0 : 0;
+
+      const arrTableData = {
+        sale: salesValues,
+        return: returnValues,
+        sale_amount: Math.round(saleAmount * 100) / 100,
+        return_amount: Math.round(returnAmount * 100) / 100,
+        table: tableData,
+      };
+
+      return {
+        status: true,
+        data: arrTableData,
+        message: 'get detail successfully',
+      };
+    } catch (error) {
+      console.error('Error in categorySaleDetailsPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async userSalesDetailsPage(value, options = {}, { SaleModel } = {}) {
+    try {
+      const Model = this.getModel(SaleModel);
+
+      const arrayMerge = [];
+      if (value.branchid && Array.isArray(value.branchid)) {
+        for (let i = 0; i < value.branchid.length; i++) {
+          if (mongoose.Types.ObjectId.isValid(value.branchid[i])) {
+            arrayMerge.push(new mongoose.Types.ObjectId(value.branchid[i]));
+          }
+        }
+      }
+
+      if (!value.user_id || !mongoose.Types.ObjectId.isValid(value.user_id) || !arrayMerge.length) {
+        return {
+          status: false,
+          data: null,
+          message: 'Invalid branch or user id',
+        };
+      }
+
+      // Match PHP filter structure exactly - user_id and license in same object
+      const filters = {
+        $and: [
+          { branch_id: { $in: arrayMerge } },
+          {
+            user_id: new mongoose.Types.ObjectId(value.user_id),
+            license: new mongoose.Types.ObjectId(options.license || value.license),
+          },
+        ],
+      };
+
+      const limit = parseInt(options.limit, 10) || 5;
+      const page = parseInt(options.page, 10) || 1;
+      const skip = Math.max(0, (page - 1) * limit);
+      const sort = options.sort || { _id: 1 };
+
+      const list = this._renderableSaleRows(
+        await Model.find(filters).sort(sort).skip(skip).limit(limit).lean()
+      );
+
+      const totalCount = await Model.countDocuments(filters);
+
+      const tableData = {
+        status: true,
+        data: {
+          list,
+          total: totalCount,
+          current_page: page,
+          total_pages: limit ? Math.ceil(totalCount / limit) : 0,
+          per_page: limit,
+        },
+        message: 'Get Successfully',
+      };
+
+      // Aggregation match filter - same structure as find()
+      const salesList = await Model.aggregate([
+        { $match: filters },
+        {
+          $group: {
+            _id: '$user_id',
+            total_amount: { $sum: '$sales_total' },
+          },
+        },
+      ]);
+
+      const total = [];
+      for (const doc of salesList) {
+        total.push(round(doc.total_amount || 0, 2));
+      }
+
+      const arrTableData = {
+        table: tableData,
+        total,
+      };
+
+      return {
+        status: true,
+        data: arrTableData,
+        message: 'get detail successfully',
+      };
+    } catch (error) {
+      console.error('Error in userSalesDetailsPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async returnProductViewPage(id, { SaleModel } = {}) {
+    try {
+      if (!id) {
+        return {
+          status: false,
+          data: null,
+          message: 'Return id is required',
+        };
+      }
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const filters = {
+        'items_return.returnArray.returnValue.return_id': id,
+      };
+
+      const branchId = BaseModel.currentBranch || null;
+      if (branchId && mongoose.Types.ObjectId.isValid(String(branchId))) {
+        filters.branch_id = new mongoose.Types.ObjectId(String(branchId));
+      }
+
+      if (BaseModel.license) {
+        filters.license = BaseModel.license;
+      }
+
+      const pipeline = [
+        { $unwind: '$items_return' },
+        { $unwind: '$items_return.returnArray' },
+        { $unwind: '$items_return.returnArray.returnValue' },
+        { $match: filters },
+        {
+          $group: {
+            _id: {
+              return_id: '$items_return.returnArray.returnValue.return_id',
+              return_date: '$items_return.returnArray.returnValue.return_date',
+              customer_name: '$customer_name',
+              customer_phone: '$customer_phone',
+              customer_email: '$customer_email',
+              customer_address: '$customer_address',
+            },
+            item_id: {
+              $first: '$items_return.returnArray.returnValue.item_id',
+            },
+            item_name: {
+              $first: '$items_return.returnArray.returnValue.item_name',
+            },
+            item_price: {
+              $first: '$items_return.returnArray.returnValue.item_price',
+            },
+            item_discount: {
+              $first: '$items_return.returnArray.returnValue.item_discount',
+            },
+            item_discount_percentage: {
+              $first: '$items_return.returnArray.returnValue.item_discount_percentage',
+            },
+            item_quantity: {
+              $first: '$items_return.returnArray.returnValue.item_quantity',
+            },
+            tax: {
+              $first: '$items_return.returnArray.returnValue.tax',
+            },
+            tax_type: {
+              $first: '$items_return.returnArray.returnValue.tax_type',
+            },
+            total_amount: {
+              $first: '$items_return.returnArray.returnValue.total_amount',
+            },
+            payment_mode: {
+              $first: '$items_return.returnArray.returnValue.payment_mode',
+            },
+          },
+        },
+      ];
+
+      const salesList = await salesCollection.aggregate(pipeline).toArray();
+
+      const productValues = [];
+
+      // Local helper to wrap Date/number/string into legacy Extended JSON
+      const wrapDateForLegacyLocal = (value) => {
+        if (!value) return value;
+        if (
+          typeof value === 'object' &&
+          value.$date &&
+          typeof value.$date === 'object' &&
+          Object.prototype.hasOwnProperty.call(value.$date, '$numberLong')
+        ) {
+          return value;
+        }
+        let dateObj = null;
+        if (value instanceof Date) {
+          dateObj = value;
+        } else if (typeof value === 'number') {
+          const d = new Date(value);
+          if (!Number.isNaN(d.getTime())) dateObj = d;
+        } else if (typeof value === 'string') {
+          const ts = Date.parse(value);
+          if (!Number.isNaN(ts)) {
+            dateObj = new Date(ts);
+          }
+        }
+        if (!dateObj) return value;
+        return {
+          $date: {
+            $numberLong: String(dateObj.getTime()),
+          },
+        };
+      };
+
+      for (const doc of salesList) {
+        const c = doc._id || {};
+
+        const price = Number(doc.item_price ?? 0);
+        const qty = Number(doc.item_quantity ?? 0);
+        const discount = Number(doc.item_discount ?? 0);
+        const discountPct = Number(doc.item_discount_percentage ?? 0);
+        const taxRate = Number(doc.tax ?? 0);
+        const taxType = String(doc.tax_type || '').toLowerCase();
+
+        let subPrice;
+        if (taxType === 'inclusive') {
+          const taxPrice = (price * taxRate) / (100 + taxRate || 1);
+          subPrice = (price - taxPrice) * qty;
+        } else {
+          subPrice = price * qty;
+        }
+
+        let itemDiscountAmountMultiple;
+        let totalDiscount;
+        if (discount > 0) {
+          itemDiscountAmountMultiple = subPrice - discount * qty;
+          totalDiscount = discount * qty;
+        } else if (discountPct > 0) {
+          itemDiscountAmountMultiple = subPrice - subPrice * (discountPct / 100);
+          totalDiscount = subPrice * (discountPct / 100);
+        } else {
+          itemDiscountAmountMultiple = subPrice;
+          totalDiscount = 0;
+        }
+
+        const taxPrice = (itemDiscountAmountMultiple * taxRate) / 100;
+        const totalPrice = itemDiscountAmountMultiple + taxPrice;
+
+        productValues.push({
+          return_id: c.return_id,
+          return_date: wrapDateForLegacyLocal(c.return_date),
+          customer_name: c.customer_name,
+          customer_phone: c.customer_phone,
+          customer_email: c.customer_email,
+          customer_address: c.customer_address,
+          subtotal: subPrice,
+          sale_discount: totalDiscount,
+          sale_tax: taxPrice,
+          finaltotal: totalPrice,
+          item_id: doc.item_id,
+          item_name: doc.item_name,
+          item_price: doc.item_price,
+          item_discount: doc.item_discount,
+          item_discount_percentage: doc.item_discount_percentage,
+          item_quantity: doc.item_quantity,
+          tax: doc.tax,
+          tax_type: doc.tax_type,
+          total_amount: doc.total_amount,
+          payment_mode: doc.payment_mode,
+        });
+      }
+
+      return {
+        status: true,
+        data: productValues,
+        message: 'Get detail successfully',
+      };
+    } catch (error) {
+      console.error('Error in returnProductViewPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async paymentSalesTransactionReportPage(data, options = {}, { SaleModel } = {}) {
+    try {
+      const Model = this.getModel(SaleModel);
+
+      const timeZone = BaseModel.currentTimeZone || 'Asia/Kolkata';
+      const fromTimestamp = BaseModel.startingDate(data.starting_date, timeZone);
+      const toTimestamp = BaseModel.endingDate(data.ending_date, timeZone);
+
+      const fromDate = new Date(fromTimestamp || 0);
+      const toDate = new Date(toTimestamp || Date.now());
+
+      const branchIds = Array.isArray(data.branchid) ? data.branchid : [];
+      const objectBranchIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      const firstClause = {
+        branch_id: { $in: objectBranchIds },
+        sale_process: { $in: ['Add', 'Edit', 'PartialReturn'] },
+      };
+
+      const secondClause = {
+        date: { $gte: fromDate, $lte: toDate },
+        ...(BaseModel.license ? { license: BaseModel.license } : {}),
+      };
+
+      const filters = {
+        $and: [firstClause, secondClause],
+      };
+
+      if (data.payment_mode && data.payment_mode !== 'All') {
+        filters.payment_mode = data.payment_mode;
+      }
+
+      const limit = parseInt(options.limit, 10) || 5;
+      const page = parseInt(options.page, 10) || 1;
+      const skip = Math.max(0, (page - 1) * limit);
+
+      const projection = {
+        _id: 1,
+        branch_id: 1,
+        branch_name: 1,
+        user_id: 1,
+        user_name: 1,
+        sales_id: 1,
+        date: 1,
+        items: 1,
+        items_return: 1,
+        sale_process: 1,
+        customer_id: 1,
+        customer_name: 1,
+        customer_address: 1,
+        customer_phone: 1,
+        customer_email: 1,
+        customer_state: 1,
+        customer_country: 1,
+        customer_gst_type: 1,
+        customer_gst_number: 1,
+        payment_pending: 1,
+        payment_mode: 1,
+        partial_balance: 1,
+        partial_check: 1,
+        payment_description: 1,
+        printing_address: 1,
+        payment_status: 1,
+        sales_description: 1,
+        sales_total: 1,
+        sales_round_off: 1,
+        round_off: 1,
+        return_round_off: 1,
+        sales_sub_total: 1,
+        items_total: 1,
+        items_return_total: 1,
+        items_subtotal: 1,
+        items_return_subtotal: 1,
+        total_companyprice: 1,
+        tax: 1,
+        gst: 1,
+        sgst: 1,
+        discount: 1,
+        return_tax: 1,
+        return_discount: 1,
+        number_of_items: 1,
+        number_of_items_return: 1,
+        created_date: 1,
+        updated_date: 1,
+        created_by: 1,
+        updated_by: 1,
+        wallet_amount: 1,
+        sale_extra_discount: 1,
+        extra_discount: 1,
+        discount_description: 1,
+        return_extra_discount: 1,
+        extra_discount_type: 1,
+        sale_method: 1,
+        order: 1,
+        multi_payment: 1,
+        table_id: 1,
+        table_number: 1,
+        dine_type: 1,
+        person_count: 1,
+        was_kot_proceeded: 1,
+        denomination_values: 1,
+      };
+
+      const rawList = await Model.find(filters)
+        .select(projection)
+        .sort({ date: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean();
+
+      const list = Array.isArray(rawList) ? rawList : [];
+
+      const total = await Model.countDocuments(filters);
+
+      return {
+        status: true,
+        data: {
+          list,
+          pagination: {
+            page,
+            limit,
+            total,
+            pages: Math.max(Math.ceil(total / (limit || 1)), 1),
+          },
+        },
+        message: 'Get payment sales transaction details successfully',
+      };
+    } catch (error) {
+      console.error('Error in paymentSalesTransactionReportPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async getPaymentSaleTypeReport(data = {}, { SaleModel } = {}) {
+    try {
+      const timeZone = BaseModel.currentTimeZone || 'Asia/Kolkata';
+      const fromTimestamp = BaseModel.startingDate(data.starting_date, timeZone);
+      const toTimestamp = BaseModel.endingDate(data.ending_date, timeZone);
+
+      const fromDate = new Date(fromTimestamp || 0);
+      const toDate = new Date(toTimestamp || Date.now());
+
+      // Branch ids
+      const rawBranch = data.branchid;
+      const branchIds = Array.isArray(rawBranch) ? rawBranch : rawBranch ? [rawBranch] : [];
+
+      const objectBranchIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      const andConditions = [];
+      if (objectBranchIds.length) {
+        andConditions.push({ branch_id: { $in: objectBranchIds } });
+      }
+      andConditions.push({ date: { $gte: fromDate, $lte: toDate } });
+      if (BaseModel.license) {
+        andConditions.push({ license: BaseModel.license });
+      }
+
+      const filters = { $and: andConditions };
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const cursor = salesCollection.find(filters, {
+        projection: {
+          payment_mode: 1,
+          multi_payment: 1,
+          items_total: 1,
+          partial_balance: 1,
+          payment_pending: 1,
+          items_return_total: 1,
+        },
+        limit: 50000,
+        batchSize: 1000,
+      });
+
+      const methodTotals = {};
+
+      const docs = await cursor.toArray();
+
+      const round = (value, decimals = 2) => {
+        const num = typeof value === 'number' ? value : Number(value);
+        if (!Number.isFinite(num)) return 0;
+        const factor = Math.pow(10, decimals);
+        return value && !Number.isNaN(value) ? Math.round(value * factor) / factor : 0;
+      };
+
+      for (const doc of docs) {
+        const saleTotal = Number(doc.items_total || 0);
+        const partialBalance = Number(doc.partial_balance || 0);
+        const paymentPending = Number(doc.payment_pending || 0);
+        const refundTotal = Number(doc.items_return_total || 0);
+
+        let multiPaymentArr = null;
+        const raw = doc.multi_payment;
+        if (raw !== undefined && raw !== null && raw !== '') {
+          if (Array.isArray(raw)) {
+            multiPaymentArr = raw;
+          } else if (typeof raw === 'object') {
+            multiPaymentArr = raw;
+          } else if (typeof raw === 'string') {
+            const trimmed = raw.trim();
+            if (trimmed !== '') {
+              try {
+                const decoded = JSON.parse(trimmed);
+                if (decoded && typeof decoded === 'object') {
+                  multiPaymentArr = decoded;
+                }
+              } catch (e) {}
+            }
+          }
+        }
+
+        let usedMulti = false;
+        if (
+          multiPaymentArr &&
+          typeof multiPaymentArr === 'object' &&
+          Object.keys(multiPaymentArr).length > 0
+        ) {
+          let sumMulti = 0.0;
+          for (const amount of Object.values(multiPaymentArr)) {
+            const num = Number(amount) || 0;
+            if (num > 0) {
+              sumMulti += num;
+            }
+          }
+
+          if (sumMulti > 0) {
+            for (const [method, amount] of Object.entries(multiPaymentArr)) {
+              const num = Number(amount) || 0;
+              if (num <= 0) continue;
+
+              usedMulti = true;
+
+              let displayName = String(method || '').trim();
+              if (!displayName) {
+                displayName = 'N/A';
+              }
+              const methodKey = displayName.replace(/\s+/g, '').toLowerCase();
+
+              if (!methodTotals[methodKey]) {
+                methodTotals[methodKey] = {
+                  sales_payment_mode: displayName,
+                  sales_payment: 0.0,
+                  partial_amount: 0.0,
+                  outstanding_amount: 0.0,
+                  refund_payment: 0.0,
+                  sales_count: 0,
+                };
+              }
+
+              const ratio = sumMulti > 0 ? num / sumMulti : 0.0;
+
+              methodTotals[methodKey].sales_payment += num;
+              methodTotals[methodKey].partial_amount += partialBalance * ratio;
+              methodTotals[methodKey].outstanding_amount += paymentPending * ratio;
+              methodTotals[methodKey].refund_payment += refundTotal * ratio;
+              methodTotals[methodKey].sales_count += 1;
+            }
+          }
+        }
+
+        if (!usedMulti) {
+          let mode = doc.payment_mode ? String(doc.payment_mode).trim() : '';
+          if (!mode) {
+            mode = 'N/A';
+          }
+
+          const methodKey = mode.replace(/\s+/g, '').toLowerCase();
+          if (!methodTotals[methodKey]) {
+            methodTotals[methodKey] = {
+              sales_payment_mode: mode,
+              sales_payment: 0.0,
+              partial_amount: 0.0,
+              outstanding_amount: 0.0,
+              refund_payment: 0.0,
+              sales_count: 0,
+            };
+          }
+
+          methodTotals[methodKey].sales_payment += saleTotal;
+          methodTotals[methodKey].partial_amount += partialBalance;
+          methodTotals[methodKey].outstanding_amount += paymentPending;
+          methodTotals[methodKey].refund_payment += refundTotal;
+          methodTotals[methodKey].sales_count += 1;
+        }
+      }
+
+      const salesValues = Object.values(methodTotals)
+        .filter((totals) => {
+          const paymentMode = String(totals.sales_payment_mode || '').trim();
+          return paymentMode !== '' && paymentMode.toLowerCase() !== 'n/a' && paymentMode !== 'N/A';
+        })
+        .map((totals) => ({
+          sales_payment_mode: totals.sales_payment_mode,
+          sales_payment: round(totals.sales_payment || 0, 2),
+          partial_amount: round(totals.partial_amount || 0, 2),
+          outstanding_amount: round(totals.outstanding_amount || 0, 2),
+          refund_payment: round(totals.refund_payment || 0, 2),
+          sales_count: Number(totals.sales_count || 0),
+        }));
+
+      salesValues.sort((a, b) => {
+        const av = a.sales_payment || 0;
+        const bv = b.sales_payment || 0;
+        if (av === bv) return 0;
+        return av < bv ? 1 : -1;
+      });
+
+      const graphicalData = {
+        payment: salesValues,
+      };
+
+      return {
+        status: true,
+        data: graphicalData,
+        message: 'Get payment details successfully',
+      };
+    } catch (error) {
+      console.error('Error in getPaymentSaleTypeReport:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async paymentReturnSalesTranscationReportTable(data, options = {}, { SaleModel } = {}) {
+    try {
+      const Model = this.getModel(SaleModel);
+
+      const timeZone = BaseModel.currentTimeZone || 'Asia/Kolkata';
+      const fromTimestamp = BaseModel.startingDate(data.starting_date, timeZone);
+      const toTimestamp = BaseModel.endingDate(data.ending_date, timeZone);
+
+      const fromDate = new Date(fromTimestamp || 0);
+      const toDate = new Date(toTimestamp || Date.now());
+
+      const branchIds = Array.isArray(data.branchid) ? data.branchid : [];
+      const objectBranchIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      const firstClause = {
+        branch_id: { $in: objectBranchIds },
+        sale_process: { $in: ['PartialReturn', 'FullReturn'] },
+      };
+
+      const secondClause = {
+        date: { $gte: fromDate, $lte: toDate },
+        ...(BaseModel.license ? { license: BaseModel.license } : {}),
+      };
+
+      const filters = {
+        $and: [firstClause, secondClause],
+      };
+
+      if (data.payment_mode && data.payment_mode !== 'All') {
+        filters.payment_mode = data.payment_mode;
+      }
+
+      const limit = parseInt(options.limit, 10) || 5;
+      const page = parseInt(options.page, 10) || 1;
+      const skip = Math.max(0, (page - 1) * limit);
+
+      const projection = {
+        _id: 1,
+        branch_id: 1,
+        branch_name: 1,
+        user_id: 1,
+        user_name: 1,
+        sales_id: 1,
+        date: 1,
+        items: 1,
+        items_return: 1,
+        sale_process: 1,
+        customer_id: 1,
+        customer_name: 1,
+        customer_address: 1,
+        customer_phone: 1,
+        customer_email: 1,
+        customer_state: 1,
+        customer_country: 1,
+        customer_gst_type: 1,
+        customer_gst_number: 1,
+        payment_pending: 1,
+        payment_mode: 1,
+        partial_balance: 1,
+        partial_check: 1,
+        payment_description: 1,
+        printing_address: 1,
+        payment_status: 1,
+        sales_description: 1,
+        sales_total: 1,
+        sales_round_off: 1,
+        round_off: 1,
+        return_round_off: 1,
+        sales_sub_total: 1,
+        items_total: 1,
+        items_return_total: 1,
+        items_subtotal: 1,
+        items_return_subtotal: 1,
+        total_companyprice: 1,
+        tax: 1,
+        gst: 1,
+        sgst: 1,
+        discount: 1,
+        return_tax: 1,
+        return_discount: 1,
+        number_of_items: 1,
+        number_of_items_return: 1,
+        created_date: 1,
+        updated_date: 1,
+        created_by: 1,
+        updated_by: 1,
+        wallet_amount: 1,
+        sale_extra_discount: 1,
+        extra_discount: 1,
+        discount_description: 1,
+        return_extra_discount: 1,
+        extra_discount_type: 1,
+        sale_method: 1,
+        order: 1,
+        multi_payment: 1,
+        table_id: 1,
+        table_number: 1,
+        dine_type: 1,
+        person_count: 1,
+        was_kot_proceeded: 1,
+        denomination_values: 1,
+      };
+
+      const rawList = await Model.find(filters)
+        .select(projection)
+        .sort({ date: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean();
+
+      const list = Array.isArray(rawList) ? rawList : [];
+
+      const total = await Model.countDocuments(filters);
+
+      return {
+        status: true,
+        data: {
+          list,
+          pagination: {
+            page,
+            limit,
+            total,
+            pages: Math.max(Math.ceil(total / (limit || 1)), 1),
+          },
+        },
+        message: 'Get payment return sales transaction details successfully',
+      };
+    } catch (error) {
+      console.error('Error in paymentReturnSalesTranscationReportTable:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async getPaymentGraphicalReports(data, { SaleModel } = {}) {
+    try {
+      // Match legacy PHP BaseModel::startingDate / endingDate behaviour
+      const timeZone = BaseModel.currentTimeZone || 'Asia/Kolkata';
+      const fromTimestamp = BaseModel.startingDate(data.starting_date, timeZone);
+      const toTimestamp = BaseModel.endingDate(data.ending_date, timeZone);
+
+      const fromDate = new Date(fromTimestamp || 0);
+      const toDate = new Date(toTimestamp || Date.now());
+
+      // Branch ids
+      const rawBranch = data.branchid;
+      const branchIds = Array.isArray(rawBranch) ? rawBranch : rawBranch ? [rawBranch] : [];
+
+      const objectBranchIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      const andConditions = [];
+      if (objectBranchIds.length) {
+        andConditions.push({ branch_id: { $in: objectBranchIds } });
+      }
+      andConditions.push({ date: { $gte: fromDate, $lte: toDate } });
+      if (BaseModel.license) {
+        andConditions.push({ license: BaseModel.license });
+      }
+
+      const filters = { $and: andConditions };
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const cursor = salesCollection.find(filters, {
+        projection: {
+          payment_mode: 1,
+          multi_payment: 1,
+          items_total: 1,
+          items_return_total: 1,
+        },
+        limit: 50000,
+        batchSize: 1000,
+      });
+
+      /** @type {Record<string, { sales_payment_mode: string, sales_payment: number, sales_return_total: number }>} */
+      const methodTotals = {};
+
+      const docs = await cursor.toArray();
+
+      // Local helper copied from sale.model.js to match legacy rounding behaviour
+      const round = (value, decimals = 2) => {
+        const num = typeof value === 'number' ? value : Number(value);
+        if (!Number.isFinite(num)) return 0;
+        const factor = Math.pow(10, decimals);
+        return value && !Number.isNaN(value) ? Math.round(value * factor) / factor : 0;
+      };
+
+      for (const doc of docs) {
+        const itemsTotal = Number(doc.items_total || 0);
+        const itemsReturn = Number(doc.items_return_total || 0);
+
+        let multiPaymentArr = null;
+        const raw = doc.multi_payment;
+        if (raw !== undefined && raw !== null && raw !== '') {
+          if (Array.isArray(raw)) {
+            multiPaymentArr = raw;
+          } else if (typeof raw === 'object') {
+            multiPaymentArr = raw;
+          } else if (typeof raw === 'string') {
+            const trimmed = raw.trim();
+            if (trimmed !== '') {
+              try {
+                const decoded = JSON.parse(trimmed);
+                if (decoded && typeof decoded === 'object') {
+                  multiPaymentArr = decoded;
+                }
+              } catch (e) {
+                // Ignore malformed JSON and fall back to single payment_mode
+              }
+            }
+          }
+        }
+
+        let usedMulti = false;
+        if (
+          multiPaymentArr &&
+          typeof multiPaymentArr === 'object' &&
+          Object.keys(multiPaymentArr).length > 0
+        ) {
+          // First compute the sum of positive multi_payment amounts.
+          let sumMulti = 0.0;
+          for (const amount of Object.values(multiPaymentArr)) {
+            const num = Number(amount) || 0;
+            if (num > 0) {
+              sumMulti += num;
+            }
+          }
+
+          if (sumMulti > 0) {
+            for (const [method, amount] of Object.entries(multiPaymentArr)) {
+              const num = Number(amount) || 0;
+              if (num <= 0) continue;
+
+              usedMulti = true;
+
+              // Normalise key: lowercase, no spaces; keep first
+              // seen variant as display label.
+              let displayName = String(method || '').trim();
+              if (!displayName) {
+                displayName = 'N/A';
+              }
+              const methodKey = displayName.replace(/\s+/g, '').toLowerCase();
+
+              if (!methodTotals[methodKey]) {
+                methodTotals[methodKey] = {
+                  sales_payment_mode: displayName,
+                  sales_payment: 0.0,
+                  sales_return_total: 0.0,
+                };
+              }
+
+              // Amount actually taken via this method.
+              methodTotals[methodKey].sales_payment += num;
+
+              // Allocate returns proportionally to the payment split.
+              const ratio = sumMulti > 0 ? num / sumMulti : 0.0;
+              methodTotals[methodKey].sales_return_total += itemsReturn * ratio;
+            }
+          }
+        }
+
+        // Fallback: no usable multi_payment found; treat the whole bill
+        // as belonging to its single payment_mode value.
+        if (!usedMulti) {
+          let mode = doc.payment_mode ? String(doc.payment_mode).trim() : '';
+          if (!mode) {
+            mode = 'N/A';
+          }
+
+          const methodKey = mode.replace(/\s+/g, '').toLowerCase();
+          if (!methodTotals[methodKey]) {
+            methodTotals[methodKey] = {
+              sales_payment_mode: mode,
+              sales_payment: 0.0,
+              sales_return_total: 0.0,
+            };
+          }
+
+          methodTotals[methodKey].sales_payment += itemsTotal;
+          methodTotals[methodKey].sales_return_total += itemsReturn;
+        }
+      }
+
+      // Normalise into the expected array format; sort by sales_payment
+      // descending so the most-used modes appear first.
+      const salesValues = Object.values(methodTotals)
+        .filter((totals) => {
+          const paymentMode = String(totals.sales_payment_mode || '').trim();
+          return paymentMode !== '' && paymentMode.toLowerCase() !== 'n/a' && paymentMode !== 'N/A';
+        })
+        .map((totals) => ({
+          sales_payment_mode: totals.sales_payment_mode,
+          sales_payment: round(totals.sales_payment || 0, 2),
+          sales_return_total: round(totals.sales_return_total || 0, 2),
+        }));
+
+      salesValues.sort((a, b) => {
+        const av = a.sales_payment || 0;
+        const bv = b.sales_payment || 0;
+        if (av === bv) return 0;
+        return av < bv ? 1 : -1; // descending
+      });
+
+      const graphicalData = {
+        sales: salesValues,
+      };
+
+      return {
+        status: true,
+        data: graphicalData,
+        message: 'Graphical report successfully',
+      };
+    } catch (error) {
+      console.error('Error in getPaymentGraphicalReports:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async customerSaleDetailsPage(value, options = {}, { SaleModel } = {}) {
+    try {
+      const Model = this.getModel(SaleModel);
+
+      // Normalize branch ids (may come as single value or array)
+      const rawBranch = value.branchid;
+      const branchIds = Array.isArray(rawBranch) ? rawBranch : rawBranch ? [rawBranch] : [];
+
+      const objectBranchIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      // Validate customer id & branches
+      if (
+        !value.customer_id ||
+        !mongoose.Types.ObjectId.isValid(value.customer_id) ||
+        !objectBranchIds.length
+      ) {
+        return {
+          status: false,
+          data: null,
+          message: 'Invalid branch or customer id',
+        };
+      }
+
+      const customerObjectId = new mongoose.Types.ObjectId(value.customer_id);
+
+      // Match legacy PHP fields (branch_id + customer_id) and also support
+      // new Mongoose-based sales using the `customer` ref field.
+      const matchFilter = {
+        $and: [
+          { branch_id: { $in: objectBranchIds } },
+          {
+            $or: [{ customer_id: customerObjectId }, { customer: customerObjectId }],
+          },
+        ],
+      };
+
+      const limit = parseInt(options.limit, 10) || 5;
+      const page = parseInt(options.page, 10) || 1;
+      const skip = Math.max(0, (page - 1) * limit);
+      const sort = options.sort || { _id: 1 };
+
+      // Fetch paginated list of sales for this customer
+      const list = this._renderableSaleRows(
+        await Model.find(matchFilter).sort(sort).skip(skip).limit(limit).lean()
+      );
+
+      const totalCount = await Model.countDocuments(matchFilter);
+
+      // Build table structure compatible with PHP BaseModel::page
+      const tableData = {
+        status: true,
+        data: {
+          list,
+          total: totalCount,
+          current_page: page,
+          total_pages: limit ? Math.ceil(totalCount / limit) : 0,
+          per_page: limit,
+        },
+        message: 'Get Successfully',
+      };
+
+      // Aggregate total sales amount for this customer (similar to PHP)
+      const saleList = await Model.aggregate([
+        { $match: matchFilter },
+        {
+          $group: {
+            _id: '$customer_id',
+            total_amount: {
+              $sum: {
+                // Prefer items_total (legacy) but fall back to sales_total/total
+                $ifNull: ['$items_total', { $ifNull: ['$sales_total', '$total'] }],
+              },
+            },
+            return_amount: { $sum: { $ifNull: ['$items_return_total', 0] } },
+          },
+        },
+      ]);
+
+      const totals = saleList.map((doc) =>
+        typeof doc.total_amount === 'number' ? round(doc.total_amount, 2) : 0
+      );
+      // Complete return total too, so the client shows the real figure rather
+      // than a sum over just the loaded page.
+      const returnTotals = saleList.map((doc) =>
+        typeof doc.return_amount === 'number' ? round(doc.return_amount, 2) : 0
+      );
+
+      const arrTableData = {
+        table: tableData,
+        total: totals,
+        return_total: returnTotals,
+      };
+
+      return {
+        status: true,
+        data: arrTableData,
+        message: 'get detail successfully',
+      };
+    } catch (error) {
+      console.error('Error in customerSaleDetailsPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async customerCategorySaleDetailsPage(value, options = {}, { SaleModel } = {}) {
+    try {
+      const Model = this.getModel(SaleModel);
+
+      // Normalize branch ids (may come as single value or array)
+      const rawBranch = value.branchid;
+      const branchIds = Array.isArray(rawBranch) ? rawBranch : rawBranch ? [rawBranch] : [];
+
+      const objectBranchIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      // Validate category id & branches
+      if (
+        !value.category_id ||
+        !mongoose.Types.ObjectId.isValid(value.category_id) ||
+        !objectBranchIds.length
+      ) {
+        return {
+          status: false,
+          data: null,
+          message: 'Invalid branch or category id',
+        };
+      }
+
+      const categoryObjectId = new mongoose.Types.ObjectId(value.category_id);
+
+      const matchFilter = {
+        $and: [{ branch_id: { $in: objectBranchIds } }, { category_id: categoryObjectId }],
+      };
+
+      const limit = parseInt(options.limit, 10) || 5;
+      const page = parseInt(options.page, 10) || 1;
+      const skip = Math.max(0, (page - 1) * limit);
+      const sort = options.sort || { _id: 1 };
+
+      // Fetch paginated list of sales for this customer category
+      const list = this._renderableSaleRows(
+        await Model.find(matchFilter).sort(sort).skip(skip).limit(limit).lean()
+      );
+
+      const totalCount = await Model.countDocuments(matchFilter);
+
+      const tableData = {
+        status: true,
+        data: {
+          list,
+          total: totalCount,
+          current_page: page,
+          total_pages: limit ? Math.ceil(totalCount / limit) : 0,
+          per_page: limit,
+        },
+        message: 'Get Successfully',
+      };
+
+      // Aggregate total sales amount for this customer category
+      const saleList = await Model.aggregate([
+        { $match: matchFilter },
+        {
+          $group: {
+            _id: '$category_id',
+            total_amount: {
+              $sum: {
+                $ifNull: ['$items_total', { $ifNull: ['$sales_total', '$total'] }],
+              },
+            },
+            return_amount: { $sum: { $ifNull: ['$items_return_total', 0] } },
+          },
+        },
+      ]);
+
+      const totals = saleList.map((doc) =>
+        typeof doc.total_amount === 'number' ? round(doc.total_amount, 2) : 0
+      );
+      const returnTotals = saleList.map((doc) =>
+        typeof doc.return_amount === 'number' ? round(doc.return_amount, 2) : 0
+      );
+
+      const arrTableData = {
+        table: tableData,
+        return_total: returnTotals,
+        total: totals,
+      };
+
+      return {
+        status: true,
+        data: arrTableData,
+        message: 'get detail successfully',
+      };
+    } catch (error) {
+      console.error('Error in customerCategorySaleDetailsPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async returnSalesOrder(payload = {}, { SaleModel } = {}) {
+    let returnLockContext = null;
+    const releaseReturnLock = async () => {
+      if (!returnLockContext) return;
+      const { salesCollection, saleObjectId, licenseFilter, signature, token } = returnLockContext;
+      try {
+        await salesCollection.updateOne(
+          {
+            _id: saleObjectId,
+            ...licenseFilter,
+            'return_refund_lock.signature': signature,
+            'return_refund_lock.token': token,
+          },
+          { $unset: { return_refund_lock: '' } }
+        );
+      } catch (unlockError) {
+        console.error('Error releasing return/refund lock:', unlockError);
+      } finally {
+        returnLockContext = null;
+      }
+    };
+
+    try {
+      if (!payload || typeof payload !== 'object' || Object.keys(payload).length === 0) {
+        return {
+          status: false,
+          data: null,
+          message: 'Return sales value is null',
+        };
+      }
+
+      const MongooseObjectId = mongoose.Types.ObjectId;
+
+      const partialCheck = String(payload.partial_check) === 'true';
+      const paymentPending = Number(payload.payment_pending || 0);
+
+      if (partialCheck && paymentPending > 0) {
+        return {
+          status: false,
+          data: null,
+          message: 'Please complete your transaction',
+        };
+      }
+
+      const rawSaleId =
+        payload.sales_id || payload.id || payload.sale_id || payload.sales_document_id || null;
+
+      if (!rawSaleId || !MongooseObjectId.isValid(String(rawSaleId))) {
+        return {
+          status: false,
+          data: null,
+          message: 'Sales id is missing or invalid',
+        };
+      }
+
+      const saleObjectId = new MongooseObjectId(String(rawSaleId));
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+      const branchesCollection = db.collection('branches');
+      const itemsCollection = db.collection('items');
+
+      const licenseFilter = BaseModel.license ? { license: BaseModel.license } : {};
+
+      let saleDocument = await salesCollection.findOne({
+        _id: saleObjectId,
+        ...activeTenantFilter(),
+      });
+
+      if (!saleDocument) {
+        return {
+          status: false,
+          data: null,
+          message: 'Sale not found',
+        };
+      }
+
+      const branchId =
+        saleDocument.branch_id || saleDocument.branch || BaseModel.currentBranch || null;
+
+      let branchSettings = null;
+      if (branchId) {
+        let normalizedBranchId = branchId;
+        if (branchId instanceof MongooseObjectId) {
+          normalizedBranchId = branchId;
+        } else if (MongooseObjectId.isValid(String(branchId))) {
+          normalizedBranchId = new MongooseObjectId(String(branchId));
+        }
+
+        try {
+          branchSettings = await branchesCollection.findOne({
+            _id: normalizedBranchId,
+            ...(BaseModel.license ? { license: BaseModel.license } : {}),
+          });
+        } catch (e) {
+          console.error('Error loading branch settings for return sales:', e);
+        }
+      }
+
+      const licenseId = saleDocument.license || BaseModel.license || null;
+
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      const returnItems = Array.isArray(payload.items_return) ? payload.items_return : [];
+      const now = new Date();
+
+      if (!returnItems.length) {
+        return {
+          status: false,
+          data: null,
+          message: 'No return items provided',
+        };
+      }
+
+      const returnSignature = buildReturnSignature(saleObjectId, returnItems, payload);
+      const existingReturnTransactions = Array.isArray(saleDocument.return_refund_transactions)
+        ? saleDocument.return_refund_transactions
+        : [];
+
+      if (existingReturnTransactions.some((entry) => entry?.signature === returnSignature)) {
+        return {
+          status: false,
+          statusCode: 409,
+          data: null,
+          message: 'This refund has already been processed for this sale',
+        };
+      }
+
+      const lockExpiry = new Date(now.getTime() - 2 * 60 * 1000);
+      const lockToken = new MongooseObjectId().toHexString();
+      const lockResult = await salesCollection.updateOne(
+        {
+          _id: saleObjectId,
+          ...licenseFilter,
+          $and: [
+            {
+              $or: [
+                { return_refund_lock: { $exists: false } },
+                { 'return_refund_lock.locked_at': { $lt: lockExpiry } },
+                { 'return_refund_lock.signature': returnSignature },
+              ],
+            },
+            {
+              $or: [
+                { return_refund_transactions: { $exists: false } },
+                {
+                  return_refund_transactions: {
+                    $not: { $elemMatch: { signature: returnSignature } },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        {
+          $set: {
+            return_refund_lock: {
+              token: lockToken,
+              signature: returnSignature,
+              locked_at: now,
+              locked_by: BaseModel.loggedUser || null,
+              locked_by_name: BaseModel.loggedUserName || 'System',
+            },
+          },
+        }
+      );
+
+      if (!lockResult.modifiedCount) {
+        return {
+          status: false,
+          statusCode: 409,
+          data: null,
+          message: 'Refund is already processing or already completed for this sale',
+        };
+      }
+
+      returnLockContext = {
+        salesCollection,
+        saleObjectId,
+        licenseFilter,
+        signature: returnSignature,
+        token: lockToken,
+      };
+
+      saleDocument =
+        (await salesCollection.findOne({ _id: saleObjectId, ...licenseFilter })) || saleDocument;
+
+      const remainingQtyByItem = new Map();
+      for (const item of Array.isArray(saleDocument.items) ? saleDocument.items : []) {
+        addQtyToMap(remainingQtyByItem, normalizeReturnItemKey(item), item.item_quantity);
+      }
+
+      const previouslyReturnedQtyByItem = buildReturnedQtyMap(saleDocument.items_return);
+      const incomingReturnQtyByItem = new Map();
+      for (const item of returnItems) {
+        addQtyToMap(incomingReturnQtyByItem, normalizeReturnItemKey(item), item.item_quantity);
+      }
+
+      const overReturnItems = [];
+      for (const [itemId, incomingQty] of incomingReturnQtyByItem.entries()) {
+        const remainingQty = roundQty(remainingQtyByItem.get(itemId) || 0);
+        const alreadyReturnedQty = roundQty(previouslyReturnedQtyByItem.get(itemId) || 0);
+        const originalQty = roundQty(remainingQty + alreadyReturnedQty);
+
+        if (incomingQty <= 0 || incomingQty > remainingQty + 0.0001) {
+          const returnLine =
+            returnItems.find((item) => normalizeReturnItemKey(item) === itemId) || {};
+          overReturnItems.push({
+            item_id: itemId,
+            item_name: returnLine.item_name || returnLine.name || '',
+            original_quantity: originalQty,
+            already_returned_quantity: alreadyReturnedQty,
+            remaining_quantity: remainingQty,
+            requested_quantity: incomingQty,
+          });
+        }
+      }
+
+      if (overReturnItems.length) {
+        await releaseReturnLock();
+        return {
+          status: false,
+          statusCode: 409,
+          data: {
+            items: overReturnItems,
+          },
+          message: 'Return quantity cannot exceed the remaining sale quantity',
+        };
+      }
+
+      const firstNonEmptyFromArray = (arr, key) => {
+        if (!Array.isArray(arr)) return null;
+        for (const entry of arr) {
+          if (entry && typeof entry[key] === 'string' && entry[key].trim() !== '') {
+            return entry[key];
+          }
+        }
+        return null;
+      };
+
+      const salesDescriptionFromPayload =
+        firstNonEmptyFromArray(returnItems, 'sales_description') ||
+        firstNonEmptyFromArray(items, 'sales_description') ||
+        (typeof payload.sales_description === 'string' ? payload.sales_description : null);
+
+      const paymentDescriptionFromPayload =
+        firstNonEmptyFromArray(returnItems, 'payment_description') ||
+        firstNonEmptyFromArray(items, 'payment_description') ||
+        (typeof payload.payment_description === 'string' ? payload.payment_description : null);
+
+      const discountDescriptionFromPayload =
+        firstNonEmptyFromArray(returnItems, 'discount_description') ||
+        firstNonEmptyFromArray(items, 'discount_description') ||
+        (typeof payload.discount_description === 'string' ? payload.discount_description : null);
+
+      const originalSaleItems = Array.isArray(saleDocument.items) ? saleDocument.items : [];
+
+      const itemsSale = [];
+
+      for (const item of items) {
+        const rawItemId = item.item_id || item.item || item.id;
+        if (!rawItemId || !MongooseObjectId.isValid(String(rawItemId))) {
+          continue;
+        }
+
+        const itemObjectId = new MongooseObjectId(String(rawItemId));
+        const itemFilter = {
+          _id: itemObjectId,
+          ...(licenseId ? { license: licenseId } : {}),
+        };
+
+        const itemDoc = await itemsCollection.findOne(itemFilter);
+        if (!itemDoc) {
+          continue;
+        }
+
+        const qty = toNumberSafe(item.item_quantity, 0);
+        if (!qty || qty <= 0) {
+          continue;
+        }
+
+        const price = toNumberSafe(item.item_price, 0);
+        const totalAmount = toNumberSafe(item.total_amount, qty * price);
+        const companyPrice = qty * toNumberSafe(itemDoc.company_price, 0);
+
+        const taxType =
+          item.tax_type === 'Exc' || item.tax_type === 'exclusive' ? 'exclusive' : 'inclusive';
+
+        let taxRaw = item.tax;
+        if (typeof taxRaw === 'string') {
+          // The hyphen is last in the class, so it is a literal and needs no escape.
+          const cleaned = taxRaw.replace(/[^0-9.-]/g, '');
+          taxRaw = cleaned;
+        }
+
+        let taxValue = toNumberSafe(taxRaw, 0);
+        if (!taxValue && typeof itemDoc.tax === 'number') {
+          taxValue = toNumberSafe(itemDoc.tax, 0);
+        }
+
+        const igst = toNumberSafe(item.igst_tax, 0);
+        const cgst = toNumberSafe(item.cgst_tax, 0);
+        const sgst = toNumberSafe(item.sgst_tax, 0);
+
+        const taxAmount = igst > 0 ? igst : cgst > 0 ? cgst * 2 : 0;
+
+        const discountAmount = toNumberSafe(item.item_discount, 0);
+        const discountPercentage =
+          discountAmount > 0 ? 0 : toNumberSafe(item.item_discount_percentage, 0);
+
+        const availableQty = toNumberSafe(item.item_available_quantity, 0);
+
+        itemsSale.push({
+          item_status: 'Add',
+          return: false,
+          item_name: item.item_name,
+          item_sku: itemDoc.itemid || itemDoc.sku || '',
+          item_price: price,
+          item_discount: discountAmount,
+          item_discount_percentage: discountPercentage,
+          item_quantity: qty,
+          item_available_quantity: availableQty,
+          item_id: rawItemId,
+          total_amount: totalAmount,
+          barcode_id: itemDoc.barcode_id,
+          company_price_total: companyPrice,
+          category_id: itemDoc.category_id,
+          category_name: itemDoc.category_name,
+          supplier_id: itemDoc.supplier_id,
+          supplier_name: itemDoc.supplier_name,
+          tax: taxValue,
+          tax_name: itemDoc.tax_name,
+          tax_amount: taxAmount,
+          tax_type: taxType,
+          igst_tax: igst,
+          cgst_tax: cgst,
+          sgst_tax: sgst,
+          tax_fields: itemDoc.tax_fields,
+          item_unit: item.item_unit || 'qty',
+        });
+      }
+
+      const itemsReturn = [];
+      let itemsTotalAmount = 0;
+
+      const returnFlag = true;
+      const process = 'Return';
+
+      for (const item of returnItems) {
+        const rawItemId = item.item_id || item.item || item.id;
+        if (!rawItemId || !MongooseObjectId.isValid(String(rawItemId))) {
+          continue;
+        }
+
+        const itemObjectId = new MongooseObjectId(String(rawItemId));
+        const itemFilter = {
+          _id: itemObjectId,
+          ...(licenseId ? { license: licenseId } : {}),
+        };
+
+        const itemDoc = await itemsCollection.findOne(itemFilter);
+        if (!itemDoc) {
+          continue;
+        }
+
+        const qty = toNumberSafe(item.item_quantity, 0);
+        const price = toNumberSafe(item.item_price, 0);
+        const totalAmount = toNumberSafe(item.total_amount, qty * price);
+
+        const companyPrice = qty * toNumberSafe(itemDoc.company_price, 0);
+
+        const originalLine =
+          originalSaleItems.find((line) => {
+            if (!line || typeof line !== 'object') return false;
+            const srcId = line.item_id || line.item || line.itemId;
+            return srcId && String(srcId) === String(rawItemId);
+          }) || null;
+
+        const discountAmountRaw = toNumberSafe(originalLine && originalLine.item_discount, 0);
+        const discountPercentageRaw = toNumberSafe(
+          originalLine && originalLine.item_discount_percentage,
+          0
+        );
+        const discountAmount = discountAmountRaw > 0 ? discountAmountRaw : 0;
+        const discountPercentage = discountAmountRaw === 0 ? discountPercentageRaw : 0;
+
+        const taxType =
+          item.tax_type === 'Exc' || item.tax_type === 'exclusive' ? 'exclusive' : 'inclusive';
+
+        const taxSource = originalLine
+          ? (originalLine.tax ?? originalLine.tax_rate ?? originalLine.item_tax_rate)
+          : undefined;
+
+        const payloadIgst = toNumberSafe(item.igst_tax, 0);
+        const payloadCgst = toNumberSafe(item.cgst_tax, 0);
+        const payloadSgst = toNumberSafe(item.sgst_tax, 0);
+
+        const baseIgst = toNumberSafe(originalLine && originalLine.igst_tax, 0);
+        const baseCgst = toNumberSafe(originalLine && originalLine.cgst_tax, 0);
+        const baseSgst = toNumberSafe(originalLine && originalLine.sgst_tax, 0);
+
+        const igst = payloadIgst > 0 ? payloadIgst : baseIgst;
+        const cgst = payloadCgst > 0 ? payloadCgst : baseCgst;
+        const sgst = payloadSgst > 0 ? payloadSgst : baseSgst;
+
+        const taxAmount =
+          igst > 0
+            ? igst
+            : cgst > 0
+              ? cgst * 2
+              : toNumberSafe(originalLine && originalLine.tax_amount, 0);
+        const taxValue = toNumberSafe(taxSource, 0);
+
+        const returnPrefixId = `RFS${formatDate(now, {
+          year: '2-digit',
+          month: '2-digit',
+          day: '2-digit',
+        }).replace(/[^0-9]/g, '')}${Math.floor(Math.random() * 1e4)}`;
+
+        itemsReturn.push({
+          item_status: process,
+          return: returnFlag,
+          item_name: item.item_name,
+          item_sku:
+            (originalLine && (originalLine.item_sku || originalLine.item_code)) ||
+            itemDoc.itemid ||
+            itemDoc.sku ||
+            '',
+          item_price: price,
+          item_discount: discountAmount,
+          item_discount_percentage: discountPercentage,
+          item_quantity: qty,
+          item_id: rawItemId,
+          total_amount: totalAmount,
+          barcode_id: itemDoc.barcode_id,
+          company_price_total: companyPrice,
+          category_id: itemDoc.category_id,
+          category_name: itemDoc.category_name,
+          supplier_id: itemDoc.supplier_id,
+          supplier_name: itemDoc.supplier_name,
+          tax: taxValue,
+          tax_name: itemDoc.tax_name,
+          tax_amount: taxAmount,
+          tax_type: taxType,
+          return_id: returnPrefixId,
+          return_date: now,
+          igst_tax: igst,
+          cgst_tax: cgst,
+          sgst_tax: sgst,
+          tax_fields: itemDoc.tax_fields,
+          item_unit: item.item_unit || 'qty',
+        });
+
+        itemsTotalAmount += totalAmount;
+      }
+
+      const extraDiscountRaw =
+        payload.extra_discount !== undefined && payload.extra_discount !== null
+          ? Number(payload.extra_discount)
+          : 0;
+      let extraDiscount = Number.isFinite(extraDiscountRaw) ? extraDiscountRaw : 0;
+
+      let itemsTotMinusExtraDisc = itemsTotalAmount - extraDiscount;
+
+      if (payload.extra_discount_type === 'percent') {
+        const discAmt = (itemsTotalAmount * extraDiscount) / 100;
+        itemsTotMinusExtraDisc = itemsTotalAmount - discAmt;
+        extraDiscount = discAmt;
+      }
+
+      const roundOffCheck = payload.round_off_check === true;
+      const roundOffValue = roundOffCheck
+        ? round(itemsTotMinusExtraDisc) - itemsTotMinusExtraDisc
+        : 0;
+      const returnItemsTotalAmount = roundOffCheck
+        ? round(itemsTotMinusExtraDisc)
+        : itemsTotMinusExtraDisc;
+
+      const returnObjId = new MongooseObjectId();
+
+      const itemsReturnData = {
+        returnArray: {
+          returnObjId,
+          returnId: `RFS${formatDate(now, {
+            year: '2-digit',
+            month: '2-digit',
+            day: '2-digit',
+          }).replace(/[^0-9]/g, '')}${Math.floor(Math.random() * 1e4)}`,
+          returnDate: now,
+          returnValue: itemsReturn,
+          roundOff: round(roundOffValue, 2),
+          itemsTotalAmount: round(returnItemsTotalAmount, 2),
+          extraDiscount: round(Math.abs(extraDiscount), 2),
+          extraDiscountType: payload.extra_discount_type,
+        },
+      };
+
+      const pushReturnResult = await salesCollection.updateOne(
+        {
+          _id: saleObjectId,
+          ...licenseFilter,
+          'return_refund_lock.token': lockToken,
+        },
+        {
+          $push: {
+            items_return: itemsReturnData,
+            return_refund_transactions: {
+              signature: returnSignature,
+              return_obj_id: returnObjId,
+              return_id: itemsReturnData.returnArray.returnId,
+              amount: round(returnItemsTotalAmount, 2),
+              item_count: itemsReturn.length,
+              created_at: now,
+              created_by: BaseModel.loggedUser || null,
+              created_by_name: BaseModel.loggedUserName || 'System',
+            },
+          },
+        }
+      );
+
+      if (!pushReturnResult.modifiedCount) {
+        await releaseReturnLock();
+        return {
+          status: false,
+          statusCode: 409,
+          data: null,
+          message: 'Refund could not be saved because another return changed this sale',
+        };
+      }
+
+      try {
+        const stockLogsRepository = new StockLogsRepository();
+
+        for (const item of returnItems) {
+          const rawItemId = item.item_id || item.item || item.id;
+          if (!rawItemId || !MongooseObjectId.isValid(String(rawItemId))) {
+            continue;
+          }
+
+          const itemObjectId = new MongooseObjectId(String(rawItemId));
+          const itemFilter = {
+            _id: itemObjectId,
+            ...(licenseId ? { license: licenseId } : {}),
+          };
+
+          const itemDoc = await itemsCollection.findOne(itemFilter);
+          if (!itemDoc) {
+            continue;
+          }
+
+          const openingBalance = Number(itemDoc.available_quantity || 0);
+          const itemQty = Number(item.item_quantity || 0);
+          if (!itemQty || itemQty <= 0) {
+            continue;
+          }
+
+          const closingBalance = openingBalance + itemQty;
+
+          // PHP checks: $item_documents['track_inventory'] === true (boolean or string 'true')
+          if (itemDoc.track_inventory === true || itemDoc.track_inventory === 'true') {
+            const countStr = String(itemQty);
+
+            await stockLogsRepository.createStockLog({
+              stocklog: true,
+              branch_id: branchId,
+              view_item_id: itemObjectId,
+              item_barcode_id: itemDoc.barcode_id || '',
+              item_name: item.item_name || item.name || itemDoc.name || '',
+              item_quantity: itemQty,
+              process: 'Return Sale',
+              reference: payload.alternative_id || saleDocument.alternative_id || saleObjectId,
+              opening_balance: openingBalance,
+              closing_balance: closingBalance,
+              count: countStr,
+              date: now,
+              action: 'Add',
+              changed_by_userid: BaseModel.loggedUser,
+              changed_by: BaseModel.loggedUserName || 'System',
+            });
+
+            await itemsCollection.updateOne(itemFilter, {
+              $set: {
+                available_quantity: closingBalance,
+              },
+            });
+          }
+        }
+      } catch (e) {
+        console.error('Error updating stock for return sale:', e);
+      }
+
+      try {
+        saleDocument =
+          (await salesCollection.findOne({ _id: saleObjectId, ...licenseFilter })) || saleDocument;
+
+        const extra_discount = Number(saleDocument.extra_discount || 0);
+        let return_extra_discount = 0;
+        let return_sale_amount = 0;
+        let return_round_off = 0;
+        let return_sale_amount_round = 0;
+        const returnDiscountData = [];
+        const returnTaxData = [];
+        const returnSubtotalData = [];
+        let return_sale_company_amount = 0;
+
+        const itemsReturnBlocks = Array.isArray(saleDocument.items_return)
+          ? saleDocument.items_return
+          : [];
+
+        for (const block of itemsReturnBlocks) {
+          if (!block || !block.returnArray) continue;
+          const ra = block.returnArray;
+
+          return_round_off += Number(ra.roundOff || 0);
+          return_sale_amount_round += Number(ra.itemsTotalAmount || 0);
+          return_extra_discount += Number(ra.extraDiscount || 0);
+
+          const values = Array.isArray(ra.returnValue) ? ra.returnValue : [];
+          for (const documents of values) {
+            const itemQuantity = Number(documents.item_quantity || 0);
+            const itemPrice = Number(documents.item_price || 0);
+            const itemAmount = itemPrice * itemQuantity;
+            const itemTax = Number(documents.tax || 0);
+
+            return_sale_company_amount += Number(documents.company_price_total || 0);
+
+            return_sale_amount += Number(documents.total_amount || 0);
+
+            const itemDiscount = Number(documents.item_discount || 0);
+            const itemDiscountPercentage = Number(documents.item_discount_percentage || 0);
+            const taxTypeDoc = documents.tax_type === 'exclusive' ? 'exclusive' : 'inclusive';
+
+            let itemDiscountAmountMultiple = 0;
+
+            if (itemDiscount > 0 && itemTax > 0) {
+              itemDiscountAmountMultiple = itemDiscount * itemQuantity;
+              let subTotal = itemAmount - itemDiscountAmountMultiple;
+              if (taxTypeDoc === 'exclusive') {
+                const itemSubTaxTotalCalculation = (subTotal / 100) * itemTax;
+                returnTaxData.push({ tax_amount: itemSubTaxTotalCalculation });
+                returnDiscountData.push({
+                  discount_amount: itemDiscountAmountMultiple,
+                });
+                returnSubtotalData.push({
+                  subtotal_amount: subTotal + itemDiscountAmountMultiple,
+                });
+              } else {
+                const taxPrice = (itemPrice * itemTax) / (100 + itemTax);
+                const taxItemPrice = itemPrice - taxPrice;
+                const taxDiscountMultiple = taxItemPrice * itemQuantity;
+                const taxQuantityMultiple = taxDiscountMultiple - itemDiscountAmountMultiple;
+                subTotal = taxQuantityMultiple;
+                const itemSubTaxTotalCalculation = (subTotal / 100) * itemTax;
+                returnTaxData.push({ tax_amount: itemSubTaxTotalCalculation });
+                returnDiscountData.push({
+                  discount_amount: itemDiscountAmountMultiple,
+                });
+                returnSubtotalData.push({
+                  subtotal_amount: subTotal + itemDiscountAmountMultiple,
+                });
+              }
+            } else if (itemDiscountPercentage > 0 && itemTax > 0) {
+              const itemDiscountPercentageMultiple = itemDiscountPercentage;
+              const itemTaxTotalCalculation =
+                itemAmount - itemAmount * (itemDiscountPercentageMultiple / 100);
+              if (taxTypeDoc === 'exclusive') {
+                const itemSubTaxTotalCalculation = (itemTaxTotalCalculation / 100) * itemTax;
+                itemDiscountAmountMultiple = itemAmount * (itemDiscountPercentageMultiple / 100);
+                returnTaxData.push({ tax_amount: itemSubTaxTotalCalculation });
+                returnDiscountData.push({
+                  discount_amount: itemDiscountAmountMultiple,
+                });
+                returnSubtotalData.push({
+                  subtotal_amount: itemTaxTotalCalculation + itemDiscountAmountMultiple,
+                });
+              } else {
+                const taxPrice = (itemPrice * itemTax) / (100 + itemTax);
+                const taxItemPrice = itemPrice - taxPrice;
+                const taxDiscountMultiple = taxItemPrice * itemQuantity;
+                itemDiscountAmountMultiple =
+                  taxDiscountMultiple * (itemDiscountPercentageMultiple / 100);
+                const taxQuantityMultiple = taxDiscountMultiple - itemDiscountAmountMultiple;
+                const itemSubTaxTotalCalculation = (taxQuantityMultiple / 100) * itemTax;
+                returnTaxData.push({ tax_amount: itemSubTaxTotalCalculation });
+                returnDiscountData.push({
+                  discount_amount: itemDiscountAmountMultiple,
+                });
+                returnSubtotalData.push({
+                  subtotal_amount: taxQuantityMultiple + itemDiscountAmountMultiple,
+                });
+              }
+              itemDiscountAmountMultiple = 0;
+            } else if (itemTax > 0) {
+              if (taxTypeDoc === 'exclusive') {
+                const itemSubTaxTotalCalculation = (itemAmount / 100) * itemTax;
+                const subtotal = itemAmount + itemSubTaxTotalCalculation;
+                returnTaxData.push({ tax_amount: itemSubTaxTotalCalculation });
+                returnDiscountData.push({ discount_amount: 0 });
+                returnSubtotalData.push({
+                  subtotal_amount: subtotal - itemSubTaxTotalCalculation,
+                });
+              } else {
+                const taxPrice = (itemPrice * itemTax) / (100 + itemTax);
+                const taxItemPrice = itemPrice - taxPrice;
+                const taxDiscountMultiple = taxItemPrice * itemQuantity;
+                const taxQuantityMultiple = taxDiscountMultiple;
+                const itemSubTaxTotalCalculation = (taxQuantityMultiple / 100) * itemTax;
+                returnTaxData.push({ tax_amount: itemSubTaxTotalCalculation });
+                returnDiscountData.push({ discount_amount: 0 });
+                returnSubtotalData.push({ subtotal_amount: itemAmount });
+              }
+            } else if (itemDiscount > 0) {
+              itemDiscountAmountMultiple = itemDiscount * itemQuantity;
+              returnTaxData.push({ tax_amount: 0 });
+              returnDiscountData.push({
+                discount_amount: itemDiscountAmountMultiple,
+              });
+              returnSubtotalData.push({ subtotal_amount: itemAmount });
+            } else if (itemDiscountPercentage > 0) {
+              const itemDiscountPercentageMultiple = itemDiscountPercentage;
+              returnTaxData.push({ tax_amount: 0 });
+              returnDiscountData.push({
+                discount_amount: itemAmount * (itemDiscountPercentageMultiple / 100),
+              });
+              returnSubtotalData.push({ subtotal_amount: itemAmount });
+            } else {
+              returnTaxData.push({ tax_amount: 0 });
+              returnDiscountData.push({ discount_amount: 0 });
+              returnSubtotalData.push({ subtotal_amount: itemAmount });
+            }
+          }
+        }
+
+        const return_sale_subtotal_amount = returnSubtotalData.reduce(
+          (sum, row) => sum + Number(row.subtotal_amount || 0),
+          0
+        );
+        const return_sale_discount_amount = returnDiscountData.reduce(
+          (sum, row) => sum + Number(row.discount_amount || 0),
+          0
+        );
+        const return_sale_tax_amount = returnTaxData.reduce(
+          (sum, row) => sum + Number(row.tax_amount || 0),
+          0
+        );
+
+        const itemsArray = Array.isArray(itemsSale) ? itemsSale : [];
+        let sale_total_amount = itemsArray.reduce((sum, row) => {
+          if (!row || typeof row !== 'object') return sum;
+
+          const lineTotal = toNumberSafe(row.total_amount ?? row.total ?? row.items_total, 0);
+
+          return sum + lineTotal;
+        }, 0);
+
+        if (!itemsArray.length) {
+          sale_total_amount = 0;
+        }
+
+        const base_sale_subtotal = Number(
+          saleDocument.sales_sub_total ?? saleDocument.items_subtotal ?? sale_total_amount
+        );
+        const base_sale_discount = Number(saleDocument.discount || 0);
+        const base_sale_tax = Number(saleDocument.tax || 0);
+        let base_sale_company = Number(saleDocument.total_companyprice || 0);
+
+        if (!base_sale_company && Array.isArray(originalSaleItems)) {
+          base_sale_company = originalSaleItems.reduce(
+            (sum, line) =>
+              sum + Number(line && line.company_price_total ? line.company_price_total : 0),
+            0
+          );
+        }
+
+        const sale_subtotal_amount = Math.max(base_sale_subtotal - return_sale_subtotal_amount, 0);
+        const sale_discount_amount = Math.max(base_sale_discount - return_sale_discount_amount, 0);
+        const sale_tax_amount = Math.max(base_sale_tax - return_sale_tax_amount, 0);
+
+        let sale_company_amount = itemsArray.reduce((sum, row) => {
+          if (!row || typeof row !== 'object') return sum;
+          const cp = toNumberSafe(row.company_price_total, 0);
+          return sum + cp;
+        }, 0);
+
+        if (!Number.isFinite(sale_company_amount)) {
+          sale_company_amount = 0;
+        }
+
+        const updatedRoundOffValue = roundOffCheck
+          ? round(sale_total_amount) - sale_total_amount
+          : 0;
+        const updatedItemsTotalAmount = roundOffCheck
+          ? round(sale_total_amount)
+          : sale_total_amount;
+
+        let extraDiscSubReturnExtradisc = extra_discount - return_extra_discount;
+        if (payload.extra_discount_type === 'percent') {
+          extraDiscSubReturnExtradisc = sale_total_amount * (extra_discount / 100);
+        }
+
+        if (return_sale_amount_round !== 0) {
+          return_sale_amount = return_sale_amount_round;
+        }
+
+        const updatedSaleProcess = sale_total_amount > 0 ? 'PartialReturn' : 'FullReturn';
+
+        const finalItemsArray = updatedSaleProcess === 'FullReturn' ? [] : itemsArray;
+        const finalNumberOfItems = updatedSaleProcess === 'FullReturn' ? 0 : itemsArray.length || 0;
+
+        const updateData = {
+          sale_process: updatedSaleProcess,
+          gst: branchSettings && branchSettings.indian_gst === 'gst_on' ? 'enable' : 'disable',
+          multi_payment:
+            saleDocument &&
+            saleDocument.multi_payment !== undefined &&
+            saleDocument.multi_payment !== null
+              ? saleDocument.multi_payment
+              : [],
+          updated_date: now,
+          updated_by: BaseModel.loggedUserName,
+          updated_by_id: BaseModel.loggedUser,
+          items: finalItemsArray,
+          number_of_items: finalNumberOfItems,
+          tax: round(sale_tax_amount, 2),
+          discount: round(sale_discount_amount, 2),
+          items_total: round(updatedItemsTotalAmount - extraDiscSubReturnExtradisc, 2),
+          items_subtotal: sale_subtotal_amount,
+          return_tax: round(return_sale_tax_amount, 2),
+          return_discount: round(return_sale_discount_amount, 2),
+          items_return_total: round(return_sale_amount, 2),
+          return_round_off: round(return_round_off, 2),
+          items_return_subtotal: return_sale_subtotal_amount,
+          sales_description:
+            salesDescriptionFromPayload &&
+            typeof salesDescriptionFromPayload === 'string' &&
+            salesDescriptionFromPayload.trim() !== ''
+              ? salesDescriptionFromPayload
+              : saleDocument.sales_description || '',
+          payment_description:
+            paymentDescriptionFromPayload &&
+            typeof paymentDescriptionFromPayload === 'string' &&
+            paymentDescriptionFromPayload.trim() !== ''
+              ? paymentDescriptionFromPayload
+              : saleDocument.payment_description || '',
+          discount_description:
+            discountDescriptionFromPayload &&
+            typeof discountDescriptionFromPayload === 'string' &&
+            discountDescriptionFromPayload.trim() !== ''
+              ? discountDescriptionFromPayload
+              : saleDocument.discount_description || '',
+          notes:
+            salesDescriptionFromPayload &&
+            typeof salesDescriptionFromPayload === 'string' &&
+            salesDescriptionFromPayload.trim() !== ''
+              ? salesDescriptionFromPayload
+              : saleDocument.notes || saleDocument.sales_description || '',
+          round_off: round(updatedRoundOffValue, 2),
+          sale_extra_discount: round(Math.abs(extraDiscSubReturnExtradisc), 2),
+          return_extra_discount: round(Math.abs(return_extra_discount), 2),
+          total_companyprice: sale_company_amount,
+        };
+
+        await salesCollection.updateOne(
+          {
+            _id: saleObjectId,
+            ...licenseFilter,
+            'return_refund_lock.token': lockToken,
+          },
+          {
+            $set: updateData,
+          }
+        );
+
+        try {
+          const cashregisterCollection = db.collection('cashregister');
+          await cashregisterCollection.updateOne(
+            {
+              'register_sales.sales_id': saleObjectId,
+              ...licenseFilter,
+            },
+            {
+              $set: {
+                'register_sales.$.sale_process': updatedSaleProcess,
+                'register_sales.$.register_amount': sale_total_amount,
+                'register_sales.$.registerItems_return_total': return_sale_amount,
+              },
+            }
+          );
+        } catch (err) {
+          console.error('Error updating cashregister for return sale:', err);
+        }
+      } catch (aggErr) {
+        console.error('Error updating sale aggregates for return:', aggErr);
+      }
+
+      const printFlag =
+        payload.print === 'on' ||
+        payload.print === true ||
+        payload.print === 'true' ||
+        (branchSettings && branchSettings.printall === true);
+
+      await releaseReturnLock();
+
+      /* A return changed the sale record (and possibly minted a return doc):
+         both must reach the cloud on the critical lane, not the 15s scan.
+         Fire-safe; no-op in the cloud. */
+      try {
+        const { enqueue, REASONS } = require('../sync/outbox');
+        enqueue({ collection: 'sales', documentId: saleObjectId, reason: REASONS.RETURN });
+        if (returnObjId && String(returnObjId) !== String(saleObjectId)) {
+          enqueue({ collection: 'sales', documentId: returnObjId, reason: REASONS.RETURN });
+        }
+        require('../sync/nudge').nudgeSyncAgent();
+      } catch (e) {
+        /* accelerator only */
+      }
+
+      return {
+        status: true,
+        data: {
+          print: printFlag,
+          sale_id: String(returnObjId || saleObjectId),
+          return_id: itemsReturnData.returnArray.returnId,
+          return_amount: round(returnItemsTotalAmount, 2),
+          returned_items: itemsReturn.map((item) => ({
+            item_id: item.item_id,
+            item_name: item.item_name,
+            quantity: item.item_quantity,
+            total_amount: item.total_amount,
+          })),
+          refund_reason:
+            salesDescriptionFromPayload ||
+            paymentDescriptionFromPayload ||
+            discountDescriptionFromPayload ||
+            payload.reason ||
+            '',
+        },
+        message: 'success',
+      };
+    } catch (error) {
+      console.error('Error in returnSalesOrder:', error);
+      await releaseReturnLock();
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async exportSalesOrder(data = [], { SaleModel } = {}) {
+    try {
+      let ids = [];
+
+      if (Array.isArray(data)) {
+        ids = data;
+      } else if (data && Array.isArray(data.data)) {
+        ids = data.data;
+      } else if (typeof data === 'string') {
+        try {
+          const parsed = JSON.parse(data);
+          if (Array.isArray(parsed)) {
+            ids = parsed;
+          }
+        } catch (e) {}
+      }
+
+      if (!ids.length) {
+        return {
+          status: false,
+          data: null,
+          message: 'No IDs provided',
+        };
+      }
+
+      const objectIds = ids
+        .map((id) => (id != null ? String(id).trim() : ''))
+        .filter((id) => id && mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      if (!objectIds.length) {
+        return {
+          status: false,
+          data: null,
+          message: 'No valid IDs provided',
+        };
+      }
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const filter = {
+        _id: { $in: objectIds },
+      };
+
+      if (BaseModel.license) {
+        filter.license = BaseModel.license;
+      }
+
+      const cursor = salesCollection.find(filter, {
+        sort: { _id: -1 },
+        projection: {
+          sales_id: 1,
+          customer_name: 1,
+          customer_address: 1,
+          customer_phone: 1,
+          customer_email: 1,
+          payment_mode: 1,
+          payment_description: 1,
+          sales_description: 1,
+          sales_sub_total: 1,
+          sales_total: 1,
+        },
+      });
+
+      const docs = await cursor.toArray();
+
+      return {
+        status: true,
+        data: docs,
+        message: 'Sale Data Exported',
+      };
+    } catch (error) {
+      console.error('Error in exportSalesOrder:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async getSalesDataChanges(from, { SaleModel } = {}) {
+    const collectionName = 'sales';
+    const base = new BaseModel(collectionName);
+
+    // Mirror legacy BaseModel::getAllDataChanges behaviour used in the
+    // Sale model static getDataChanges, but keep the logic in the
+    // repository layer instead of the Mongoose model.
+    return base.getAllDataChanges(collectionName, 'sales', from, null);
+  }
+
+  async getReturnSalesDetails(salesId, { SaleModel } = {}) {
+    try {
+      if (!salesId || !mongoose.Types.ObjectId.isValid(salesId)) {
+        return { status: false, data: null, message: 'Invalid sale id' };
+      }
+
+      const saleObjectId = new mongoose.Types.ObjectId(salesId);
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const filter = {
+        _id: saleObjectId,
+        ...activeTenantFilter(),
+      };
+
+      const saleDoc = await salesCollection.findOne(filter);
+
+      if (!saleDoc) {
+        return { status: false, data: null, message: 'Sale not found' };
+      }
+
+      const normalized = BaseModel.simplifyFields(saleDoc);
+
+      return {
+        status: true,
+        data: normalized,
+        message: 'success',
+      };
+    } catch (error) {
+      console.error('Error in getReturnSalesDetails:', error);
+      return { status: false, data: null, message: error.message };
+    }
+  }
+
+  async getReturnPrintDetails(id, { SaleModel } = {}) {
+    try {
+      const Model = this.getModel(SaleModel);
+
+      if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+        return { status: false, data: null, message: 'Invalid return id' };
+      }
+
+      const returnObjId = new mongoose.Types.ObjectId(id);
+
+      const matchStage = {
+        'items_return.returnArray.returnObjId': returnObjId,
+      };
+      if (BaseModel.license) {
+        matchStage.license = BaseModel.license;
+      }
+
+      const pipeline = [
+        { $match: matchStage },
+        { $unwind: '$items_return' },
+        { $unwind: '$items_return.returnArray' },
+        { $unwind: '$items_return.returnArray.returnValue' },
+        { $match: { 'items_return.returnArray.returnObjId': returnObjId } },
+        {
+          $project: {
+            sales_id: '$sales_id',
+            customer_name: '$customer_name',
+            customer_phone: '$customer_phone',
+            customer_email: '$customer_email',
+            customer_address: '$customer_address',
+            customer_print: '$customer_print',
+            print_sale_notes: '$print_sale_notes',
+            sales_description: '$sales_description',
+            gst: '$gst',
+            return_tax: '$return_tax',
+            return_discount: '$return_discount',
+            items_return_subtotal: '$items_return_subtotal',
+            items_return_total: '$items_return_total',
+            payment_mode: '$payment_mode',
+            return_id: '$items_return.returnArray.returnId',
+            return_date: '$items_return.returnArray.returnDate',
+            item_id: '$items_return.returnArray.returnValue.item_id',
+            item_name: '$items_return.returnArray.returnValue.item_name',
+            item_price: '$items_return.returnArray.returnValue.item_price',
+            item_discount: '$items_return.returnArray.returnValue.item_discount',
+            item_discount_percentage:
+              '$items_return.returnArray.returnValue.item_discount_percentage',
+            item_quantity: '$items_return.returnArray.returnValue.item_quantity',
+            item_unit: '$items_return.returnArray.returnValue.item_unit',
+            tax: '$items_return.returnArray.returnValue.tax',
+            igst_tax: '$items_return.returnArray.returnValue.igst_tax',
+            cgst_tax: '$items_return.returnArray.returnValue.cgst_tax',
+            sgst_tax: '$items_return.returnArray.returnValue.sgst_tax',
+            tax_name: '$items_return.returnArray.returnValue.tax_name',
+            tax_type: '$items_return.returnArray.returnValue.tax_type',
+            tax_fields: '$items_return.returnArray.returnValue.tax_fields',
+            total_amount: '$items_return.returnArray.returnValue.total_amount',
+            roundOff: '$items_return.returnArray.roundOff',
+            itemsTotalAmount: '$items_return.returnArray.itemsTotalAmount',
+            extraDiscount: '$items_return.returnArray.extraDiscount',
+          },
+        },
+      ];
+
+      const docs = await Model.aggregate(pipeline);
+
+      if (!docs || !docs.length) {
+        return {
+          status: false,
+          data: null,
+          message: 'Sales Details Not Found',
+        };
+      }
+
+      const numberOrZero = (value, fallback = 0) => {
+        if (typeof value === 'number' && Number.isFinite(value)) return value;
+        const num = Number(value);
+        if (Number.isFinite(num)) return num;
+        const fb = Number(fallback);
+        return Number.isFinite(fb) ? fb : 0;
+      };
+
+      const normalizeTaxFields = (fields) => {
+        if (!Array.isArray(fields)) return [];
+        return fields.map((t) => {
+          if (!t || typeof t !== 'object') return t;
+          const out = { ...t };
+          if (out.tax_id && typeof out.tax_id === 'object' && out.tax_id.$oid) {
+            return out;
+          }
+          let hex = null;
+          if (out.tax_id instanceof mongoose.Types.ObjectId) {
+            hex = out.tax_id.toString();
+          } else if (typeof out.tax_id === 'string') {
+            hex = out.tax_id;
+          } else if (
+            out.tax_id &&
+            out.tax_id._bsontype === 'ObjectID' &&
+            typeof out.tax_id.toString === 'function'
+          ) {
+            hex = out.tax_id.toString();
+          }
+          if (hex) {
+            out.tax_id = { $oid: hex };
+          }
+          return out;
+        });
+      };
+
+      const first = docs[0];
+
+      const tz = BaseModel.currentTimeZone || 'Asia/Kolkata';
+
+      const custom_data = {
+        sales_id: first.sales_id || '',
+        return_id: first.return_id || '',
+        date: formatDate(first.return_date || first.date, { timeZone: tz }),
+        customer_name: first.customer_name || '',
+        customer_phone: first.customer_phone || '',
+        customer_email: first.customer_email || '',
+        customer_address: first.customer_address || '',
+        customer_print: typeof first.customer_print === 'boolean' ? first.customer_print : true,
+        print_sale_notes: first.print_sale_notes === true,
+        sales_description: first.sales_description || '',
+        gst: first.gst || '',
+        tax: round(numberOrZero(first.return_tax, 0), 2),
+        discount: round(numberOrZero(first.return_discount, 0), 2),
+        payment_mode: first.payment_mode || '',
+        receipt_barcode: true,
+      };
+
+      const return_data = docs.map((row) => {
+        const taxFields = normalizeTaxFields(row.tax_fields);
+        return {
+          item_id: row.item_id,
+          item_name: row.item_name,
+          item_quantity: numberOrZero(row.item_quantity, 0),
+          item_price: numberOrZero(row.item_price, 0),
+          item_total_amount: numberOrZero(row.total_amount, 0),
+          item_discount: numberOrZero(row.item_discount, 0),
+          item_discount_percentage: numberOrZero(row.item_discount_percentage, 0),
+          item_return_discount: numberOrZero(row.item_discount, 0),
+          item_tax: numberOrZero(row.tax, 0),
+          item_tax_name: row.tax_name || '',
+          item_tax_type: row.tax_type || 'exclusive',
+          item_tax_fields: taxFields,
+          item_igst_tax: numberOrZero(row.igst_tax, 0),
+          item_cgst_tax: numberOrZero(row.cgst_tax, 0),
+          item_sgst_tax: numberOrZero(row.sgst_tax, 0),
+          item_unit: row.item_unit && typeof row.item_unit === 'string' ? row.item_unit : 'qty',
+          roundOff: numberOrZero(row.roundOff, 0),
+          extraDiscount: numberOrZero(row.extraDiscount, 0),
+          itemsTotalAmount: numberOrZero(row.itemsTotalAmount, 0),
+        };
+      });
+
+      return {
+        status: true,
+        data: { custom_data, return_data },
+        message: 'Get detail successfully',
+      };
+    } catch (error) {
+      console.error('Error in returnPrintDetailsPage:', error);
+      return { status: false, data: null, message: error.message };
+    }
+  }
+
+  async getSalesAjaxList(query, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.getSalesAjaxList(query);
+  }
+
+  async getSaleQtyDetail(id, { SaleModel } = {}) {
+    try {
+      const ObjectId = mongoose.Types.ObjectId;
+
+      if (!id || !ObjectId.isValid(String(id))) {
+        return {
+          status: false,
+          data: null,
+          message: 'Invalid sale id',
+        };
+      }
+
+      const saleObjectId = new ObjectId(String(id));
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+      const itemsCollection = db.collection('items');
+
+      const condition = {
+        _id: saleObjectId,
+      };
+
+      if (BaseModel.currentBranch) {
+        let branchId = BaseModel.currentBranch;
+        if (!(branchId instanceof ObjectId) && ObjectId.isValid(String(branchId))) {
+          branchId = new ObjectId(String(branchId));
+        }
+        condition.branch_id = branchId;
+      }
+      if (BaseModel.license) {
+        condition.license = BaseModel.license;
+      }
+
+      const pipeline = [
+        { $unwind: '$items' },
+        { $match: condition },
+        {
+          $group: {
+            _id: {
+              item_id: '$items.item_id',
+              sale_quantity: '$items.item_quantity',
+              sale_available_quantity: '$items.item_available_quantity',
+            },
+          },
+        },
+      ];
+
+      const cursor = salesCollection.aggregate(pipeline);
+      const saleData = [];
+
+      for await (const doc of cursor) {
+        const groupId = doc && doc._id;
+        if (!groupId) continue;
+
+        saleData.push({
+          item_id: groupId.item_id,
+          sale_quantity: Number(groupId.sale_quantity || 0),
+          sale_available_quantity: Number(groupId.sale_available_quantity || 0),
+        });
+      }
+
+      let saleQuantity = 0;
+      let itemQuantity = 0;
+
+      // Mirror PHP behaviour: iterate over grouped items and keep the
+      // last pair of saleQuantity / itemQuantity encountered.
+      for (const item of saleData) {
+        saleQuantity = Number(item.sale_quantity || 0);
+
+        const rawItemId = item.item_id;
+        if (!rawItemId || !ObjectId.isValid(String(rawItemId))) {
+          continue;
+        }
+
+        const itemObjectId = new ObjectId(String(rawItemId));
+        const itemFilter = {
+          _id: itemObjectId,
+        };
+        if (BaseModel.license) {
+          itemFilter.license = BaseModel.license;
+        }
+
+        const itemDoc = await itemsCollection.findOne(itemFilter);
+        if (!itemDoc) {
+          continue;
+        }
+
+        itemQuantity = Number(itemDoc.available_quantity || 0);
+      }
+
+      if (saleQuantity <= itemQuantity) {
+        return {
+          status: true,
+          data: null,
+          message: 'Available',
+        };
+      }
+
+      return {
+        status: false,
+        data: null,
+        message: 'Not available instock',
+      };
+    } catch (error) {
+      console.error('Error in getSaleQtyDetailModel:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async gstOneReportPage(data, { SaleModel } = {}) {
+    try {
+      // Parse dates
+      const fromDate = new Date(data.starting_date);
+      const toDate = new Date(data.ending_date);
+
+      // Get current branch and license from session/context
+      // This should be passed from the controller
+      const branchId = data.branch_id ? new ObjectId(data.branch_id) : null;
+      const license = data.license ? new ObjectId(data.license) : null;
+      const branchState = data.branch_state || '';
+
+      if (!branchId || !license) {
+        return {
+          status: false,
+          data: null,
+          message: 'Branch ID and License are required',
+        };
+      }
+
+      // Main filter for registered customers (regular/composite)
+      const filters = {
+        $and: [
+          {
+            branch_id: branchId,
+            customer_gst_type: { $in: ['regular', 'composite'] },
+          },
+          {
+            date: { $gte: fromDate, $lte: toDate },
+            gst: 'enable',
+            license,
+          },
+        ],
+      };
+
+      const salesCollection = currentConnection(mongoose.connection).collection('sales');
+
+      // 1. Sales details (registered customers)
+      const salesList = await salesCollection
+        .aggregate([
+          { $unwind: '$items' },
+          { $match: filters },
+          {
+            $group: {
+              _id: {
+                item_sales_id: '$sales_id',
+                item_date: '$date',
+                item_customer_state: '$customer_state',
+                item_customer_gst_number: '$customer_gst_number',
+                item_tax: '$items.tax',
+                item_subtotal: '$items_subtotal',
+                total_amount: '$items.total_amount',
+                item_igst_tax: '$items.igst_tax',
+                item_cgst_tax: '$items.cgst_tax',
+                item_sgst_tax: '$items.sgst_tax',
+                csgst_multiply: {
+                  $sum: { $add: ['$items.cgst_tax', '$items.sgst_tax'] },
+                },
+              },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ])
+        .toArray();
+
+      const salesValues = salesList.map((item) => {
+        const multipleValue =
+          item._id.item_igst_tax > 0 ? item._id.item_igst_tax : item._id.csgst_multiply;
+
+        return {
+          item_sales_id: item._id.item_sales_id || '',
+          item_date: item._id.item_date
+            ? new Date(item._id.item_date).toLocaleDateString('en-GB')
+            : '',
+          item_customer_state: item._id.item_customer_state || '',
+          item_customer_gst_number: item._id.item_customer_gst_number || '',
+          item_total: Math.round(item._id.total_amount * 100) / 100,
+          item_tax: Math.round(item._id.item_tax * 100) / 100,
+          item_subtotal: Math.round((item._id.total_amount - multipleValue) * 100) / 100,
+          item_igst_tax: Math.round(item._id.item_igst_tax * 100) / 100,
+          item_cgst_tax: Math.round(item._id.item_cgst_tax * 100) / 100,
+          item_sgst_tax: Math.round(item._id.item_sgst_tax * 100) / 100,
+        };
+      });
+
+      // 2. Return details
+      const returnSalesList = await salesCollection
+        .aggregate([
+          { $unwind: '$items_return' },
+          { $unwind: '$items_return.returnArray' },
+          { $unwind: '$items_return.returnArray.returnValue' },
+          { $match: filters },
+          {
+            $group: {
+              _id: {
+                return_sales_id: '$sales_id',
+                return_sales_date: '$date',
+                return_customer_state: '$customer_state',
+                // the credit-note rows printed a placeholder GSTIN; carry
+                // the real one so the 9B table shows the actual customer
+                return_customer_gst_number: '$customer_gst_number',
+                return_id: '$items_return.returnArray.returnValue.return_id',
+                return_date: '$items_return.returnArray.returnValue.return_date',
+                return_tax: '$items_return.returnArray.returnValue.tax',
+                return_subtotal: '$items_return_subtotal',
+                return_total: '$items_return.returnArray.returnValue.total_amount',
+                return_igst_tax: '$items_return.returnArray.returnValue.igst_tax',
+                return_cgst_tax: '$items_return.returnArray.returnValue.cgst_tax',
+                return_sgst_tax: '$items_return.returnArray.returnValue.sgst_tax',
+                return_csgst_multiply: {
+                  $sum: {
+                    $add: [
+                      '$items_return.returnArray.returnValue.cgst_tax',
+                      '$items_return.returnArray.returnValue.sgst_tax',
+                    ],
+                  },
+                },
+              },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ])
+        .toArray();
+
+      const returnSalesValues = returnSalesList.map((item) => {
+        const returnMultipleValue =
+          item._id.return_igst_tax > 0 ? item._id.return_igst_tax : item._id.return_csgst_multiply;
+
+        return {
+          return_id: item._id.return_id || '',
+          return_date: item._id.return_date
+            ? new Date(item._id.return_date).toLocaleDateString('en-GB')
+            : '',
+          return_sales_id: item._id.return_sales_id || '',
+          return_sales_date: item._id.return_sales_date
+            ? new Date(item._id.return_sales_date).toLocaleDateString('en-GB')
+            : '',
+          return_customer_state: item._id.return_customer_state || '',
+          return_customer_gst_number: item._id.return_customer_gst_number || '',
+          return_total: Math.round(item._id.return_total * 100) / 100,
+          return_tax: Math.round(item._id.return_tax * 100) / 100,
+          return_subtotal: Math.round((item._id.return_total - returnMultipleValue) * 100) / 100,
+          return_igst_tax: Math.round(item._id.return_igst_tax * 100) / 100,
+          return_cgst_tax: Math.round(item._id.return_cgst_tax * 100) / 100,
+          return_sgst_tax: Math.round(item._id.return_sgst_tax * 100) / 100,
+        };
+      });
+
+      // 3. Product details
+      const productList = await salesCollection
+        .aggregate([
+          { $unwind: '$items' },
+          { $match: filters },
+          {
+            $group: {
+              _id: {
+                item_name: '$items.item_name',
+                tax_name: '$items.tax_name',
+                tax_fields: '$items.tax_fields',
+              },
+              total_amount: { $sum: '$items.total_amount' },
+              subtotal_amount: { $sum: '$items.total_amount' },
+              tax: { $sum: '$items.tax' },
+              igst_tax: { $sum: '$items.igst_tax' },
+              cgst_tax: { $sum: '$items.cgst_tax' },
+              sgst_tax: { $sum: '$items.sgst_tax' },
+              total_qty: { $sum: '$items.item_quantity' },
+              csgst_multiply: {
+                $sum: { $add: ['$items.cgst_tax', '$items.sgst_tax'] },
+              },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ])
+        .toArray();
+
+      const productValues = productList.map((item) => {
+        const hsn =
+          (!item._id.tax_fields || item._id.tax_fields.length === 0) && item.tax > 0
+            ? item._id.tax_name
+            : '';
+        const productMultipleValue = item.igst_tax + item.csgst_multiply;
+
+        return {
+          product_name: item._id.item_name || '',
+          product_hsn: hsn,
+          product_qty: item.total_qty || 0,
+          product_total: Math.round(item.total_amount * 100) / 100,
+          product_subtotal: Math.round((item.subtotal_amount - productMultipleValue) * 100) / 100,
+          product_tax: Math.round(item.tax * 100) / 100,
+          product_igst: Math.round(item.igst_tax * 100) / 100,
+          product_cgst: Math.round(item.cgst_tax * 100) / 100,
+          product_sgst: Math.round(item.sgst_tax * 100) / 100,
+        };
+      });
+
+      // 4. Interstate unregistered sales details (consumer)
+      const interFilter = {
+        $and: [
+          {
+            branch_id: branchId,
+            customer_state: { $not: { $eq: branchState } },
+            customer_gst_type: { $in: ['consumer'] },
+          },
+          {
+            date: { $gte: fromDate, $lte: toDate },
+            gst: 'enable',
+            license,
+          },
+        ],
+      };
+
+      const salesInterList = await salesCollection
+        .aggregate([
+          { $unwind: '$items' },
+          { $match: interFilter },
+          {
+            $group: {
+              _id: {
+                item_sales_id: '$sales_id',
+                item_date: '$date',
+                item_customer_state: '$customer_state',
+                item_customer_gst_number: '$customer_gst_number',
+                item_tax: '$items.tax',
+                item_subtotal: '$items_subtotal',
+                item_total: '$items.total_amount',
+                item_igst_tax: '$items.igst_tax',
+                item_cgst_tax: '$items.cgst_tax',
+                item_sgst_tax: '$items.sgst_tax',
+                csgst_multiply: {
+                  $sum: { $add: ['$items.cgst_tax', '$items.sgst_tax'] },
+                },
+              },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ])
+        .toArray();
+
+      const salesUnregValues = salesInterList.map((item) => {
+        const multipleValue =
+          item._id.item_igst_tax > 0 ? item._id.item_igst_tax : item._id.csgst_multiply;
+
+        return {
+          customer_state: item._id.item_customer_state || '',
+          item_total: Math.round(item._id.item_subtotal * 100) / 100,
+          item_tax: Math.round(item._id.item_tax * 100) / 100,
+          item_subtotal: Math.round((item._id.item_total - multipleValue) * 100) / 100,
+          item_igst_tax: Math.round(item._id.item_igst_tax * 100) / 100,
+          item_cgst_tax: Math.round(item._id.item_cgst_tax * 100) / 100,
+          item_sgst_tax: Math.round(item._id.item_sgst_tax * 100) / 100,
+        };
+      });
+
+      const arrTableData = {
+        sales_data: salesValues,
+        intersales_data: salesUnregValues,
+        returns_data: returnSalesValues,
+        product_data: productValues,
+      };
+
+      return {
+        status: true,
+        data: arrTableData,
+        message: 'success',
+      };
+    } catch (error) {
+      console.error('Error in gstOneReportPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  /*
+   * The Tax Payable view (PURCHASE_TAX_PLAN P4/G4): the plain-words answer
+   * to "how much do I owe this period" that every regime gets.
+   *
+   * Month by month: output tax collected on sales | input tax paid on
+   * credit-claimable purchases | net payable per head, with the credits
+   * applied in the statutory order - IGST credit spends against IGST, then
+   * CGST, then SGST; CGST credit against CGST then IGST; SGST against SGST
+   * then IGST; CGST and SGST NEVER pay each other. Single-head regimes fall
+   * out naturally: their cgst/sgst columns are simply zero.
+   *
+   * Purchases whose itc_eligible flag is false are excluded from the input
+   * side; ABSENT means eligible - every purchase recorded before the flag
+   * existed keeps the credit it always represented.
+   */
+  async taxPayablePage(data) {
+    try {
+      const { starting_date, ending_date, branch_id, license } = data;
+      const FromDate = new Date(starting_date);
+      const ToDate = new Date(ending_date);
+      const salesCollection = currentConnection(mongoose.connection).collection('sales');
+      const receivingsCollection = currentConnection(mongoose.connection).collection('receivings');
+
+      const monthKey = { year: { $year: '$date' }, month: { $month: '$date' } };
+      const headSums = {
+        igst: { $sum: { $ifNull: ['$items.igst_tax', 0] } },
+        cgst: { $sum: { $ifNull: ['$items.cgst_tax', 0] } },
+        sgst: { $sum: { $ifNull: ['$items.sgst_tax', 0] } },
+        taxable: { $sum: { $ifNull: ['$items.subtotal', '$items.total_amount'] } },
+      };
+
+      const scope = {
+        branch_id: new ObjectId(branch_id),
+        license: new ObjectId(license),
+        date: { $gte: FromDate, $lte: ToDate },
+      };
+
+      const [salesRows, purchaseRows] = await Promise.all([
+        salesCollection
+          .aggregate([
+            { $match: scope },
+            { $unwind: '$items' },
+            { $group: { _id: monthKey, ...headSums } },
+          ])
+          .toArray(),
+        receivingsCollection
+          .aggregate([
+            {
+              $match: {
+                ...scope,
+                itc_eligible: { $ne: false },
+                receiving_status: { $ne: 'Cancelled' },
+              },
+            },
+            { $unwind: '$items' },
+            { $group: { _id: monthKey, ...headSums } },
+          ])
+          .toArray(),
+      ]);
+
+      const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+      const months = new Map();
+      const bucket = (id) => {
+        const key = `${id.year}-${String(id.month).padStart(2, '0')}`;
+        if (!months.has(key)) {
+          months.set(key, {
+            period: key,
+            output: { igst: 0, cgst: 0, sgst: 0, taxable: 0 },
+            input: { igst: 0, cgst: 0, sgst: 0, taxable: 0 },
+          });
+        }
+        return months.get(key);
+      };
+      for (const row of salesRows) {
+        const b = bucket(row._id).output;
+        b.igst = r2(row.igst);
+        b.cgst = r2(row.cgst);
+        b.sgst = r2(row.sgst);
+        b.taxable = r2(row.taxable);
+      }
+      for (const row of purchaseRows) {
+        const b = bucket(row._id).input;
+        b.igst = r2(row.igst);
+        b.cgst = r2(row.cgst);
+        b.sgst = r2(row.sgst);
+        b.taxable = r2(row.taxable);
+      }
+
+      const rows = Array.from(months.values()).sort((a, b) => a.period.localeCompare(b.period));
+      const { netTaxHeads } = require('../utils/tax-netting');
+      for (const m of rows) {
+        const netted = netTaxHeads(m.output, m.input);
+        m.net = netted.net;
+        m.credit_carried = netted.credit_carried;
+        m.output.total = r2(m.output.igst + m.output.cgst + m.output.sgst);
+        m.input.total = r2(m.input.igst + m.input.cgst + m.input.sgst);
+      }
+
+      return { status: true, data: { months: rows }, message: 'success' };
+    } catch (error) {
+      console.error('Error in taxPayablePage:', error);
+      return { status: false, data: null, message: error.message };
+    }
+  }
+
+  /*
+   * The purchase register beneath the payable view: every purchase in the
+   * period with its tax identity - supplier, tax-ID, the three heads, the
+   * credit flag and whether the declared invoice total disagreed. The
+   * accountant's working paper, exportable like every other report.
+   */
+  async taxPayableRegisterPage(data) {
+    try {
+      const { starting_date, ending_date, branch_id, license } = data;
+      const receivingsCollection = currentConnection(mongoose.connection).collection('receivings');
+      const rows = await receivingsCollection
+        .aggregate([
+          {
+            $match: {
+              branch_id: new ObjectId(branch_id),
+              license: new ObjectId(license),
+              date: { $gte: new Date(starting_date), $lte: new Date(ending_date) },
+            },
+          },
+          {
+            $project: {
+              receiving_id: 1,
+              receiving_status: 1,
+              date: 1,
+              supplier_name: 1,
+              supplier_gst_number: 1,
+              itc_eligible: 1,
+              invoice_total_declared: 1,
+              invoice_total_mismatch: 1,
+              total_amount: 1,
+              subtotal_amount: 1,
+              has_document: { $gt: [{ $size: { $ifNull: ['$image', []] } }, 0] },
+              igst: {
+                $sum: {
+                  $map: {
+                    input: { $ifNull: ['$items', []] },
+                    as: 'i',
+                    in: { $ifNull: ['$$i.igst_tax', 0] },
+                  },
+                },
+              },
+              cgst: {
+                $sum: {
+                  $map: {
+                    input: { $ifNull: ['$items', []] },
+                    as: 'i',
+                    in: { $ifNull: ['$$i.cgst_tax', 0] },
+                  },
+                },
+              },
+              sgst: {
+                $sum: {
+                  $map: {
+                    input: { $ifNull: ['$items', []] },
+                    as: 'i',
+                    in: { $ifNull: ['$$i.sgst_tax', 0] },
+                  },
+                },
+              },
+            },
+          },
+          { $sort: { date: -1 } },
+        ])
+        .toArray();
+      return { status: true, data: { list: rows }, message: 'success' };
+    } catch (error) {
+      console.error('Error in taxPayableRegisterPage:', error);
+      return { status: false, data: null, message: error.message };
+    }
+  }
+
+  async gstThreeReportPage(data, { SaleModel } = {}) {
+    try {
+      const { starting_date, ending_date, branch_id, license, branch_state } = data;
+      const FromDate = new Date(starting_date);
+      const ToDate = new Date(ending_date);
+
+      const salesCollection = currentConnection(mongoose.connection).collection('sales');
+      const receivingsCollection = currentConnection(mongoose.connection).collection('receivings');
+
+      const filters = {
+        $and: [
+          { branch_id: new ObjectId(branch_id) },
+          {
+            date: { $gte: FromDate, $lte: ToDate },
+            gst: 'enable',
+            'items.tax': { $gt: 0 },
+            license: new ObjectId(license),
+          },
+        ],
+      };
+
+      // Sale details with tax > 0
+      const sales_list = await salesCollection
+        .aggregate([
+          { $unwind: '$items' },
+          { $match: filters },
+          {
+            $group: {
+              _id: {
+                sales_id: '$sales_id',
+                subtotal_amount: '$items_subtotal',
+                igst_tax: '$items.igst_tax',
+                cgst_tax: '$items.cgst_tax',
+                sgst_tax: '$items.sgst_tax',
+              },
+              tax: { $sum: '$items.tax' },
+              csgst_multiply: {
+                $sum: { $add: ['$items.cgst_tax', '$items.sgst_tax'] },
+              },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ])
+        .toArray();
+
+      let sale_subamount = 0;
+      let sale_igst = 0;
+      let sale_cgst = 0;
+      let sale_sgst = 0;
+      for (const c of sales_list) {
+        sale_subamount += Math.round(c._id.subtotal_amount * 100) / 100;
+        sale_cgst += c._id.cgst_tax;
+        sale_igst += c._id.igst_tax;
+        sale_sgst += c._id.sgst_tax;
+      }
+
+      // Tax value zero sales
+      const tax_filters = {
+        $and: [
+          { branch_id: new ObjectId(branch_id) },
+          {
+            date: { $gte: FromDate, $lte: ToDate },
+            gst: 'enable',
+            'items.tax': { $lte: 0 },
+            license: new ObjectId(license),
+          },
+        ],
+      };
+
+      const sales_tax_list = await salesCollection
+        .aggregate([
+          { $unwind: '$items' },
+          { $match: tax_filters },
+          {
+            $group: {
+              _id: {
+                sales_id: '$sales_id',
+                sub_amount: '$items_subtotal',
+                igst_tax: '$items.igst_tax',
+                cgst_tax: '$items.cgst_tax',
+                sgst_tax: '$items.sgst_tax',
+              },
+              tax: { $sum: '$items.tax' },
+              csgst_multiply: {
+                $sum: { $add: ['$items.cgst_tax', '$items.sgst_tax'] },
+              },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ])
+        .toArray();
+
+      let saletax_subamount = 0;
+      let saletax_igst = 0;
+      let saletax_cgst = 0;
+      let saletax_sgst = 0;
+      for (const c of sales_tax_list) {
+        const sales_multiple_value = c._id.igst_tax + c.csgst_multiply;
+        saletax_subamount += Math.round((c._id.sub_amount - sales_multiple_value) * 100) / 100;
+        saletax_cgst += c._id.cgst_tax;
+        saletax_igst += c._id.igst_tax;
+        saletax_sgst += c._id.sgst_tax;
+      }
+
+      // Purchase details
+      const purchase_filters = {
+        $and: [
+          {
+            branch_id: new ObjectId(branch_id),
+            supplier_gst_type: { $in: ['regular'] },
+          },
+          {
+            date: { $gte: FromDate, $lte: ToDate },
+            receiving_status: 'Received',
+            gst: 'enable',
+            license: new ObjectId(license),
+          },
+        ],
+      };
+
+      const purchase_list = await receivingsCollection
+        .aggregate([
+          { $unwind: '$items' },
+          { $match: purchase_filters },
+          {
+            $group: {
+              _id: {
+                igst_tax: '$items.igst_tax',
+                cgst_tax: '$items.cgst_tax',
+                sgst_tax: '$items.sgst_tax',
+              },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ])
+        .toArray();
+
+      let purchase_igst = 0;
+      let purchase_cgst = 0;
+      let purchase_sgst = 0;
+      for (const c of purchase_list) {
+        purchase_igst += c._id.igst_tax;
+        purchase_cgst += c._id.cgst_tax;
+        purchase_sgst += c._id.sgst_tax;
+      }
+
+      // Unregister, Composite interstate sales details
+      const inter_filter = {
+        $and: [
+          {
+            branch_id: new ObjectId(branch_id),
+            customer_state: { $not: { $eq: branch_state } },
+            customer_gst_type: { $in: ['consumer', 'composite'] },
+          },
+          {
+            date: { $gte: FromDate, $lte: ToDate },
+            gst: 'enable',
+            license: new ObjectId(license),
+          },
+        ],
+      };
+
+      const interstate_list = await salesCollection
+        .aggregate([
+          { $unwind: '$items' },
+          { $match: inter_filter },
+          {
+            $group: {
+              _id: {
+                item_customer_state: '$customer_state',
+                customer_gst_type: '$customer_gst_type',
+              },
+              total_amount: { $sum: '$items_subtotal' },
+              subtotal_amount: { $sum: '$items.total_amount' },
+              tax: { $sum: '$items.tax' },
+              igst_tax: { $sum: '$items.igst_tax' },
+              cgst_tax: { $sum: '$items.cgst_tax' },
+              sgst_tax: { $sum: '$items.sgst_tax' },
+              csgst_multiply: {
+                $sum: { $add: ['$items.cgst_tax', '$items.sgst_tax'] },
+              },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ])
+        .toArray();
+
+      const intersales_values = [];
+      for (const c of interstate_list) {
+        const sales_multiple_value = c.igst_tax + c.csgst_multiply;
+        intersales_values.push({
+          taxable_total: Math.round((c.subtotal_amount - sales_multiple_value) * 100) / 100,
+          customer_state: c._id.item_customer_state,
+          customer_gsttype: c._id.customer_gst_type,
+          sales_igst: c.igst_tax,
+        });
+      }
+
+      // Unregister, Composite interstate purchase details
+      const inter_purchase_filter = {
+        $and: [
+          {
+            supplier_state: { $not: { $eq: branch_state } },
+            supplier_gst_type: { $in: ['consumer', 'composite'] },
+          },
+          {
+            date: { $gte: FromDate, $lte: ToDate },
+            receiving_status: 'Received',
+            gst: 'enable',
+            license: new ObjectId(license),
+          },
+        ],
+      };
+
+      const interstate_purchase_list = await receivingsCollection
+        .aggregate([
+          { $unwind: '$items' },
+          { $match: inter_purchase_filter },
+          {
+            $group: {
+              _id: { supplier_gst_type: '$supplier_gst_type' },
+              subtotal_amount: { $sum: '$items.total_amount' },
+              tax: { $sum: '$items.tax' },
+              igst_tax: { $sum: '$items.igst_tax' },
+              cgst_tax: { $sum: '$items.cgst_tax' },
+              sgst_tax: { $sum: '$items.sgst_tax' },
+              csgst_multiply: {
+                $sum: { $add: ['$items.cgst_tax', '$items.sgst_tax'] },
+              },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ])
+        .toArray();
+
+      let interpurchase_subamount = 0;
+      for (const c of interstate_purchase_list) {
+        const sales_multiple_value = c.igst_tax + c.csgst_multiply;
+        interpurchase_subamount +=
+          Math.round((c.subtotal_amount - sales_multiple_value) * 100) / 100;
+      }
+
+      // Unregister, Composite Intrastate purchase details
+      const intra_filter = {
+        $and: [
+          {
+            supplier_state: { $eq: branch_state },
+            supplier_gst_type: { $in: ['consumer', 'composite'] },
+          },
+          {
+            date: { $gte: FromDate, $lte: ToDate },
+            receiving_status: 'Received',
+            gst: 'enable',
+            license: new ObjectId(license),
+          },
+        ],
+      };
+
+      const intrastate_list = await receivingsCollection
+        .aggregate([
+          { $unwind: '$items' },
+          { $match: intra_filter },
+          {
+            $group: {
+              _id: { supplier_gst_type: '$supplier_gst_type' },
+              subtotal_amount: { $sum: '$items.total_amount' },
+              tax: { $sum: '$items.tax' },
+              igst_tax: { $sum: '$items.igst_tax' },
+              cgst_tax: { $sum: '$items.cgst_tax' },
+              sgst_tax: { $sum: '$items.sgst_tax' },
+              csgst_multiply: {
+                $sum: { $add: ['$items.cgst_tax', '$items.sgst_tax'] },
+              },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ])
+        .toArray();
+
+      let intrapurchase_subamount = 0;
+      for (const c of intrastate_list) {
+        const sales_multiple_value = c.igst_tax + c.csgst_multiply;
+        intrapurchase_subamount +=
+          Math.round((c.subtotal_amount - sales_multiple_value) * 100) / 100;
+      }
+
+      const arrTableData = {
+        sub_amount: sale_subamount,
+        igst: sale_igst,
+        cgst: sale_cgst,
+        sgst: sale_sgst,
+        salestax_subamount: saletax_subamount,
+        salestax_igst: saletax_igst,
+        salestax_cgst: saletax_cgst,
+        salestax_sgst: saletax_sgst,
+        purchasetax_igst: purchase_igst,
+        purchasetax_cgst: purchase_cgst,
+        purchasetax_sgst: purchase_sgst,
+        sales_interdata: intersales_values,
+        purchase_interstatedata: interpurchase_subamount,
+        intra_state_purchase: intrapurchase_subamount,
+      };
+
+      return {
+        status: true,
+        data: arrTableData,
+        message: 'success',
+      };
+    } catch (error) {
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  /*
+   * GSTR-1 B2B section for the government offline tool.
+   *
+   * Rewritten 2026-08-20 - the previous shape could not be filed:
+   *   - CGST and SGST were summed into `csamt`, which is the CESS field.
+   *     The correct fields are `camt` and `samt`; cess stays 0 until the
+   *     product actually records cess.
+   *   - Every aggregation row became its own b2b entry, so one customer
+   *     appeared many times and one invoice split across entries. The
+   *     tool needs ONE entry per GSTIN holding all of its invoices, and
+   *     one `itms` line per TAX RATE inside each invoice.
+   *   - `rt` summed the rate column across items (9 + 9 = 18%), and both
+   *     `pos` (place of supply) and `num` were hardcoded.
+   * Money is summed per (invoice, rate) in Mongo, then assembled here.
+   */
+  async gstOneReportPageJson(data, { SaleModel } = {}) {
+    try {
+      const fromDate = new Date(data.starting_date);
+      const toDate = new Date(data.ending_date);
+
+      const branchId = data.branch_id ? new ObjectId(data.branch_id) : null;
+      const license = data.license ? new ObjectId(data.license) : null;
+
+      if (!branchId || !license) {
+        return {
+          status: false,
+          data: null,
+          message: 'Branch ID and License are required',
+        };
+      }
+
+      // Registered customers only - B2B is what this section reports.
+      const filters = {
+        $and: [
+          {
+            branch_id: branchId,
+            customer_gst_type: { $in: ['regular', 'composite'] },
+          },
+          {
+            date: { $gte: fromDate, $lte: toDate },
+            gst: 'enable',
+            license,
+          },
+        ],
+      };
+
+      const salesCollection = currentConnection(mongoose.connection).collection('sales');
+
+      // One row per (invoice, tax rate) - the exact grain of an `itms` line.
+      const rows = await salesCollection
+        .aggregate([
+          { $unwind: '$items' },
+          { $match: filters },
+          {
+            $group: {
+              _id: {
+                sales_id: '$sales_id',
+                ctin: '$customer_gst_number',
+                rate: '$items.tax',
+              },
+              date: { $first: '$date' },
+              customer_state: { $first: '$customer_state' },
+              invoice_value: { $first: '$sales_total' },
+              items_value: { $sum: '$items.total_amount' },
+              igst: { $sum: '$items.igst_tax' },
+              cgst: { $sum: '$items.cgst_tax' },
+              sgst: { $sum: '$items.sgst_tax' },
+            },
+          },
+          { $sort: { '_id.ctin': 1, '_id.sales_id': 1, '_id.rate': 1 } },
+        ])
+        .toArray();
+
+      const byCtin = new Map();
+      for (const row of rows) {
+        const ctin = String(row._id.ctin || '').trim();
+        const inum = String(row._id.sales_id || '').trim();
+        if (!inum) continue;
+
+        if (!byCtin.has(ctin)) byCtin.set(ctin, new Map());
+        const invoices = byCtin.get(ctin);
+
+        if (!invoices.has(inum)) {
+          const d = row.date ? new Date(row.date) : null;
+          const idt =
+            d && !Number.isNaN(d.getTime())
+              ? `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(
+                  2,
+                  '0'
+                )}-${d.getFullYear()}`
+              : '';
+          invoices.set(inum, {
+            inum,
+            idt,
+            // Invoice value: the sale's own total, not a sum of lines -
+            // charges, round-off and bill-level discounts belong in it.
+            val: round(Number(row.invoice_value) || 0),
+            pos: gstStateCode(ctin, row.customer_state),
+            rchrg: 'N',
+            inv_typ: 'R',
+            itms: [],
+          });
+        }
+
+        const invoice = invoices.get(inum);
+        const igst = round(Number(row.igst) || 0);
+        const cgst = round(Number(row.cgst) || 0);
+        const sgst = round(Number(row.sgst) || 0);
+        invoice.itms.push({
+          num: invoice.itms.length + 1,
+          itm_det: {
+            rt: round(Number(row._id.rate) || 0),
+            // taxable value = what the lines came to, less their tax
+            txval: round((Number(row.items_value) || 0) - (igst + cgst + sgst)),
+            iamt: igst,
+            camt: cgst,
+            samt: sgst,
+            csamt: 0,
+          },
+        });
+      }
+
+      const gstOne = [];
+      for (const [ctin, invoices] of byCtin) {
+        gstOne.push({ ctin, inv: Array.from(invoices.values()) });
+      }
+
+      return {
+        status: true,
+        data: gstOne,
+        message: 'success',
+      };
+    } catch (error) {
+      console.error('Error in gstOneReportPageJson:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async sendDailySalesMail(input, { SaleModel, shopTransport } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.sendDailySalesMail(input, shopTransport);
+  }
+
+  async salesPaymentCloseModel(data, { SaleModel } = {}) {
+    try {
+      if (!data.sales || data.sales.length === 0) {
+        return {
+          status: false,
+          data: null,
+          message: 'empty value',
+        };
+      }
+
+      const db = await BaseModel.getDb();
+      const saleCollection = db.collection('sales');
+      const transactionCollection = db.collection('transaction');
+      const customerCollection = db.collection('customers');
+
+      // Get context from value
+      const license = data.license;
+      const branch_id = data.branch_id;
+      const loggedUserName = data.loggedUserName;
+      const loggedUserId = data.loggedUserId;
+
+      // Process each sale
+      for (const saleData of data.sales) {
+        // Build query filter
+        const saleQuery = {
+          _id: new ObjectId(saleData.id),
+          license,
+        };
+
+        // Only add branch_id if it's valid
+        if (branch_id && ObjectId.isValid(branch_id)) {
+          saleQuery.branch_id = new ObjectId(branch_id);
+        }
+
+        // Get sale details first
+        const saleDetails = await saleCollection.findOne(saleQuery);
+        if (!saleDetails) continue;
+
+        // Build update filter (same as query filter)
+        const updateFilter = {
+          _id: new ObjectId(saleData.id),
+          license,
+        };
+
+        if (branch_id && ObjectId.isValid(branch_id)) {
+          updateFilter.branch_id = new ObjectId(branch_id);
+        }
+
+        // Update sale to mark as paid
+        await saleCollection.updateMany(updateFilter, {
+          $set: {
+            partial_balance: parseFloat(saleData.amount) + parseFloat(saleData.paidamount || 0),
+            payment_status: 'Paid',
+            payment_pending: 0.0,
+            updated_date: new Date(),
+            updated_by: loggedUserName,
+            updated_by_id: loggedUserId ? new ObjectId(loggedUserId) : undefined,
+          },
+        });
+
+        // Build transaction filter
+        const transactionFilter = {
+          sale_id: new ObjectId(saleData.id),
+          license,
+        };
+
+        if (branch_id && ObjectId.isValid(branch_id)) {
+          transactionFilter.branch_id = new ObjectId(branch_id);
+        }
+
+        // Update transaction
+        await transactionCollection.updateOne(transactionFilter, {
+          $set: {
+            description: 'Edit sale',
+            amount: parseFloat(saleData.amount),
+            type: 'out',
+            pending: 0.0,
+            updated_date: new Date(),
+          },
+        });
+
+        // Update wallet amount
+        await saleCollection.updateOne(updateFilter, {
+          $set: {
+            wallet_amount: (saleDetails.wallet_amount || 0) + parseFloat(saleData.amount),
+          },
+        });
+
+        /* A settled sale that came from an invoice tells the invoice it is
+           paid (INVOICING_MODULE_DESIGN) - fire-safe, after the sale's own
+           writes have landed. */
+        if (saleDetails.source_invoice_id) {
+          await require('../services/invoice-sync').afterSaleSettled(saleDetails._id);
+        }
+      }
+
+      /* A settlement with no customer to recompute (a walk-in sale marked
+         paid from its invoice) stops here: the sales are settled, and there
+         is no ledger to total. Before this guard, ObjectId(undefined) threw
+         AFTER the sales were already marked paid. */
+      if (!data.id || !ObjectId.isValid(String(data.id))) {
+        return { status: true, data: 0, message: 'Sales settled successfully' };
+      }
+
+      // Recalculate customer balance
+      const filters = {
+        customer_id: new ObjectId(data.id),
+        license,
+      };
+
+      if (branch_id && ObjectId.isValid(branch_id)) {
+        filters.branch_id = new ObjectId(branch_id);
+      }
+
+      const aggregateResult = await transactionCollection
+        .aggregate([
+          { $match: filters },
+          {
+            $group: {
+              _id: null,
+              totalInAmount: {
+                $sum: { $cond: [{ $eq: ['$type', 'in'] }, '$amount', 0] },
+              },
+              totalOutAmount: {
+                $sum: { $cond: [{ $eq: ['$type', 'out'] }, '$amount', 0] },
+              },
+            },
+          },
+          {
+            $addFields: {
+              totalAmountDue: {
+                $subtract: ['$totalInAmount', '$totalOutAmount'],
+              },
+            },
+          },
+        ])
+        .toArray();
+
+      const totalWalletAmount = aggregateResult.length > 0 ? aggregateResult[0].totalAmountDue : 0;
+
+      // Build customer update filter
+      const customerFilter = {
+        _id: new ObjectId(data.id),
+        license,
+      };
+
+      if (branch_id && ObjectId.isValid(branch_id)) {
+        customerFilter.branch_id = new ObjectId(branch_id);
+      }
+
+      // Update customer balance
+      await customerCollection.updateOne(customerFilter, {
+        $set: {
+          balance: totalWalletAmount,
+        },
+      });
+
+      return {
+        status: true,
+        data: totalWalletAmount,
+        message: 'Sales settled successfully',
+      };
+    } catch (error) {
+      console.error('Error in salesPaymentCloseModel:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  /*
+   * qrCodeCloseModel was defined twice in this class. A later definition
+   * replaces an earlier one, so this first version never ran - the live one
+   * follows immediately below. Removed rather than merged.
+   */
+
+  async qrSalePayementUpdateModel(id, saleid, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.qrSalePayementUpdateModel(id, saleid);
+  }
+
+  async generateQrCodeModel(amount, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.generateQrCodeModel(amount);
+  }
+
+  async getQrStatusModel(id, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.getQrStatusModel(id);
+  }
+
+  async qrCodeCloseModel(id, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.qrCodeCloseModel(id);
+  }
+
+  async kioskOrderModel(data, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    const result = await Model.kioskOrderModel(data);
+
+    /*
+     * The machine made a noise too.
+     *
+     * The alarm was wired for the online storefront and stopped there, so an
+     * order placed on the shop's own terminal landed in silence - the one
+     * channel where a ticket is printing in another room and nobody at the
+     * till has any reason to be looking at a screen.
+     *
+     * A CHIME, never the alarm. The customer is standing at the machine and
+     * the ticket prints on its own, so this is information rather than a task.
+     * The insistent repeated sound is for an order WAITING on a person, and
+     * using it here would teach staff to ignore the one that matters.
+     */
+    if (result && result.status === true) {
+      const placed = result.data || {};
+      notifyOrderAttention({
+        branchId: String(data?.branch || data?.branch_id || BaseModel.currentBranch || ''),
+        saleId: String(placed.sale_id || placed.sales_id || ''),
+        alert: 'received',
+        state: 'accepted',
+        total: Number(placed.total) || 0,
+      });
+    }
+
+    return result;
+  }
+
+  async generateRazorPayQrCodekioskModel(data, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.generateRazorPayQrCodekioskModel(data);
+  }
+
+  async getRazorPayQrStatusModel(data, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.getRazorPayQrStatusModel(data);
+  }
+
+  async razorPayQrCodeCloseModel(data, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.razorPayQrCodeCloseModel(data);
+  }
+
+  async phonepeQrModel({ SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.phonepeQrModel();
+  }
+
+  async phonepeQrStatusModel({ SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.phonepeQrStatusModel();
+  }
+
+  async createRazorPayMobileModel(data, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.createRazorPayMobileModel(data);
+  }
+
+  async fetchRazorPayQrStatusMobileModel(data, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.fetchRazorPayQrStatusMobileModel(data);
+  }
+
+  async fetchLastSaleModel(branchId, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.fetchLastSaleModel(branchId);
+  }
+
+  async kitchenPrintModel(branchId, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.kitchenPrintModel(branchId);
+  }
+
+  /*
+   * =====================================================================
+   * THE BILL, ASKED FOR FROM THE FLOOR.
+   * =====================================================================
+   *
+   * The waiter is standing at the table when the guest asks for the bill.
+   * Walking to the till to ask somebody else to press a button is the exact
+   * errand a handset exists to remove, and every restaurant POS worth the name
+   * lets the floor fire it - Toast, Square, Lightspeed, MICROS, Petpooja.
+   *
+   * WHAT THE HANDSET MAY AND MAY NOT DO. It may ASK for the bill. It may not
+   * say the bill was paid. The person who takes the order must not be the
+   * person who declares the money received, or a waiter can close a cash bill
+   * and pocket it with nothing in the system to disagree. So nothing on this
+   * path writes payment_status, and a test says so out loud.
+   *
+   * WHERE IT PRINTS. The cashier's receipt printer, never the kitchen's. They
+   * are different documents, not one document in two places: a KOT is
+   * departmental and carries only its own lines, a bill is single and carries
+   * the totals, the tax and the shop header. printer-targets.js has always
+   * modelled this - a LIST of printerNames for KOT, one printerName for the
+   * receipt - and this rides that split rather than inventing another.
+   *
+   * HOW IT TRAVELS. Exactly the way a kitchen ticket does, because that path
+   * is proven: the request is a mark on the sale, the till polls for marks it
+   * has not served, prints, and stamps them done. No socket to the phone, no
+   * printer on the phone, and a till that was switched off catches up when it
+   * comes back rather than losing the bill.
+   */
+
+  /**
+   * A waiter asks for the bill for a table.
+   *
+   * Marks every open ticket for that table, because a table that ordered three
+   * times has three tickets and the guest is asking for one bill covering all
+   * of them. Already-requested tickets are left with their original timestamp:
+   * asking twice is somebody wondering where the bill got to, not a second
+   * bill.
+   */
+  async requestBillPrintModel(branchId, tableNumber, askedBy, { SaleModel, copies } = {}) {
+    const copiesAsked = copies;
+    try {
+      const Model = this.getModel(SaleModel);
+      const table = String(tableNumber == null ? '' : tableNumber).trim();
+      if (!table) {
+        return { status: false, message: 'No table was named', data: null };
+      }
+
+      const query = {
+        sale_process: { $regex: 'KOT', $options: 'i' },
+        table_number: table,
+        /*
+         * Only what is still open. A settled ticket has had its bill.
+         *
+         * The literal, not PAYMENT_STATUS.UNPAID - there is no such member.
+         * PAYMENT_STATUS carries pending/completed/failed/refunded, and this
+         * column holds the word 'Unpaid' that createOnlineOrder writes and
+         * getTablesWithActiveOrders reads. Reaching for the constant would
+         * have put `undefined` in the query, which Mongo answers by matching
+         * every document where the field is missing.
+         */
+        payment_status: 'Unpaid',
+        bill_printed_at: { $in: [null, undefined] },
+      };
+      if (branchId) {
+        query.branch_id = ObjectId.isValid(String(branchId))
+          ? new mongoose.Types.ObjectId(String(branchId))
+          : branchId;
+      }
+      /*
+       * NO LICENCE CLAUSE, BECAUSE THE FLOOR HAS NONE.
+       *
+       * getTablesWithActiveOrders - the query that decides a table is even on
+       * screen - matches branch, sale_process and payment_status and nothing
+       * else. Adding `license` here made this narrower than the thing that
+       * offered the button: the table appeared, the waiter tapped Print bill,
+       * and the answer was "Nothing is open on that table" about an order they
+       * were looking at.
+       *
+       * Reproduced against a real database: with BaseModel.license unset it
+       * works, with it set the same ticket vanishes. A sale written by the
+       * handset carries no licence field of its own, so the clause matched
+       * nothing at all.
+       *
+       * It is not a boundary being dropped either. Each shop has its own
+       * DATABASE - the connection is the tenancy boundary, which is why the
+       * floor query has never needed this and why the two are safe to agree.
+       */
+      /*
+       * WHICH TICKETS THIS TAP IS ASKING FOR, decided before anything is
+       * written.
+       *
+       * A waiter walking to the counter taps Print bill again, because nothing
+       * has come out yet. That second tap must not put the same bill on the
+       * queue a second time - and it did: the queue below was guarded by how
+       * many tickets are OPEN, not by how many this tap actually marked, so
+       * two taps meant two bills. With copies set to two it would have been
+       * four.
+       *
+       * The intent was always here - the update deliberately skips a ticket
+       * that already carries a timestamp - it simply never reached the queue.
+       * Taking the ids first is what joins the two: whatever was unasked a
+       * moment ago is what gets printed, and a repeat tap has an empty list.
+       */
+      const asking = await Model.find(
+        { ...query, bill_requested_at: { $in: [null, undefined] } },
+        { _id: 1 }
+      )
+        .limit(20)
+        .lean();
+      const askedIds = asking.map((row) => row._id);
+
+      const result = await Model.updateMany(
+        { ...query, bill_requested_at: { $in: [null, undefined] } },
+        {
+          $set: {
+            bill_requested_at: new Date(),
+            bill_requested_by: String(askedBy || '').trim(),
+          },
+        }
+      );
+
+      /* Asked for a second time, or asked for a table with nothing open. The
+         caller is told which, because "the bill is already on its way" and
+         "there is nothing to bill" send a waiter to two different places. */
+      const waiting = await Model.countDocuments(query);
+
+      /*
+       * AND THE COUNTER HEARS ABOUT IT NOW, not on the next poll.
+       *
+       * On the shop's own Wi-Fi this call is being handled BY THE TILL - the
+       * API is require()d into the desktop's main process - so this emit
+       * reaches the printer in the same tick and the paper starts before the
+       * waiter has put the phone down. A cloud shop cannot be reached from
+       * outside, so the poll underneath is what serves it; this costs nothing
+       * there.
+       *
+       * Only when something was actually marked. Announcing a request that
+       * changed nothing would wake the printer to find an empty list.
+       */
+      if (askedIds.length > 0) {
+        /*
+         * ON THE QUEUE, CARRYING WHAT TO PRINT.
+         *
+         * This is what makes a cloud shop work at all. The flag on the sale
+         * only ever reaches a till looking at the SAME database; a job carries
+         * the bill with it, so a till asks "anything for me?" and prints the
+         * answer without owning the sale or waiting for anything to sync.
+         *
+         * One job per open ticket, because that is what comes out of the
+         * printer - a table with three rounds has three tickets and the
+         * counter wants all three.
+         */
+        const open = await Model.find({ _id: { $in: askedIds } }).lean();
+
+        /*
+         * THE SHOP'S LETTERHEAD, READ ONCE.
+         *
+         * On the shop's own database this is a local lookup. It has to happen
+         * HERE and not on the till, because a till paired to a cloud tenant
+         * does not have this database - anything it would have to look up is
+         * something it cannot look up.
+         *
+         * A branch that cannot be read is not fatal. A bill with no letterhead
+         * is still a bill, and losing a guest's bill over a cosmetic failure
+         * would be the wrong trade.
+         */
+        let shop = {};
+        try {
+          const BranchModel = require('../models/branch.model');
+          const id = ObjectId.isValid(String(branchId))
+            ? new mongoose.Types.ObjectId(String(branchId))
+            : branchId;
+          shop = (await BranchModel.findById(id).lean()) || {};
+        } catch (e) {
+          console.error('Could not read the shop for the bill header:', e && e.message);
+        }
+
+        /*
+         * HOW MANY COME OUT OF THE PRINTER.
+         *
+         * Owner: "when captain app send print bill we need to have 2 copies
+         * actually." A restaurant hands one to the guest and keeps one, and
+         * the second used to be a second walk to the printer.
+         *
+         * ONE JOB PER COPY, rather than one job that says "twice". Every till
+         * already on a shop floor drains this queue and prints what it is
+         * handed, so a shop gets its second copy the moment it changes the
+         * setting - with no new version of the desktop app. It is also the
+         * truer shape: each copy succeeds or fails on its own, and a printer
+         * that jams on one leaves a job to retry rather than a job half done.
+         */
+        const copies = billCopies(shop, copiesAsked);
+
+        for (const sale of open) {
+          for (let copy = 1; copy <= copies; copy += 1) {
+            await queuePrintJob({
+              branchId,
+              kind: 'bill',
+              saleId: sale._id,
+              /* The counter reads these as they come off: "(2 of 2)" says the
+                 pair belongs to one table rather than two bills for it. */
+              label: copies > 1 ? `Table ${table} (${copy} of ${copies})` : `Table ${table}`,
+              /*
+               * BUILT FOR THE PRINTER, not handed over raw.
+               *
+               * This used to pass the sale document itself, with a comment
+               * claiming escpos-receipt rendered from exactly that shape. It does
+               * not. The renderer wants a view model - `items[].name`, `total` -
+               * and the document has `items[].item_name` and `sales_total`, so
+               * every lookup missed and the paper came out with a header, an
+               * empty item table and a total of 0.00. helpers/bill-payload.js
+               * has the full account.
+               */
+              payload: buildBillPayload(sale, await withDayparts(shop)),
+            });
+          }
+        }
+
+        notifyBillRequested({
+          branchId,
+          table,
+          count: result && typeof result.modifiedCount === 'number' ? result.modifiedCount : 0,
+        });
+      }
+
+      return {
+        status: waiting > 0,
+        message:
+          waiting > 0 ? 'The bill is on its way to the counter' : 'Nothing is open on that table',
+        data: {
+          table_number: table,
+          marked: result && typeof result.modifiedCount === 'number' ? result.modifiedCount : 0,
+          waiting,
+        },
+      };
+    } catch (error) {
+      console.error('Error in requestBillPrintModel:', error);
+      return { status: false, message: 'Could not ask for the bill', data: null };
+    }
+  }
+
+  /**
+   * The bills the till has been asked for and has not printed yet.
+   *
+   * Shaped like multiKitchenPrintModel's answer on purpose: the desktop
+   * already knows how to read a list of sales, print them and report back, and
+   * a second shape would be a second thing to keep working.
+   */
+  async pendingBillPrintsModel(branchId, { SaleModel } = {}) {
+    try {
+      const Model = this.getModel(SaleModel);
+
+      const query = {
+        bill_requested_at: { $ne: null, $exists: true },
+        bill_printed_at: { $in: [null, undefined] },
+      };
+      if (branchId) {
+        query.branch_id = ObjectId.isValid(String(branchId))
+          ? new mongoose.Types.ObjectId(String(branchId))
+          : branchId;
+      }
+      /* Same reason as the request above: a licence clause here made the till
+         blind to the very bills the handset had just asked for. Found by
+         running the two halves in sequence rather than each on its own. */
+
+      const sales = await Model.find(query).sort({ bill_requested_at: 1, _id: 1 }).limit(20).lean();
+
+      /*
+       * BUILT FOR THE PRINTER HERE TOO, and that fixes tills already in shops.
+       *
+       * This route is the old one - the queue replaced it - but every till
+       * installed before this build still asks it, and it was handing over the
+       * sale document raw. src/escpos-receipt.js cannot read a document: it
+       * wants `items[].name` and `total`, the document has `items[].item_name`
+       * and `sales_total`, so what came out of those printers was a header, an
+       * empty item table and a total of 0.00.
+       *
+       * Fixing it on this side fixes every one of them, with nobody installing
+       * anything. A till that updates uses the queue and never comes here
+       * again; one that never updates starts printing real bills tonight.
+       *
+       * `_id` is carried through because the till sends it straight back to
+       * markBillPrinted, and a bill it cannot report is a bill it prints again
+       * on every pass for ever.
+       */
+      let shop = {};
+      try {
+        const BranchModel = require('../models/branch.model');
+        const id = ObjectId.isValid(String(branchId))
+          ? new mongoose.Types.ObjectId(String(branchId))
+          : branchId;
+        if (id) shop = (await BranchModel.findById(id).lean()) || {};
+      } catch (e) {
+        console.error('Could not read the shop for the bill header:', e && e.message);
+      }
+
+      const withParts = await withDayparts(shop);
+      const forThePrinter = sales.map((sale) => ({
+        _id: sale._id,
+        ...buildBillPayload(sale, withParts),
+      }));
+
+      return { status: true, message: 'success', data: forThePrinter };
+    } catch (error) {
+      console.error('Error in pendingBillPrintsModel:', error);
+      return { status: false, message: 'Could not read pending bills', data: [] };
+    }
+  }
+
+  /**
+   * The till says the paper came out.
+   *
+   * Stamped only after the print, so a till that dies mid-job asks again when
+   * it comes back rather than a guest waiting at a table for a bill the system
+   * believes it already produced.
+   */
+  async markBillPrintedModel(saleIds, { SaleModel } = {}) {
+    try {
+      const Model = this.getModel(SaleModel);
+      const ids = (Array.isArray(saleIds) ? saleIds : [saleIds])
+        .map((id) => String(id || ''))
+        .filter((id) => ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      if (!ids.length) {
+        return { status: false, message: 'No valid sale IDs to mark as billed.', data: null };
+      }
+
+      /* Addressed by _id, which the till only knows because this same code
+         handed it over a moment ago. A licence clause would have let a bill
+         print and then refused to record that it had - so it would print again
+         on the next pass, for ever. */
+      const query = { _id: { $in: ids } };
+
+      const result = await Model.updateMany(query, { $set: { bill_printed_at: new Date() } });
+      return {
+        status: true,
+        message: 'success',
+        data: {
+          marked: result && typeof result.modifiedCount === 'number' ? result.modifiedCount : 0,
+        },
+      };
+    } catch (error) {
+      console.error('Error in markBillPrintedModel:', error);
+      return { status: false, message: 'Could not mark the bill printed', data: null };
+    }
+  }
+
+  /*
+   * ONE TICKET, ONE TILL.
+   *
+   * This hands out the kitchen's work, and it took a branch and nothing else:
+   * no till, no claim, no lease. Two machines polling the same shop were
+   * handed the SAME sales and both printed them. Nobody has seen that because
+   * only one till in a shop is configured with kitchen printers - which is
+   * also exactly why a shop with two tills has no standby: the second one
+   * cannot be given the printers without doubling every ticket.
+   *
+   * A till that says who it is now CLAIMS what it is handed, the same way the
+   * bill queue already does. A claim only ever narrows what a till is offered,
+   * so it cannot cause a missing ticket; a till that dies mid-print has its
+   * claim expire and the other one picks the work up, which is the standby.
+   *
+   * A TILL THAT SENDS NO ID BEHAVES EXACTLY AS BEFORE. Ninety shops are
+   * running builds that do not send one, and this is the path that feeds every
+   * kitchen: it must be a no-op for them until their till updates.
+   */
+  async multiKitchenPrintModel(branchId, { tillId = '', onlySaleId, counterUntil } = {}) {
+    try {
+      const db = await BaseModel.getDb();
+      const branchCollection = db.collection('branches');
+      const salesCollection = db.collection('sales');
+
+      // Accept ObjectId or kiosk.store_id
+      let branchData = null;
+      if (mongoose.Types.ObjectId.isValid(String(branchId))) {
+        branchData = await branchCollection.findOne({
+          _id: new mongoose.Types.ObjectId(String(branchId)),
+        });
+      }
+      if (!branchData) {
+        branchData = await branchCollection.findOne({ 'online_ordering.store_id': branchId });
+      }
+      if (!branchData) {
+        return {
+          status: false,
+          message: 'Branch not found for the given branch/store ID.',
+          data: null,
+        };
+      }
+
+      const branchObjectId = branchData._id;
+      const todayStart = new Date(new Date().setHours(0, 0, 0, 0));
+      const todayEnd = new Date(new Date().setHours(0, 0, 0, 0) + 86400000);
+
+      /*
+       * Somebody else's, and recently enough that they are probably still
+       * printing it. Absent for a till that sends no id, which leaves the
+       * query exactly as it was.
+       */
+      /*
+       * WHAT IS ACTUALLY UNPRINTED, rather than the newest few of the day.
+       *
+       * Owner: "cancel not pritingin." From his own till's log:
+       *
+       *   [KOT] sale event -> printing now (cancelled)
+       *   [KOT] API ... message="Get unprinted sales successfully" sales=0
+       *
+       * and from its database: 25 cancelled sales that day against a query
+       * that took the OLDEST 20. Everything cancelled after the twentieth was
+       * outside the window, so the server answered "nothing to print" and the
+       * kitchen never heard about a single one of them. The last cancellation
+       * that printed was 13:02; every one from 13:17 on printed nothing.
+       *
+       * The limits were meant as a safety valve against a huge day and were
+       * doing something else entirely: silently dropping work. A shop that
+       * cancels twenty orders stopped printing cancellations for the rest of
+       * the day, and nothing said so anywhere.
+       *
+       * So the QUERY asks the question the loop below asks: are there changes
+       * past the last printed one. The limits stay, and now they bound a set
+       * that is genuinely outstanding rather than slicing the day.
+       *
+       * Read defensively: last_printed_change_index is -1 on a sale that has
+       * never printed, and some older documents carry it as a string.
+       */
+      const hasUnprintedChanges = {
+        $expr: {
+          $gt: [
+            { $size: { $ifNull: ['$changes', []] } },
+            {
+              $add: [
+                {
+                  $convert: {
+                    input: { $ifNull: ['$last_printed_change_index', -1] },
+                    to: 'int',
+                    onError: -1,
+                    onNull: -1,
+                  },
+                },
+                1,
+              ],
+            },
+          ],
+        },
+      };
+
+      const mine = String(tillId || '').trim();
+      const ordinaryClaim = mine
+        ? {
+            $or: [
+              { kot_claimed_at: null },
+              { kot_claimed_at: { $exists: false } },
+              { kot_claimed_at: { $lt: new Date(Date.now() - KOT_CLAIM_MS) } },
+              /* My own claim never blocks me: a till that crashed mid-print
+                 must be able to try again on its very next poll, not in
+                 forty-five seconds. */
+              { kot_claimed_by: mine },
+            ],
+          }
+        : {};
+      // A browser dialog must not race the background kitchen printer, including
+      // older tills without an ID. A counter holds its ticket until confirmed.
+      const notSomebodyElses = {
+        $and: [
+          ordinaryClaim,
+          {
+            $or: [
+              { kot_counter_until: { $exists: false } },
+              { kot_counter_until: { $lte: new Date() } },
+            ],
+          },
+          ...(counterUntil
+            ? [
+                {
+                  $or: [
+                    { kot_legacy_until: { $exists: false } },
+                    { kot_legacy_until: { $lte: new Date() } },
+                  ],
+                },
+              ]
+            : []),
+        ],
+      };
+      const selectedSale = onlySaleId
+        ? { _id: new mongoose.Types.ObjectId(String(onlySaleId)) }
+        : {};
+
+      const kotSales = await salesCollection
+        .find(
+          {
+            branch_id: branchObjectId,
+            sale_process: { $regex: 'KOT', $options: 'i' },
+            ...(onlySaleId ? selectedSale : { created_date: { $gte: todayStart, $lt: todayEnd } }),
+            ...hasUnprintedChanges,
+            ...notSomebodyElses,
+          },
+          { sort: { created_date: 1, _id: 1 }, limit: 50 }
+        )
+        .toArray();
+
+      const cancelledSales = await salesCollection
+        .find(
+          {
+            branch_id: branchObjectId,
+            sale_process: { $regex: 'cancelled', $options: 'i' },
+            ...(onlySaleId ? selectedSale : { created_date: { $gte: todayStart, $lt: todayEnd } }),
+            ...hasUnprintedChanges,
+            ...notSomebodyElses,
+          },
+          { sort: { created_date: 1 }, limit: 20 }
+        )
+        .toArray();
+
+      const allSales = [...kotSales, ...cancelledSales];
+
+      if (allSales.length === 0) {
+        return {
+          status: true,
+          message: 'No unprinted KOT sales found for the specified branch.',
+          data: [],
+        };
+      }
+
+      const processedSales = [];
+
+      for (const sale of allSales) {
+        const changes = Array.isArray(sale.changes) ? sale.changes : [];
+        const lastPrintedChangeIndex =
+          sale.last_printed_change_index !== undefined && sale.last_printed_change_index !== null
+            ? parseInt(sale.last_printed_change_index, 10)
+            : -1;
+
+        const printJobs = [];
+        let hasNewChanges = false;
+        let highestPrintedIndex = lastPrintedChangeIndex;
+
+        for (let i = 0; i < changes.length; i++) {
+          if (i <= lastPrintedChangeIndex) continue;
+
+          hasNewChanges = true;
+          const change = changes[i];
+          const items = Array.isArray(change.items) ? change.items : [];
+          const addItems = items.filter((it) => String(it.process || '').toLowerCase() === 'add');
+          const cancelItems = items.filter(
+            (it) => String(it.process || '').toLowerCase() === 'cancel'
+          );
+
+          if (addItems.length > 0) {
+            printJobs.push({
+              type: i === 0 ? 'new' : 'modified',
+              timestamp: change.timestamp || null,
+              items: addItems,
+              change_index: i + 1,
+            });
+            highestPrintedIndex = i;
+          }
+          if (cancelItems.length > 0) {
+            printJobs.push({
+              type: 'cancel',
+              timestamp: change.timestamp || null,
+              items: cancelItems,
+              change_index: i + 1,
+            });
+            highestPrintedIndex = i;
+          }
+        }
+
+        if (hasNewChanges && printJobs.length > 0) {
+          sale.print_jobs = printJobs;
+          sale.new_last_printed_change_index = highestPrintedIndex;
+          processedSales.push(sale);
+        }
+      }
+
+      /*
+       * THE QUEUE WATCHES, AND PRINTS NOTHING.
+       *
+       * Step 1 of Stage 2 in the print roadmap: record what the queue believes
+       * should print, let the old path keep printing exactly as it does, and
+       * compare the two. Ninety shops feed their kitchens through this
+       * function, so nothing here may change what comes out of a printer -
+       * rows are written with status `shadow`, which no till ever claims.
+       *
+       * Awaited rather than fired and forgotten, so a slow write shows up as a
+       * slow poll rather than as a promise nobody is holding. Its own failures
+       * are swallowed inside: a bystander must never cost a service.
+       */
+      try {
+        const shadow = require('./kot-shadow.repository');
+        await shadow.recordExpected(processedSales, { branchId: branchObjectId });
+      } catch (e) {
+        console.warn('[kot-shadow] not recorded:', e && e.message);
+      }
+
+      /*
+       * And this till has taken them.
+       *
+       * Stamped on exactly what is being HANDED OVER, not on everything the
+       * query read: a sale with no new changes is not being printed by anybody
+       * and claiming it would hide it from the other till for no reason.
+       *
+       * Never fatal. A claim that cannot be written leaves the old behaviour -
+       * two tills might both print - and that is far better than a kitchen
+       * that gets nothing because a bookkeeping write failed.
+       */
+      const claimed = [];
+      for (const sale of processedSales) {
+        try {
+          // Check and take in one write: two readers can see the same pending
+          // ticket, but only one may hand it to a printer.
+          const result = await salesCollection.updateOne(
+            {
+              _id: sale._id,
+              ...notSomebodyElses,
+              last_printed_change_index: sale.last_printed_change_index ?? null,
+            },
+            {
+              $set: {
+                ...(mine
+                  ? { kot_claimed_by: mine, kot_claimed_at: new Date() }
+                  : { kot_legacy_until: new Date(Date.now() + KOT_CLAIM_MS) }),
+                ...(counterUntil
+                  ? {
+                      kot_counter_until: counterUntil,
+                      kot_counter_index: sale.new_last_printed_change_index,
+                      kot_counter_keys: require('../utils/kot-job-key')
+                        .kotJobKeys(sale)
+                        .map((job) => job.key),
+                    }
+                  : {}),
+              },
+            }
+          );
+          if (result.matchedCount) claimed.push(sale);
+        } catch (e) {
+          if (counterUntil) throw e;
+          console.warn('[kot] could not record which till took these:', e && e.message);
+          claimed.push(sale);
+        }
+      }
+
+      return { status: true, message: 'Get unprinted sales successfully', data: claimed };
+    } catch (error) {
+      console.error('Error in multiKitchenPrintModel:', error);
+      return {
+        status: false,
+        message: 'Error fetching unprinted sales: ' + error.message,
+        data: [],
+      };
+    }
+  }
+
+  /**
+   * WHAT THE KITCHEN IS ACTUALLY COOKING, for the screen on the wall.
+   *
+   * A different question from "what should print", and the kitchen screen had
+   * been asking nobody at all: `setTickets` - the only way anything reaches
+   * those screens - was exported and called from nowhere, so a screen opened
+   * on a wall showed an empty list for ever. Setup mode fills itself with
+   * sample tickets, which is the worst possible shape for that bug: it demos
+   * perfectly and does nothing in service.
+   *
+   * WHY NOT FEED IT FROM THE PRINT POLL, which is the obvious idea:
+   *
+   *   - that poll returns only what has NOT printed yet, so a ticket would
+   *     vanish off the wall the instant it came out of the printer, which is
+   *     precisely when the kitchen starts cooking it;
+   *   - and it now claims what it hands out, so a ticket taken by the other
+   *     till would never appear at all.
+   *
+   * A screen shows what is open, whoever printed it, until it is settled.
+   * "Settled" has no marker in this product - nothing says a dish is done -
+   * so the honest boundary is the one that already exists: it leaves the
+   * screen when the table is billed, paid or called off.
+   */
+  async kitchenScreenTickets(branchId, { limit = 40 } = {}) {
+    try {
+      const db = await BaseModel.getDb();
+      const branchObjectId = mongoose.Types.ObjectId.isValid(String(branchId))
+        ? new mongoose.Types.ObjectId(String(branchId))
+        : branchId;
+
+      const todayStart = new Date(new Date().setHours(0, 0, 0, 0));
+      const rows = await db
+        .collection('sales')
+        .find(
+          {
+            branch_id: branchObjectId,
+            sale_process: { $regex: 'KOT', $options: 'i' },
+            created_date: { $gte: todayStart },
+            payment_status: { $nin: ['Paid', 'Cancelled'] },
+            ...activeTenantFilter(),
+          },
+          {
+            sort: { created_date: 1 },
+            limit: Math.max(1, Math.min(100, limit)),
+            projection: {
+              sales_id: 1,
+              token_id: 1,
+              table_number: 1,
+              created_date: 1,
+              date: 1,
+              items: 1,
+            },
+          }
+        )
+        .toArray();
+
+      /* The shape the screen draws, and nothing else. A kitchen screen hangs
+         where customers and staff can both see it, so prices, customers and
+         phone numbers have no business travelling to it. */
+      const tickets = rows.map((sale) => ({
+        table: String(sale.table_number || ''),
+        orderNumber: String(sale.sales_id || sale.token_id || ''),
+        placedAt: new Date(sale.created_date || sale.date || Date.now()).toISOString(),
+        items: (Array.isArray(sale.items) ? sale.items : []).map((line) => ({
+          qty: Number(line.item_quantity != null ? line.item_quantity : line.quantity || 0) || 1,
+          name: String(line.item_name || line.name || ''),
+          /* The note a waiter typed. A screen hangs where customers and
+             staff can both see it, and the catalogue sentence belongs on a
+             menu, not above a fryer. */
+          note: String(line.item_note || line.item_description || '').slice(0, 80),
+        })),
+      }));
+
+      return { status: true, message: 'success', data: tickets };
+    } catch (error) {
+      console.error('Error in kitchenScreenTickets:', error);
+      return { status: false, message: 'Could not read the kitchen', data: [] };
+    }
+  }
+
+  async markKitchenPrintedModel(saleIds, printedIndexes, printedKeys = []) {
+    try {
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      if (!Array.isArray(saleIds) || saleIds.length === 0) {
+        return { status: false, message: 'Invalid saleIds provided.', data: null };
+      }
+
+      const validIds = saleIds.filter((id) => mongoose.Types.ObjectId.isValid(String(id)));
+      if (validIds.length === 0) {
+        return { status: false, message: 'No valid sale IDs to mark as printed.', data: null };
+      }
+
+      const now = new Date();
+      let modifiedCount = 0;
+
+      for (const saleId of validIds) {
+        const saleIdStr = String(saleId);
+        const saleObjId = new mongoose.Types.ObjectId(saleIdStr);
+        const indexes = printedIndexes || {};
+
+        let lastChangeIndex;
+
+        if (indexes[saleIdStr] !== undefined) {
+          lastChangeIndex = parseInt(indexes[saleIdStr], 10);
+        } else {
+          const sale = await salesCollection.findOne({
+            _id: saleObjId,
+            ...activeTenantFilter(),
+          });
+          if (!sale) continue;
+          const changes = Array.isArray(sale.changes) ? sale.changes : [];
+          lastChangeIndex = changes.length > 0 ? changes.length - 1 : -1;
+        }
+
+        const result = await salesCollection.updateOne(
+          { _id: saleObjId, ...activeTenantFilter() },
+          {
+            $set: {
+              kitchen_printed: true,
+              kitchen_printed_at: now,
+              last_printed_change_index: lastChangeIndex,
+              /* Done with, so the claim goes. Leaving it would keep the sale
+                 hidden from the other till for the rest of the window, which
+                 matters the moment an amendment arrives for the same table. */
+              kot_claimed_by: '',
+              kot_claimed_at: null,
+            },
+            $unset: { kot_legacy_until: '' },
+          }
+        );
+        if (result.modifiedCount > 0) modifiedCount++;
+      }
+
+      /*
+       * Close the watching rows for what the till just reported.
+       *
+       * By ticket name when the till sent them, by sale when it did not - an
+       * older build sends only sale ids, and leaving its rows open for ever
+       * would report the whole estate as failing on the first read.
+       */
+      try {
+        const shadow = require('./kot-shadow.repository');
+        const branchOf = await salesCollection.findOne(
+          { _id: validIds[0] },
+          { projection: { branch_id: 1 } }
+        );
+        if (branchOf && branchOf.branch_id) {
+          await shadow.markShadowPrinted(printedKeys, {
+            branchId: branchOf.branch_id,
+            saleIds: validIds,
+          });
+        }
+      } catch (e) {
+        console.warn('[kot-shadow] not closed:', e && e.message);
+      }
+
+      return {
+        status: true,
+        message: 'Sales marked as printed successfully.',
+        data: { matched_count: validIds.length, modified_count: modifiedCount },
+      };
+    } catch (error) {
+      console.error('Error in markKitchenPrintedModel:', error);
+      return {
+        status: false,
+        message: 'Error marking sales as printed: ' + error.message,
+        data: null,
+      };
+    }
+  }
+
+  /*
+   * @param {object} opts
+   * @param {boolean} [opts.staffOrder]  a SIGNED-IN member of staff placed this,
+   *   which on this endpoint means a captain handset. Set by the route, never
+   *   from the body - the body is written by the device being described.
+   */
+  /**
+   * The shop's own walk-in customer, for a guest who gave no details.
+   *
+   * Owner, holding a bill with an invented phone number on it: "until captain
+   * enter guest nuber better keep guest as walk in."
+   *
+   * Every branch has one - the till attaches it to counter sales, and the
+   * installer and the settings screen both keep it healed. An order taken at a
+   * table belongs to exactly the same person: somebody who walked in and did
+   * not leave a number. Until the handset asks for one, that is the honest
+   * answer, and it is better than the two this had before - a blank, which
+   * reads as data lost, or a made-up number, which reads as data.
+   *
+   * Read-only and best effort: a shop whose walk-in record has been deleted
+   * still gets its sale, with the name and no id. A sale must never fail over
+   * who the guest is.
+   *
+   * @param {object} db          the tenant connection
+   * @param {object} branchDoc   the branch this sale belongs to
+   * @returns {Promise<{id: ObjectId|null, name: string}>}
+   */
+  async _walkInCustomer(db, branchDoc) {
+    const name = WALK_IN_NAME;
+    try {
+      const customers = db.collection('customers');
+      const scope = {
+        branch_id: branchDoc._id,
+        ...(branchDoc.license ? { license: branchDoc.license } : {}),
+      };
+
+      if (branchDoc.default_customer) {
+        const pointed = await customers.findOne({
+          _id: new mongoose.Types.ObjectId(String(branchDoc.default_customer)),
+          ...scope,
+        });
+        if (pointed) return { id: pointed._id, name: pointed.name || name };
+      }
+
+      /* The pointer is not always set - older branches, restored data - so the
+         record is found by what it is called, the way settings heals it. */
+      const found = await customers.findOne({ name: { $regex: /walk[- ]?in/i }, ...scope });
+      if (found) return { id: found._id, name: found.name || name };
+    } catch (e) {
+      console.error('walk-in lookup failed, order continues:', e.message);
+    }
+    return { id: null, name };
+  }
+
+  async createOnlineOrder(data, { SaleModel, staffOrder = false } = {}) {
+    try {
+      const db = await BaseModel.getDb();
+
+      const {
+        branch,
+        items = [],
+        customerMobile,
+        transactionId,
+        tokenId: clientTokenId,
+        sale_method,
+        order,
+        note,
+        kiosk_discount_amount,
+        kiosk_discount_description,
+        /* A coupon code the customer typed. The CODE, never a discount: the
+           shop prices its own offers, and a page that could name the value of
+           a coupon could name one nobody published. */
+        coupon_code,
+        kiosk_table_no,
+        kiosk_table_id,
+        dine_type,
+        person_count,
+        idempotencyKey,
+        /*
+         * Where the customer is sitting, read by the page out of the URL it
+         * was opened on.
+         *
+         *   /order/AZ100/table/5        no venue: the shop's own floor
+         *   /order/AZ100/venue/RC/123   Royal Club Hotel, room 123
+         *
+         * `destination` is what the customer CONFIRMED at checkout, which may
+         * correct the room the link claimed. See utils/partner-venues.
+         */
+        venue,
+        unit,
+        destination,
+        /* The shop's own table, as the printed code named it (the customer
+           page) - the captain app says it as kiosk_table_no. */
+        table,
+        /*
+         * WHERE THE ORDER CAME FROM, for a shop that one evening is looking
+         * at fifteen orders nobody is going to collect. The controller fills
+         * this in from the request; the page adds what only it knows.
+         *
+         * Written and never read back out to a customer. Nothing in the
+         * product acts on it yet, deliberately: blocking somebody is a
+         * decision a shopkeeper makes, and there is no point building the
+         * decision before there is anything to decide it from.
+         */
+        client,
+        /* Who a delivery goes to. The phone is customerMobile above. */
+        customer_name,
+        customer_address,
+      } = data;
+
+      if (!branch) {
+        return { status: false, message: 'Branch is required', data: null };
+      }
+
+      const branchCollection = db.collection('branches');
+      const branchSelector = ObjectId.isValid(String(branch))
+        ? { $or: [{ _id: new ObjectId(String(branch)) }, { 'online_ordering.store_id': branch }] }
+        : { 'online_ordering.store_id': branch };
+      if (BaseModel.license) branchSelector.license = BaseModel.license;
+      const branchDoc = await branchCollection.findOne(branchSelector);
+
+      /*
+       * The same order, sent twice, is one order.
+       *
+       * A waiter taps send, the Wi-Fi drops before the reply arrives, and the
+       * app cannot tell "never reached the kitchen" from "reached it and the
+       * answer was lost". Without this the safe choice is to refuse to retry
+       * and make somebody check the kitchen screen; with it, sending again is
+       * free, which is what lets a handset hold an order and send it when the
+       * network returns.
+       *
+       * Both apps have been sending idempotencyKey for as long as they have
+       * existed. Nothing read it: the field was destructured nowhere and
+       * stored nowhere, so every retry wrote another ticket.
+       */
+      if (idempotencyKey) {
+        await this._ensureIdempotencyIndex(db);
+        const already = await db.collection('sales').findOne({
+          idempotency_key: String(idempotencyKey),
+          ...(BaseModel.license ? { license: BaseModel.license } : {}),
+        });
+        if (already) return this._duplicateOrderAnswer(already);
+      }
+
+      if (!branchDoc) {
+        return { status: false, message: 'Branch not found', data: null };
+      }
+      /*
+       * Online ordering is opt-in, and it can be shut for four unrelated
+       * reasons. This endpoint is anonymous by design (a customer's phone has
+       * no credentials) and reachable from the internet, so the ONLY thing
+       * standing between a stranger and a shop's kitchen queue is this check:
+       * a branch that never configured an online identity must not accept
+       * orders addressed by its raw database id, which appears in every
+       * authenticated response and is no secret. Nor may a shop that is in
+       * menu mode, paused, or outside its opening hours.
+       *
+       * The customer's page hides its cart in all of those states. That is a
+       * courtesy. This is the control, and it runs the same computation so the
+       * two cannot drift.
+       *
+       * The config used to live in `branch.kiosk`, an array of one, and this
+       * guard read it as an object (`branchDoc.kiosk.store_id`). That is
+       * `undefined` on an array, so it fired for every branch and refused
+       * every order ever placed against this API. It survived because live
+       * traffic still reached the old PHP backend and because the unit test
+       * mocked the object shape nothing wrote. The field is a plain object
+       * now, so the two readers cannot disagree again.
+       */
+      const onlineEntry = onlineOrdering.storefront(branchDoc);
+      const onlineState = onlineOrdering.channelState(onlineEntry, {
+        timeZone: branchDoc.time_zone,
+      });
+      if (!onlineState.accepting) {
+        return {
+          status: false,
+          message: onlineState.message || ONLINE_ORDERING_DISABLED,
+          data: { state: onlineState.state, opens_at: onlineState.opens_at },
+        };
+      }
+      const branchObjectId = branchDoc._id;
+
+      /*
+       * The serving periods, and the clock they are judged against.
+       *
+       * Read once for the whole order rather than per line, and in the
+       * BRANCH's timezone - whether it is lunchtime is a question about where
+       * the kitchen is, not where the customer is holding their phone.
+       */
+      let servingPeriods = [];
+      try {
+        const settingsCollection = db.collection('settings');
+        const settingsDoc = await settingsCollection.findOne({ menu_dayparts: { $exists: true } });
+        servingPeriods = onlineOrdering.normalizeDayparts(
+          (settingsDoc && settingsDoc.menu_dayparts) || []
+        );
+      } catch (e) {
+        /* No periods configured is the normal state and means everything is
+           served all day, which is also the safe answer if this fails. */
+        console.warn('[order] could not read serving periods:', e.message);
+      }
+      /*
+       * Does an order from this shop go straight to the kitchen?
+       *
+       * Read from the same settings document as the serving periods. If it
+       * cannot be read at all, approvalMode answers AUTO - see
+       * utils/order-approval for why that is the survivable direction.
+       */
+      let approvalSetting = 'auto';
+      try {
+        const settingsCollection = db.collection('settings');
+        const approvalDoc = await settingsCollection.findOne({
+          online_order_approval: { $exists: true },
+        });
+        approvalSetting = (approvalDoc && approvalDoc.online_order_approval) || 'auto';
+      } catch (e) {
+        console.warn('[order] could not read the approval setting:', e.message);
+      }
+
+      /*
+       * Whose floor this order is coming from, and what it costs to get there.
+       *
+       * A restaurant's own table nine and room 123 of the hotel across the
+       * road arrive through the same storefront and are not the same order:
+       * the room pays the agreed markup, the hotel is owed its cut, and
+       * somebody has to carry the food over.
+       *
+       * Both are read here rather than trusted from the page. The customer's
+       * phone tells us WHICH venue the code named; it does not get to say what
+       * that venue's markup is.
+       */
+      let venues = [];
+      let shopCharges = {};
+      try {
+        const settingsCollection = db.collection('settings');
+        const venueDoc = await settingsCollection.findOne({ partner_venues: { $exists: true } });
+        venues = partnerVenues.normalizeVenues((venueDoc && venueDoc.partner_venues) || []);
+        const chargeDoc = await settingsCollection.findOne({ channel_charges: { $exists: true } });
+        shopCharges = (chargeDoc && chargeDoc.channel_charges) || {};
+      } catch (e) {
+        /* No venues and no fees is the normal state for a shop with one
+           dining room, and it is also the safe answer if this fails: house
+           prices, nothing added, nothing owed. */
+        console.warn('[order] could not read venues or charges:', e.message);
+      }
+
+      const servicePoint = partnerVenues.resolveServicePoint(
+        { table: String(kiosk_table_no || table || '').trim(), venue, unit },
+        venues
+      );
+      /* Where the food actually goes, as the customer confirmed it. Null for
+         the shop's own floor, which needs no address. */
+      const deliverTo = partnerVenues.confirmDestination(servicePoint, destination || {});
+
+      /*
+       * ONE OPEN ORDER PER TABLE, unless this shop says otherwise.
+       *
+       * Owner: "basically two orders in single table not possible", and then
+       * "by default one order per tabel... multiple order or only one order or
+       * maximum number of order. keep the settings."
+       *
+       * Two orders on one table was first reported as a duplicate-order bug,
+       * and the duplicate itself is fixed (a key on the order, a unique index
+       * behind it). This is the different, deliberate case: a second order,
+       * genuinely placed, on a table that already has one open. On most floors
+       * that is a mistake - somebody chose the wrong table - and the cost of
+       * finding out is a bill split in two at the end of the meal.
+       *
+       * Enforced HERE rather than on the handset because there is more than
+       * one handset, and because two waiters can tap Send on the same table in
+       * the same second. A client-side check is a courtesy; this is the rule.
+       *
+       * ADDING TO AN ORDER IS NOT PLACING ONE. This runs only on the path that
+       * creates a new sale; editing an existing ticket goes elsewhere entirely
+       * and is untouched, which is what makes a limit of 1 usable rather than
+       * infuriating.
+       */
+      /*
+       * AND ONLY WHERE THERE ARE TABLES.
+       *
+       * Owner: "table restriction and restaurant oriented stuff only when
+       * restaurant enabled. otherwise treat that as normal retail shop."
+       *
+       * This asked whether a table NUMBER had arrived and never whether the
+       * shop runs table service. A retail counter has no tables, but a
+       * printed code can still carry a segment - a venue, a unit, a code
+       * reused from a floor plan somebody abandoned - and the moment one did,
+       * a hardware shop was refusing a customer's order with "Table 5 already
+       * has an open order".
+       *
+       * The switch is the branch's own, read the way every other reader here
+       * reads it: `table_options` is declared Boolean on the branch document,
+       * so `=== true` is the honest comparison for this source. The tolerant
+       * string reading in item.repository.js is for SETTINGS values, which are
+       * a different shape from a different writer.
+       */
+      const runsTableService = branchDoc.table_options === true;
+      const openTableLimit = Number(branchDoc.table_order_limit ?? 1);
+      const wantsTable = String(servicePoint.label || kiosk_table_no || table || '').trim();
+      if (runsTableService && openTableLimit > 0 && wantsTable) {
+        const openNow = await db.collection('sales').countDocuments({
+          branch_id: branchObjectId,
+          sale_process: 'KOT',
+          payment_status: 'Unpaid',
+          table_number: wantsTable,
+        });
+        if (openNow >= openTableLimit) {
+          return {
+            status: false,
+            message:
+              openTableLimit === 1
+                ? `Table ${wantsTable} already has an open order. Add to it, or settle it first.`
+                : `Table ${wantsTable} already has ${openNow} open orders, which is the most this shop allows.`,
+            data: { table_number: wantsTable, open_orders: openNow, limit: openTableLimit },
+          };
+        }
+      }
+
+      const orderLocal = moment().tz(onlineOrdering.normalizeTimeZone(branchDoc.time_zone));
+      const orderDay = orderLocal.day();
+      const orderMinutes = orderLocal.hours() * 60 + orderLocal.minutes();
+
+      // Generate token ID
+      const tokenId = String(clientTokenId || String(Math.floor(Math.random() * 900) + 100));
+
+      // Map items - use raw shape (no Mongoose ObjectId for item ref to avoid validation errors)
+      const itemCollection = db.collection('items');
+      const saleItems = [];
+      for (const item of items) {
+        /* Priced and checked in one place, shared with a line added to an
+           order that has already gone. A refusal is returned as it stands. */
+        const priced = await this._priceOnlineLine(item, {
+          itemCollection,
+          branchDoc,
+          branchObjectId,
+          servingPeriods,
+          orderDay,
+          orderMinutes,
+          servicePoint,
+        });
+        if (priced.status === false) return priced;
+        saleItems.push(priced.line);
+      }
+
+      const subtotal = round(saleItems.reduce((s, i) => s + round(i.unit_price * i.quantity), 0));
+      const totalTax = round(saleItems.reduce((s, i) => s + i.tax_amount, 0));
+      const discountAmt = round(Number(kiosk_discount_amount) || 0);
+      const itemDiscountTotal = round(
+        saleItems.reduce((s, i) => s + Number(i.item_discount || 0), 0)
+      );
+      const foodTotal = round(saleItems.reduce((s, i) => s + i.total, 0) - discountAmt);
+
+      /*
+       * What this order owes on top of the food.
+       *
+       * Keyed by FULFILMENT, not by channel: a fee exists because somebody
+       * drives the food somewhere, not because the order arrived through a
+       * particular app. The same storefront serves a table (no fee), a
+       * takeaway (a packing charge, maybe) and a hotel room (delivery).
+       *
+       * Checked here as well as on the page. A minimum order is a rule about
+       * what the shop is willing to send out, and a stale tab or a direct POST
+       * must not get past it.
+       */
+      const fulfilment = salesChannels.normalizeFulfilment(data.fulfilment || order || dine_type);
+      const charge = salesChannels.chargesFor(fulfilment, foodTotal, shopCharges);
+      if (!charge.allowed) {
+        return {
+          status: false,
+          data: { state: 'below_minimum', minimum: charge.minimum },
+          message: `Orders for this start at ${charge.minimum}.`,
+        };
+      }
+      /*
+       * THE COUPON, PRICED HERE AND NOWHERE ELSE.
+       *
+       * The customer's page sends the code it was given. What it is worth is
+       * worked out from the shop's own coupon document, by the same service
+       * the till uses - there is one definition of what a code is worth, and
+       * this is a third door onto it rather than a third copy.
+       *
+       * AFTER the minimum-order check on purpose. A minimum is a rule about
+       * what a shop is willing to send out, and a coupon must not be a way
+       * around it: `charge` is computed on the food BEFORE any coupon, so a
+       * 200 minimum still means 200 of food.
+       *
+       * AN UNKNOWN CODE REFUSES THE ORDER rather than quietly dropping the
+       * discount. Somebody who typed a code, saw a price and pressed pay must
+       * not be charged more than the number they agreed to. Silently ignoring
+       * it is the one outcome nobody would forgive.
+       */
+      let couponDiscount = 0;
+      let couponUsed = null;
+      const wantedCoupon = String(coupon_code || '').trim();
+      if (wantedCoupon) {
+        const said = await coupons.validate(wantedCoupon, {
+          billTotal: foodTotal,
+          branchId: branchObjectId,
+        });
+        if (!said || said.valid !== true || !said.data) {
+          return {
+            status: false,
+            data: { state: 'coupon_refused', code: wantedCoupon },
+            message: (said && said.message) || 'That code cannot be used on this order.',
+          };
+        }
+        couponDiscount = round(Number(said.data.discount) || 0);
+        couponUsed = said.data;
+      }
+
+      const deliveryFee = round(charge.fee);
+      /* Never below zero, and never against the delivery fee: a coupon is an
+         offer on the food, and a shop that ends up paying somebody to collect
+         an order has been given a rule it did not write. */
+      const afterCoupon = Math.max(0, round(foodTotal - couponDiscount));
+      const finalTotal = round(afterCoupon + deliveryFee);
+
+      /*
+       * What the venue is owed, worked out once and stored on the order.
+       *
+       * On the FOOD, not on the delivery fee: the fee covers the restaurant's
+       * own cost of carrying the food across the road, and paying a
+       * commission on a cost is paying twice for the same trip.
+       *
+       * Stored rather than computed at report time, because the rate can
+       * change: a hotel that renegotiates in March must not silently restate
+       * what it was owed in February.
+       */
+      const venueCommission = partnerVenues.commissionFor(foodTotal, servicePoint.venue);
+      const branchName = branchDoc.name || branchDoc.branch_name || '';
+
+      const now = new Date();
+      // Generate a human-readable sales_id for kiosk/QR orders using the
+      // same branch-prefix + running-number logic as normal sales inserts.
+      // If anything fails, fall back to SID+timestamp so the KOT log
+      // still has a stable identifier.
+      let salesId;
+      try {
+        salesId = await this.generateSalesIdForBranch(branchObjectId);
+      } catch (e) {
+        console.error(
+          'Failed to generate sequential sales_id for an online order; using fallback SID timestamp:',
+          e.message
+        );
+        salesId = `SID${now.getTime()}`;
+      }
+
+      // Seed initial changes array so multiKitchenPrintModel can detect
+      // this brand-new KOT order and send it to the KOT printers.
+      // This mirrors the structure used by updateOrder/cancel flows,
+      // but marks every line as an "add" change.
+      const changesItems = saleItems
+        .map((si) => {
+          const qty = Number(si.item_quantity || si.quantity || 0);
+          const price = Number(si.unit_price || 0);
+          const total = round(price * qty);
+          return {
+            item_id: String(si.item_id || ''),
+            item_name: String(si.item_name || ''),
+            item_quantity: qty,
+            process: 'add',
+            item_code: '',
+            unit: 'qty',
+            price,
+            total,
+            /* See the note at the cancel flow below: this list is what the
+               kitchen ticket is printed from. */
+            item_description: String(si.item_description || ''),
+            /* And for the same reason: a level stored on the sale and absent
+               from the change record never reaches the paper. */
+            spice_level: spiceLevel.levelOf(si.spice_level),
+          };
+        })
+        .filter((it) => it.item_id && it.item_quantity > 0);
+
+      // Use raw MongoDB insert to bypass Mongoose schema validators
+      /*
+       * The method somebody intends to pay by, and whether they already have.
+       *
+       * Callers have always put a METHOD in `payment_status` - the captain app
+       * sends "cash", the QR page sends "Upi" - so the two are separated here
+       * rather than at every caller, which keeps handsets already in the field
+       * working without an update.
+       */
+      const said = String(data.payment_status || '')
+        .trim()
+        .toLowerCase();
+      const paidUpFront = said === 'paid' || said === 'completed';
+      const paymentMethod =
+        data.payment_mode ||
+        (said && !paidUpFront ? said.charAt(0).toUpperCase() + said.slice(1) : 'Cash');
+
+      /*
+       * HOW MANY THINGS ARE ON THIS SALE.
+       *
+       * The sales list read 0 items on an order that opened to show two. The
+       * model sets `number_of_items` in a pre-save hook - but this writes
+       * through the raw driver, and a raw insert runs no mongoose hooks at
+       * all, so the field was simply never written for a captain or QR order.
+       *
+       * Computed the same way the hook does (the sum of the quantities, not
+       * the number of lines), so a sale taken at a table and one taken at the
+       * counter count the same way in the same list.
+       */
+      const numberOfItems = saleItems.reduce((sum, line) => sum + (Number(line.quantity) || 0), 0);
+
+      /*
+       * Did anybody say who this is for?
+       *
+       * A customer on the storefront types a number, and a delivery carries a
+       * name and an address. A waiter at a table has neither, and the handset
+       * used to invent a number so the field was not empty - which printed on
+       * a bill and sits in the phone column of every report.
+       *
+       * A number that cannot be dialled is nobody's: a placeholder is written
+       * as one repeated digit, and no real subscriber number is under 7 digits
+       * or over 15. Judged here the same way the printed bill judges it, so a
+       * sale and its receipt cannot disagree about whether a guest is known.
+       */
+      const saidPhone = isDialable(customerMobile);
+      const saidName = String(customer_name || '').trim().length > 0;
+      const anonymous = !saidPhone && !saidName;
+      const walkIn = anonymous ? await this._walkInCustomer(db, branchDoc) : { id: null, name: '' };
+
+      const salesCollection = db.collection('sales');
+      const clientRecord = this._clientFacts(client);
+      /*
+       * The estimate, from what this shop has actually told us: the slowest
+       * dish on this order, plus what the queue was adding when it arrived.
+       *
+       * Non-fatal on purpose, like every other read in this method that is
+       * not the order itself. An order that saves without an estimate is an
+       * order; one that fails to save because a count timed out is a customer
+       * standing in a hotel room with no dinner.
+       */
+      let readyMinutes = 0;
+      try {
+        let queueMinutes = 0;
+        if (branchDoc.table_options === true) {
+          const tableCount = await (
+            await this.getCollection('tableorder')
+          ).countDocuments(
+            branchDoc.license
+              ? { branch_id: branchObjectId, license: branchDoc.license }
+              : { branch_id: branchObjectId }
+          );
+          const openFilter = {
+            sale_process: { $regex: 'KOT', $options: 'i' },
+            payment_status: 'Unpaid',
+            bill_printed_at: { $in: [null, undefined] },
+            branch_id: branchObjectId,
+          };
+          if (branchDoc.license) openFilter.license = branchDoc.license;
+          queueMinutes = kitchenLoad({
+            tableService: true,
+            open: await salesCollection.countDocuments(openFilter),
+            capacity: tableCount,
+            round: typicalRound(saleItems.map((line) => line.prep_minutes)),
+          }).extra_minutes;
+        }
+        readyMinutes = readyBy.cookingMinutes({ lines: saleItems, queueMinutes });
+      } catch (e) {
+        console.warn('[online order] could not estimate the wait:', e.message);
+      }
+
+      const saleDocument = {
+        /* What makes a resend safe. Absent on orders taken before this
+           shipped, which is why the lookup above is skipped without one. */
+        ...(idempotencyKey ? { idempotency_key: String(idempotencyKey) } : {}),
+        branch: branchObjectId,
+        branch_id: branchObjectId,
+        branch_name: branchName,
+        license: branchDoc.license || BaseModel.license,
+        sales_id: salesId,
+        sale_process: 'KOT',
+        /*
+         * A KOT IS NOT PAID. It is a ticket for a kitchen.
+         *
+         * Owner: "Until customer pays it will not become paid. First captain
+         * orders, it goes to print to kitchen and service department. Once
+         * service complete reception will take bill print. Even that time bill
+         * is not paid. After giving to customer, customer pays with cash or
+         * preferred method in his table. After paid now user able to take the
+         * bill."
+         *
+         * What was here wrote the CALLER'S PAYMENT METHOD into the status
+         * field and defaulted the rest to "Paid". The captain app sends
+         * `payment_status: "cash"` and the QR page sends "Upi" - both of them
+         * methods - so every table order has been stored with a payment_status
+         * of "cash" or "Upi" for the whole life of the feature.
+         *
+         * Two things fell out of that, and both were reported together:
+         *
+         *   The table never appeared on the handset's home screen.
+         *   getTablesWithActiveOrders looks for payment_status 'Unpaid', and
+         *   "cash" is not that, so a waiter took an order and the floor showed
+         *   nothing. It has never worked for a captain order.
+         *
+         *   And the sale read as settled the moment it was taken, so a bill
+         *   could be closed before anybody had handed over money.
+         *
+         * So the value is read as what it is - a method - and the status is
+         * Unpaid unless the caller explicitly says otherwise. A genuinely
+         * prepaid order sends 'paid' or 'completed' and still lands as Paid.
+         */
+        payment_status: paidUpFront ? 'Paid' : 'Unpaid',
+        payment_mode: paymentMethod,
+        /* The hook that normally writes this does not run on a raw insert. */
+        number_of_items: numberOfItems,
+        /*
+         * The customer's own device, through the shop's own storefront.
+         *
+         * `order` carries what the page asked for - dine in, takeaway - and
+         * that is the FULFILMENT, not the channel: a QR code at a table and
+         * the same page from somebody's sofa are one channel with two
+         * answers to "how does this reach them". `sale_method` is still
+         * written, in step, by describeSale.
+         */
+        /*
+         * WHOSE DEVICE THIS WAS, and it is not always the customer's.
+         *
+         * This said ONLINE for every order that came through here, and two
+         * different devices come through here: a customer's own phone on the
+         * shop's storefront, and a waiter's captain handset. So a waiter's
+         * order was recorded as a customer's, and once the source started
+         * printing on the paper it said so out loud - the owner sent back a
+         * kitchen ticket reading "From: Customer phone" for an order he had
+         * just placed on the handset himself.
+         *
+         * It was invisible until then, which is the point worth keeping: the
+         * field was wrong for as long as it existed and nothing showed it.
+         * Reports by channel, every one of them, were wrong in the same way.
+         *
+         * The route knows. /sales/qrOrder is behind protectOrKioskKey, so a
+         * signed-in user there is staff on a handset; the customer storefront
+         * is anonymous. Read from the request, never from the body.
+         */
+        ...salesChannels.describeSale({
+          channel: staffOrder ? salesChannels.CHANNEL.TABLESIDE : salesChannels.CHANNEL.ONLINE,
+          fulfilment,
+          sale_method,
+        }),
+        dine_type: dine_type || 'Dine-in',
+        /* The service point, in the words the kitchen and the driver read.
+           A hotel room says the hotel and the room; the shop's own table says
+           the table, exactly as it always did. */
+        table_number: servicePoint.label || kiosk_table_no || '',
+        table_id: kiosk_table_id || '',
+        venue: deliverTo,
+        venue_commission: venueCommission,
+        delivery_fee: deliveryFee,
+        person_count: person_count || 0,
+        items: saleItems,
+        subtotal,
+        total: finalTotal,
+        sales_total: finalTotal,
+        sales_sub_total: subtotal,
+        tax: totalTax,
+        discount: round(itemDiscountTotal + discountAmt + couponDiscount),
+        extra_discount: discountAmt,
+        /*
+         * What the coupon took off, and which coupon. Stored rather than
+         * recomputed: the offer can be edited or withdrawn tomorrow, and a
+         * bill has to keep saying what this customer was actually charged.
+         */
+        coupon_code: couponUsed ? String(couponUsed.code || '') : '',
+        coupon_id: couponUsed ? couponUsed.couponId : null,
+        coupon_discount: couponDiscount,
+        extra_discount_type: 'price',
+        discount_description: kiosk_discount_description || '',
+        customer_phone: customerMobile || '',
+        /* For a delivery: who, and where. */
+        customer_name: String(customer_name || '')
+          .trim()
+          .slice(0, 80),
+        customer_address: String(customer_address || '')
+          .trim()
+          .slice(0, 300),
+        /*
+         * WHO THIS IS FOR, when nobody said.
+         *
+         * AFTER the three lines above on purpose: a later key wins in an
+         * object literal, and this must be able to replace the blank name they
+         * write. A guest who gave a name or a number keeps it - `anonymous` is
+         * false and nothing here applies.
+         */
+        ...(anonymous
+          ? { customer_id: walkIn.id, customer_name: walkIn.name, customer_phone: '' }
+          : {}),
+        /* "null" is what a page stores when it stores nothing, and it was
+           reaching tickets as a note. */
+        notes: note && String(note) !== 'null' ? String(note).trim().slice(0, 300) : '',
+        order: order || '',
+        date: now,
+        created_date: now,
+        updated_date: now,
+        transaction_id: transactionId || '',
+        token_id: tokenId,
+        /* The device this came from; see the note beside `client` above.
+           Worked out once: calling twice would stamp two different times. */
+        ...(clientRecord ? { client: clientRecord } : {}),
+        // Initial change log entry for KOT printing
+        changes: changesItems.length ? [{ timestamp: now, items: changesItems }] : [],
+        /*
+         * HOW LONG THE KITCHEN SHOULD TAKE, worked out once and kept.
+         *
+         * A customer places an order, gets a token and hears nothing; on every
+         * food app they have used, the next thing they see is a time. Nothing
+         * here knows when food is actually FINISHED - no cook marks a ticket
+         * done - so this is an estimate from the shop's own numbers and is
+         * offered as one: the slowest dish on the order, plus whatever the
+         * queue was when it arrived.
+         *
+         * Frozen at this moment rather than recomputed on every refresh: a
+         * promise that moves while somebody watches it is worse than one that
+         * is a little wrong. 0 means the shop has stated no prep times and the
+         * page says nothing at all. See utils/ready-by.js.
+         */
+        ready_minutes: readyMinutes,
+      };
+
+      /* A number taken a moment ago is taken again, not handed to the
+         customer as a database error. */
+      let insertResult;
+      try {
+        insertResult = await this.insertSaleWithFreshNumber(
+          salesCollection,
+          saleDocument,
+          branchObjectId
+        );
+      } catch (error) {
+        /*
+         * TWO TAPS AT THE SAME INSTANT.
+         *
+         * The lookup above is a read followed by a write, so two copies of one
+         * order can both read "nothing there" and both insert. That is not
+         * theory: a waiter double-tapped Send on table 5 and the floor came
+         * back showing the table twice, with cancelling one cancelling both.
+         *
+         * The unique index is what actually decides it. Whichever insert lands
+         * second is refused by the database, and rather than surfacing that as
+         * a failure to the handset - which would make the waiter send a third
+         * time - the order the winner wrote is handed back as though this
+         * request had created it. Same answer, one order.
+         */
+        if (idempotencyKey && this.isDuplicateIdempotencyError(error)) {
+          const winner = await salesCollection.findOne({
+            idempotency_key: String(idempotencyKey),
+            ...(BaseModel.license ? { license: BaseModel.license } : {}),
+          });
+          if (winner) return this._duplicateOrderAnswer(winner);
+        }
+        throw error;
+      }
+      salesId = saleDocument.sales_id;
+
+      const insertedId = insertResult.insertedId.toString();
+
+      /*
+       * THE REDEMPTION IS RECORDED AFTER THE ORDER EXISTS, never before.
+       *
+       * A coupon with a usage limit is a promise to everybody who has not used
+       * it yet. Counting it against an order that then failed to save would
+       * spend somebody else's turn on nothing, and the count is the only thing
+       * standing between "first fifty customers" and the fifty-first.
+       *
+       * `apply` is idempotent per sale, so a retry cannot count one twice, and
+       * a failure here is deliberately not fatal: the customer's order is
+       * placed and the shop's own record of the redemption is worth less than
+       * the order. It is logged so a shop can find it.
+       */
+      if (couponUsed && couponDiscount > 0) {
+        try {
+          await coupons.apply(couponUsed.code, {
+            saleId: insertedId,
+            billTotal: foodTotal,
+            discount: couponDiscount,
+            reference: salesId,
+          });
+        } catch (e) {
+          console.warn('[online order] the coupon was given but not recorded:', e.message);
+        }
+      }
+
+      /*
+       * The kitchen is told only if this shop lets orders through on their own.
+       *
+       * The order is SAVED either way. Approval gates the ticket, not the
+       * record: refusing to save would lose a customer's order on a network
+       * they cannot see and cannot retry into, where holding it means the worst
+       * case is a wait and a queue somebody can act on.
+       *
+       * A ticket printed is food started and food started is money spent, which
+       * is why a shop taking orders from a hotel across the road wants to look
+       * first - is the kitchen still open, is that dish really on, is this a
+       * prank at 2am.
+       */
+      const arrival = orderApproval.decideOnArrival(approvalSetting);
+
+      await salesCollection.updateOne(
+        { _id: insertResult.insertedId },
+        { $set: { order_state: arrival.state, order_state_at: new Date() } }
+      );
+
+      if (arrival.printKitchenTicket) {
+        /* The printer is in this process. Tell it now rather than letting it
+           find this ticket on its next poll - a kitchen ticket that arrives
+           after the customer does is the whole reason this is event driven. */
+        notifyKotReady({ branchId: String(branchObjectId), saleId: insertedId, reason: 'created' });
+      }
+
+      /*
+       * And make a noise, either way.
+       *
+       * Auto-approved is a short chime: the ticket is already printing, so this
+       * only has to tell whoever is at the till that it happened. Waiting is an
+       * alarm, because nobody is watching a screen they have no reason to be
+       * watching - the owner's words were "looking at another page, or watching
+       * a movie".
+       */
+      notifyOrderAttention({
+        branchId: String(branchObjectId),
+        saleId: insertedId,
+        alert: arrival.alert,
+        state: arrival.state,
+        total: finalTotal,
+      });
+
+      return {
+        status: true,
+        message: 'Order placed successfully',
+        data: {
+          tokenId,
+          sale_id: insertedId,
+          /* How it travels and where, so the receipt can say which table and
+             name the fee for the way chosen (delivery_fee is already here). */
+          fulfilment,
+          table_number: servicePoint.label || kiosk_table_no || table || '',
+          sales_id: salesId,
+          branch_name: branchName,
+          items: saleItems,
+          subtotal,
+          discount: round(itemDiscountTotal + discountAmt),
+          tax: totalTax,
+          delivery_fee: deliveryFee,
+          total: finalTotal,
+          /* Echoed back so the confirmation screen can say "we will bring it
+             to Royal Club Hotel, Room 123" rather than repeating what the
+             customer typed and hoping it was recorded. */
+          deliver_to: deliverTo,
+          /* What was actually written, not what was asked for. The receipt
+             screen said "Paid" on an order nobody had paid for. */
+          payment_status: paidUpFront ? 'Paid' : 'Unpaid',
+          payment_mode: paymentMethod,
+        },
+      };
+    } catch (error) {
+      console.error('Error in createOnlineOrder:', error);
+      return { status: false, message: error.message, data: null };
+    }
+  }
+
+  /**
+   * What this shop owes its venues and its aggregators, over a date range.
+   *
+   * THE REPORT THAT MAKES A TIE-UP POSSIBLE.
+   *
+   * A restaurant with nine tables agrees a deal with the hotel across the road
+   * and, at the end of the month, somebody has to work out what is owed. Doing
+   * that from a sales list is an evening of arithmetic and a disagreement; the
+   * hotel has its own number, and neither side can check the other's.
+   *
+   * Grouped by venue AND by partner, because a shop can owe both on the same
+   * day: a hotel takes a cut of the orders from its rooms, an aggregator takes
+   * a cut of the ones from its app, and they are unrelated deals.
+   *
+   * READS THE STORED COMMISSION, never recomputes it. The rate was agreed when
+   * the order was placed; a hotel that renegotiates in March must not restate
+   * what it was owed in February, and a report that recalculates would do
+   * exactly that, silently, with no way to notice.
+   */
+  async commissionReport(value = {}) {
+    try {
+      const baseModel = new BaseModel('sales');
+      const { FromDate, ToDate } = formatDate(
+        value.starting_date,
+        value.ending_date,
+        BaseModel.currentTimeZone || 'Asia/Kolkata'
+      );
+
+      const branchIds = [];
+      if (Array.isArray(value.branchid)) {
+        value.branchid.forEach((id) => {
+          if (id && mongoose.Types.ObjectId.isValid(String(id))) {
+            branchIds.push(new mongoose.Types.ObjectId(String(id)));
+          }
+        });
+      }
+
+      const range = {
+        sale_process: { $in: ['Add', 'Edit', 'PartialReturn'] },
+        date: { $gte: new Date(FromDate), $lte: new Date(ToDate) },
+        license: BaseModel.license,
+      };
+      if (branchIds.length) range.branch_id = { $in: branchIds };
+
+      const collection = await baseModel.getCollection('sales');
+
+      /* One row per venue: what its guests spent, and what the shop owes. */
+      const venues = await collection
+        .aggregate([
+          { $match: { ...range, 'venue.venue_code': { $exists: true, $ne: '' } } },
+          {
+            $group: {
+              _id: '$venue.venue_code',
+              name: { $first: '$venue.venue_name' },
+              orders: { $sum: 1 },
+              sales: { $sum: { $toDouble: { $ifNull: ['$total', 0] } } },
+              commission: { $sum: { $toDouble: { $ifNull: ['$venue_commission', 0] } } },
+            },
+          },
+          { $sort: { commission: -1 } },
+        ])
+        .toArray();
+
+      /* And one per aggregator, from the commission the sale recorded when it
+         was made. */
+      const partners = await collection
+        .aggregate([
+          { $match: { ...range, channel_partner: { $nin: [null, ''] } } },
+          {
+            $group: {
+              _id: '$channel_partner',
+              orders: { $sum: 1 },
+              sales: { $sum: { $toDouble: { $ifNull: ['$total', 0] } } },
+              commission: { $sum: { $toDouble: { $ifNull: ['$channel_commission', 0] } } },
+            },
+          },
+          { $sort: { commission: -1 } },
+        ])
+        .toArray();
+
+      const money = (n) => Math.round((Number(n) || 0) * 100) / 100;
+      const shape = (rows, kind) =>
+        rows.map((row) => ({
+          kind,
+          code: String(row._id || ''),
+          name: row.name || String(row._id || ''),
+          orders: Number(row.orders) || 0,
+          sales: money(row.sales),
+          commission: money(row.commission),
+          /* What the shop actually keeps. The number the report exists for:
+             a month that looks like 90,000 of sales through partners is
+             67,500 once their cut is out, and a shop planning on the first
+             figure is planning on money it never had. */
+          net: money((Number(row.sales) || 0) - (Number(row.commission) || 0)),
+        }));
+
+      const rows = [...shape(venues, 'venue'), ...shape(partners, 'partner')];
+
+      return {
+        status: true,
+        message: 'OK',
+        data: {
+          rows,
+          totals: {
+            orders: rows.reduce((sum, r) => sum + r.orders, 0),
+            sales: money(rows.reduce((sum, r) => sum + r.sales, 0)),
+            commission: money(rows.reduce((sum, r) => sum + r.commission, 0)),
+            net: money(rows.reduce((sum, r) => sum + r.net, 0)),
+          },
+        },
+      };
+    } catch (error) {
+      console.error('Error in commissionReport:', error);
+      return { status: false, message: error.message, data: null };
+    }
+  }
+
+  /*
+   * A TABLE ASKING SOMEBODY TO COME OVER.
+   *
+   * Owner: "example he is in table 7 and wants to call waiter or captain...
+   * coz everytime its annoying people see waiters to turn back."
+   *
+   * Its own collection rather than a field on a sale, because a call is not
+   * about an order. A table calls before it has ordered, after it has eaten,
+   * and on an evening when it orders nothing at all - and hanging it off a
+   * sale would mean the one case that matters most, a table nobody has
+   * reached yet, has nothing to hang it on.
+   *
+   * ONE OPEN CALL PER TABLE. A customer who taps three times has asked once
+   * and doubted the button; three cards would be three jobs nobody needs.
+   * Answering the second tap with the first call is the honest reply, and it
+   * is also what they wanted to know: yes, it went.
+   */
+  async callTheWaiter({ branch, table, client } = {}) {
+    const wanted = waiterCall.tableOf(table);
+    if (!wanted) return { status: false, message: 'no_table', data: null };
+
+    const db = await BaseModel.getDb();
+
+    /*
+     * The store ADDRESS from the path, resolved the same way an order from
+     * the same page is. Never a branch id from the body: a caller naming one
+     * shop in the URL and another in the payload leaves two readers to
+     * disagree about which one they meant.
+     */
+    const selector = ObjectId.isValid(String(branch))
+      ? { $or: [{ _id: new ObjectId(String(branch)) }, { 'online_ordering.store_id': branch }] }
+      : { 'online_ordering.store_id': branch };
+    if (BaseModel.license) selector.license = BaseModel.license;
+    const branchDoc = await db.collection('branches').findOne(selector);
+    if (!branchDoc) return { status: false, message: 'not_found', data: null };
+
+    /*
+     * Only where a shop actually runs table service. A takeaway counter has
+     * no waiters walking a floor, and a call there would sit in a queue
+     * nobody is looking at for a person who is not coming.
+     */
+    if (branchDoc.table_options !== true) {
+      return { status: false, message: 'no_table_service', data: null };
+    }
+
+    const calls = db.collection('waitercalls');
+    const branchObjectId = branchDoc._id;
+    const branchId = branchDoc._id;
+
+    const standing = await calls
+      .find({ branch_id: branchObjectId, seen_at: { $in: [null, undefined] } })
+      .limit(50)
+      .toArray();
+    if (waiterCall.alreadyCalling(standing, wanted)) {
+      return { status: true, message: 'already_calling', data: { table: wanted, again: true } };
+    }
+
+    const at = new Date();
+    const record = {
+      branch_id: branchObjectId,
+      table_number: wanted,
+      called_at: at,
+      seen_at: null,
+      /*
+       * THE ROW MUST CARRY ITS DATE OR IT NEVER LEAVES THIS DATABASE.
+       *
+       * This is a native insert, so nothing stamps it. The sync agent finds
+       * work with { updated_date: { $exists: true } } and the gateway sends
+       * a till only rows whose updated_date moved. A call written without one
+       * sits in the cloud for ever, and the person at the table keeps
+       * waving. Same trap as the settings save (#838).
+       */
+      created_date: at,
+      updated_date: at,
+      /* What the device was, for a shop wondering later where a run of calls
+         came from. Never anything that identifies the person. */
+      client: client && typeof client === 'object' ? client : null,
+    };
+    if (BaseModel.license) record.license = BaseModel.license;
+    const written = await calls.insertOne(record);
+
+    /*
+     * The same alarm an order waiting for approval raises. A call is exactly
+     * that kind of thing: nobody is watching a screen they have no reason to
+     * watch, and a person is sitting at a table waiting.
+     */
+    notifyOrderAttention({
+      branchId: String(branchId || ''),
+      saleId: String(written.insertedId),
+      alert: 'waiting',
+    });
+
+    return { status: true, message: 'Calling', data: { table: wanted, again: false } };
+  }
+
+  /** The calls still wanting somebody, oldest first. See utils/waiter-call.js. */
+  async openWaiterCalls({ branchId } = {}) {
+    try {
+      const db = await BaseModel.getDb();
+      const filter = { seen_at: { $in: [null, undefined] } };
+      /*
+       * A branch when the caller has one - the queue always does. The till
+       * asking on its own behalf after a sync pull has none and wants every
+       * branch this installation serves; `{ branch_id: undefined }` would have
+       * matched nothing and rung for nobody.
+       */
+      if (branchId !== undefined && branchId !== null && String(branchId) !== '') {
+        filter.branch_id = ObjectId.isValid(String(branchId))
+          ? new ObjectId(String(branchId))
+          : branchId;
+      }
+      if (BaseModel.license) filter.license = BaseModel.license;
+
+      const rows = await db
+        .collection('waitercalls')
+        .find(filter)
+        .sort({ called_at: 1 })
+        .limit(50)
+        .toArray();
+
+      /* The window is applied HERE rather than in the query so one rule about
+         what "open" means lives in one file, and a stale row still gets
+         cleared by the next acknowledgement rather than lingering invisibly. */
+      const open = rows.filter((row) => waiterCall.stillOpen(row));
+
+      /*
+       * AND ONE THAT AGED OUT STOPS THE ALARM TOO.
+       *
+       * A call raises the repeating alarm, and that alarm runs until something
+       * says the thing was dealt with. A call nobody ever answered drops out
+       * of the window at twenty minutes and stops being drawn on every screen
+       * - so without this the till goes on escalating about something no
+       * screen can show and nobody can answer. An alarm that cannot be
+       * answered is exactly the kind that teaches people to ignore alarms.
+       *
+       * Said from here because this is what the till and the handset both
+       * poll, so the silence arrives wherever somebody is actually watching.
+       */
+      rows
+        .filter((row) => !waiterCall.stillOpen(row))
+        .forEach((row) => {
+          notifyOrderResolved({
+            branchId: String(branchId || ''),
+            saleId: String(row._id),
+            state: 'unanswered',
+          });
+        });
+
+      return open.map((row) => ({
+        call_id: String(row._id),
+        branch_id: String(row.branch_id || ''),
+        table_number: String(row.table_number || ''),
+        called_at: row.called_at || null,
+      }));
+    } catch (e) {
+      /* A queue that cannot be read must not take the orders down with it. */
+      console.warn('[waiter calls] could not be read:', e.message);
+      return [];
+    }
+  }
+
+  /**
+   * Somebody is going.
+   *
+   * There is nothing to refuse here - a table wants a person, and the only
+   * answer is that one is coming - so this marks it seen rather than asking
+   * for a decision. Same shape as acknowledging an order the customer already
+   * cancelled: one button, and it says what it does.
+   */
+  async seeWaiterCall({ branchId, callId } = {}) {
+    if (!ObjectId.isValid(String(callId))) {
+      return { status: false, message: 'not_found', data: null };
+    }
+    const db = await BaseModel.getDb();
+    const filter = { _id: new ObjectId(String(callId)) };
+    if (ObjectId.isValid(String(branchId))) filter.branch_id = new ObjectId(String(branchId));
+    if (BaseModel.license) filter.license = BaseModel.license;
+
+    const done = await db.collection('waitercalls').updateOne(filter, {
+      /* updated_date moves too, or the cloud never learns the call was
+         answered and the ordering page keeps saying "already calling". */
+      $set: {
+        seen_at: new Date(),
+        seen_by: BaseModel.loggedUserName || '',
+        updated_date: new Date(),
+      },
+    });
+    if (!done.matchedCount) return { status: false, message: 'not_found', data: null };
+
+    /*
+     * AND THE ALARM STOPS.
+     *
+     * A call raises the same repeating alarm an order waiting for approval
+     * raises, and until now NOTHING could ever stop it: the only thing that
+     * announced a resolution was the sweeper that decides unanswered orders,
+     * and a call does not live in the sales collection. So a table called
+     * once and the desktop till escalated about it for the rest of the day,
+     * long after the waiter had walked over.
+     *
+     * Said from the server rather than from the page that pressed the button,
+     * because the person who answers is usually holding the handset and the
+     * till making the noise never hears from it.
+     */
+    notifyOrderResolved({
+      branchId: String(branchId || ''),
+      saleId: String(callId),
+      state: 'seen',
+    });
+
+    return { status: true, message: 'On the way', data: { call_id: String(callId) } };
+  }
+
+  /**
+   * Orders waiting for somebody to say yes.
+   *
+   * The queue behind the alarm. A shop in manual mode holds every incoming
+   * online order until a person accepts it, and this is the only place those
+   * orders are visible - the kitchen has not been told, so a ticket never
+   * printed and the sales list is not where anybody would look.
+   *
+   * Newest LAST, deliberately. A queue is worked from the top, and the person
+   * who has been waiting longest should be served first.
+   */
+  async pendingOnlineOrders({ branchId } = {}) {
+    try {
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      /*
+       * Three things need somebody: an order waiting to be accepted, one
+       * whose customer has asked to call it off after the window closed, and
+       * one whose customer has asked for it to be CHANGED after it closed.
+       * They belong in the same queue because they are the same job - a
+       * person deciding - and a second screen is a screen nobody opens.
+       */
+      const filter = {
+        $or: [
+          { order_state: orderApproval.ORDER_STATE.PENDING },
+          { cancel_requested: true, sale_process: 'KOT' },
+          { 'change_requested.at': { $exists: true }, sale_process: 'KOT' },
+          /*
+           * AND ONE THE CUSTOMER HAS ALREADY CALLED OFF, until somebody has
+           * seen it. Nothing here waits on a decision - it is cancelled - but
+           * a ticket printed and a kitchen may be working on it, so the shop
+           * has to be told rather than left to notice. Cleared by
+           * acknowledging it.
+           */
+          { cancel_seen: false, customer_cancelled_at: { $exists: true } },
+        ],
+        ...activeTenantFilter(),
+      };
+      const branch = branchId || BaseModel.currentBranch;
+      if (branch && ObjectId.isValid(String(branch))) {
+        filter.branch_id = new ObjectId(String(branch));
+      }
+
+      const rows = await salesCollection
+        .find(filter, {
+          projection: {
+            _id: 1,
+            sales_id: 1,
+            token_id: 1,
+            table_number: 1,
+            venue: 1,
+            items: 1,
+            total: 1,
+            delivery_fee: 1,
+            notes: 1,
+            customer_phone: 1,
+            /* Who a delivery goes to and where, and how many at the table. */
+            customer_name: 1,
+            customer_address: 1,
+            person_count: 1,
+            fulfilment: 1,
+            created_date: 1,
+            order_state_at: 1,
+            cancel_requested: 1,
+            cancel_requested_at: 1,
+            change_requested: 1,
+            /* Already off, and not yet seen by anybody here. */
+            customer_cancelled_at: 1,
+            cancel_seen: 1,
+            sale_process: 1,
+          },
+        })
+        .sort({ created_date: 1 })
+        .limit(100)
+        .toArray();
+
+      /*
+       * The calls ride along in their own key rather than mixed into `data`.
+       *
+       * A staff screen that has not been taught the word yet reads `data` and
+       * is unaffected; one that has reads `calls`. Merging them into the order
+       * list would have an older handset draw a table's call as a NEW ORDER,
+       * with an accept button that means nothing - a regression shipped to a
+       * client by a change on the server, which is the worst kind.
+       */
+      const calls = await this.openWaiterCalls({ branchId: branch });
+
+      return {
+        status: true,
+        message: 'OK',
+        calls,
+        data: rows.map((row) => ({
+          sale_id: String(row._id),
+          sales_id: row.sales_id || '',
+          token_id: row.token_id || '',
+          /* The customer has asked for this one to be called off; the shop
+             decides, with the same two buttons. */
+          cancel_requested: row.cancel_requested === true,
+          cancel_requested_at: row.cancel_requested_at || null,
+          /* What the customer has asked to have changed, in dish names and
+             quantities, so the person deciding can read it at a glance. */
+          change_requested:
+            row.change_requested && Array.isArray(row.change_requested.items)
+              ? { items: row.change_requested.items, at: row.change_requested.at || null }
+              : null,
+          /* Where it is going, in the words a person reads: a table number, or
+             the hotel and the room. */
+          destination: (row.venue && row.venue.label) || row.table_number || '',
+          venue_name: (row.venue && row.venue.venue_name) || '',
+          delivery_note: (row.venue && row.venue.delivery_note) || '',
+          fulfilment: row.fulfilment || '',
+          items: (row.items || []).map((item) => ({
+            name: item.item_name || item.name || '',
+            quantity: Number(item.item_quantity || item.quantity || 0),
+            /* "Less spicy": what the customer typed for this line. It was
+               on the sale and printed on the ticket, and never shown to the
+               person deciding whether to accept the order. */
+            note: item.item_description || '',
+            /*
+             * And how hot they asked for it, for the same reason. This is the
+             * screen where an order is refused, and "we cannot make that one
+             * mild" is a reason to refuse it - which nobody can act on if the
+             * request is only visible on the paper in the kitchen.
+             */
+            spice: spiceLevel.levelOf(item.spice_level),
+          })),
+          total: Number(row.total) || 0,
+          delivery_fee: Number(row.delivery_fee) || 0,
+          note: row.notes || '',
+          /*
+           * A NUMBER NOBODY CAN RING IS NOT INFORMATION.
+           *
+           * Owner's screenshot of this queue: a row reading "+91null". The
+           * customer pages cannot write that any more - the read that built
+           * it now refuses the word - but orders taken before that fix still
+           * carry it, and a device we do not control could send one tomorrow.
+           *
+           * The bill already answers this, and answers it the right way:
+           * isDialable asks "could this be dialled" rather than "is this
+           * Indian", so it is right for Puducherry and for anywhere else.
+           * The queue was simply not asking. Printing a number nobody can
+           * ring is worse than printing nothing, because it looks like
+           * information - and on this screen somebody may try to ring it.
+           */
+          customer_phone: isDialable(row.customer_phone) ? String(row.customer_phone) : '',
+          customer_name: row.customer_name || '',
+          customer_address: row.customer_address || '',
+          person_count: Number(row.person_count) || 0,
+          placed_at: row.created_date || row.order_state_at || null,
+        })),
+      };
+    } catch (error) {
+      console.error('Error in pendingOnlineOrders:', error);
+      return { status: false, message: error.message, data: [] };
+    }
+  }
+
+  /**
+   * Accepting or turning away an order that was held.
+   *
+   * The kitchen is told exactly once, on the move from pending to accepted.
+   * utils/order-approval decides whether the move is legal and whether it
+   * prints, so a double-tap on a slow screen cannot produce two tickets - and
+   * two tickets for one order is two lots of food.
+   */
+  async decideOnOrder({ saleId, decision, reason, by } = {}) {
+    try {
+      if (!saleId || !ObjectId.isValid(String(saleId))) {
+        return { status: false, message: 'Enter must correct order id', data: null };
+      }
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+      const _id = new ObjectId(String(saleId));
+      /* The tenant is server context, not a query supplied by the customer.
+         Keep it literal when this raw Mongo collection is used so an object
+         can never turn into an operator. */
+      const tenantFilter = {
+        ...(BaseModel.license ? { license: { $eq: BaseModel.license } } : {}),
+        ...(BaseModel.currentBranch ? { branch_id: { $eq: BaseModel.currentBranch } } : {}),
+      };
+
+      const sale = await salesCollection.findOne(
+        { _id: { $eq: _id }, ...tenantFilter },
+        {
+          projection: {
+            order_state: 1,
+            branch_id: 1,
+            /* Enough to cancel it here, where the customer has asked for
+               that: the lines go to the kitchen as cancellations. */
+            cancel_requested: 1,
+            /* And enough to APPLY what they asked to have changed, which is
+               the same job through changeCustomerOrderItems. */
+            change_requested: 1,
+            /*
+             * AND ENOUGH TO SEE THAT IT IS ALREADY OFF.
+             *
+             * These two are read a few lines below to answer "the customer
+             * already cancelled this, so either button just means seen". They
+             * were not projected, so that branch could never fire: the read
+             * came back without the fields, `undefined === false` is false,
+             * and an order the customer had called off fell through to the
+             * approval state machine instead. If its state was already
+             * accepted the machine said "no change", reported success, and
+             * left the row exactly where it was - so the order sat in the
+             * queue and NEITHER BUTTON COULD SHIFT IT. Owner: "online order
+             * even i accept it not working."
+             */
+            cancel_seen: 1,
+            customer_cancelled_at: 1,
+            sale_process: 1,
+            payment_status: 1,
+            delivery_fee: 1,
+            venue: 1,
+            venue_commission: 1,
+            created_date: 1,
+            date: 1,
+            license: 1,
+            items: 1,
+            changes: 1,
+            token_id: 1,
+            total: 1,
+          },
+        }
+      );
+      if (!sale) {
+        return { status: false, message: 'Order not found', data: null };
+      }
+
+      /*
+       * AN ORDER THE CUSTOMER ALREADY CALLED OFF: SEEN, NOT DECIDED.
+       *
+       * It is cancelled. Nothing here is waiting on a yes or a no, and
+       * pretending otherwise would put two meaningless buttons in front of
+       * somebody in a hurry. It sits in the queue only so a person learns
+       * that a ticket they may be cooking has been pulled; either button
+       * means "I have seen this", and it leaves.
+       */
+      if (sale.cancel_seen === false && sale.customer_cancelled_at) {
+        await salesCollection.updateOne(
+          { _id: { $eq: _id }, ...tenantFilter },
+          { $set: { cancel_seen: true, cancel_seen_at: new Date() } }
+        );
+        return {
+          status: true,
+          message: 'Order was cancelled by the customer',
+          data: { sale_id: String(saleId), seen: true, cancelled: true },
+        };
+      }
+
+      /*
+       * THE CUSTOMER ASKED FOR THIS ONE TO BE CALLED OFF.
+       *
+       * Answered here rather than through the approval states, because those
+       * are about whether the kitchen may start and this is about whether
+       * the order lives. An order somebody asks to cancel is usually one the
+       * shop already accepted, so a transition has nothing to say about it.
+       * Either answer ends the request, so the queue does not keep asking.
+       */
+      /*
+       * THE CUSTOMER ASKED FOR THIS ONE TO BE CHANGED.
+       *
+       * Same shape as the cancellation above and for the same reason: the
+       * approval states are about whether the kitchen may start, and this is
+       * about what it should cook. Answered first, because an order can carry
+       * a change request and a cancellation at once and the cancellation is
+       * the bigger decision - a shop that says "cancel" has answered both.
+       *
+       * ACCEPTING RUNS IT THROUGH THE ORDINARY DOOR. changeCustomerOrderItems
+       * is what the customer's own plus and minus use inside the window: it
+       * prices new lines the way the order was priced, refuses a dish that is
+       * off the menu or out of its hours, writes the kitchen's amendment
+       * ticket, and turns an order stripped to nothing into a cancellation.
+       * None of that should have a second implementation just because a
+       * person pressed the button instead of a phone.
+       */
+      /*
+       * THE SCREEN AND THIS FUNCTION MUST AGREE ON WHAT A CHANGE REQUEST IS.
+       *
+       * The queue puts an order here on `change_requested.at`. The screen
+       * decides which buttons to draw on `change_requested.items.length`, and
+       * a request with an empty list therefore reads as an ordinary new order
+       * - so the button sends `accepted`, which is a word this branch did not
+       * answer to. It fell through to the state machine, the request was
+       * never cleared, and the order stayed in the queue no matter how many
+       * times anybody pressed Accept.
+       *
+       * So `accepted` and `rejected` are answered here too. A person pressing
+       * the only button on the card has decided; which word the screen
+       * happened to send is not something the shop should have to know.
+       */
+      /*
+       * AN EMPTY REQUEST IS NOT A REQUEST TO EMPTY THE ORDER.
+       *
+       * changeCustomerOrderItems takes ABSOLUTE quantities, so handing it an
+       * empty list means "the order is now nothing", which it correctly turns
+       * into a cancellation. That is right when a customer really did remove
+       * every line. It is very wrong here: a request with no items in it
+       * draws as an ordinary new order - the card decides on
+       * `items.length` - so a person reading "New order" and pressing
+       * "Accept and print" would have CANCELLED it.
+       *
+       * So an empty request is answered by clearing it, and the order carries
+       * on through the approval states below, which is what the card said the
+       * button would do. Found by writing the test for the stuck queue and
+       * watching it fail on the accept, not on the clear.
+       */
+      if (
+        sale.change_requested &&
+        Array.isArray(sale.change_requested.items) &&
+        sale.change_requested.items.length === 0 &&
+        sale.cancel_requested !== true
+      ) {
+        const answeredAt = new Date();
+        await salesCollection.updateOne(
+          { _id: { $eq: _id }, ...tenantFilter },
+          {
+            $set: {
+              change_requested: null,
+              change_decided_at: answeredAt,
+              change_decided_by: BaseModel.loggedUserName || '',
+              updated_date: answeredAt,
+            },
+          }
+        );
+        /* Deliberately NOT a return: the order still has to be accepted or
+           rejected, and the state machine below is what does that. Clearing
+           the request here is only what gets it out of the queue. */
+      }
+
+      if (
+        sale.change_requested &&
+        Array.isArray(sale.change_requested.items) &&
+        sale.change_requested.items.length > 0 &&
+        sale.cancel_requested !== true &&
+        ['accept', 'accepted', 'reject', 'rejected', 'keep'].includes(decision)
+      ) {
+        const answeredAt = new Date();
+        const said = {
+          change_requested: null,
+          change_decided_at: answeredAt,
+          change_decided_by: BaseModel.loggedUserName || '',
+          updated_date: answeredAt,
+        };
+        if (decision !== 'accept' && decision !== 'accepted') {
+          await salesCollection.updateOne({ _id: { $eq: _id }, ...tenantFilter }, { $set: said });
+          return {
+            status: true,
+            message: 'The order stands',
+            data: { sale_id: String(saleId), changed: false },
+          };
+        }
+        const done = await this.changeCustomerOrderItems(
+          sale,
+          sale.change_requested.items.map((one) => ({
+            item_id: one.item_id,
+            quantity: one.quantity,
+          })),
+          /* A person at the shop is applying this. If it strips the order to
+             nothing - which is a cancellation - they have already been told. */
+          { alreadyKnown: true }
+        );
+        /* The request is answered either way. A shop that pressed accept and
+           met a refusal - the dish went off the menu while the order sat in
+           the queue - must not be asked the same question again forever. */
+        await salesCollection.updateOne({ _id: { $eq: _id }, ...tenantFilter }, { $set: said });
+        if (!done.status) return done;
+        return {
+          status: true,
+          message: 'Order updated',
+          data: { sale_id: String(saleId), changed: true, ...(done.data || {}) },
+        };
+      }
+
+      /* Same agreement as the change branch above: whichever word the screen
+         sent, a person has answered the request in front of them. */
+      if (
+        sale.cancel_requested === true &&
+        ['cancel', 'keep', 'accepted', 'rejected'].includes(decision)
+      ) {
+        const answeredAt = new Date();
+        const said = {
+          cancel_requested: false,
+          cancel_decided_at: answeredAt,
+          cancel_decided_by: BaseModel.loggedUserName || '',
+          updated_date: answeredAt,
+        };
+        /* `rejected` means "no, do not cancel it" - the order stands. The
+           screen's own wording ("Keep the order") is the truth of it. */
+        if (decision === 'keep' || decision === 'rejected') {
+          await salesCollection.updateOne({ _id: { $eq: _id }, ...tenantFilter }, { $set: said });
+          return {
+            status: true,
+            message: 'The order stands',
+            data: { sale_id: String(saleId), cancelled: false },
+          };
+        }
+        /* A person at the shop is deciding this right now, so it is not
+           something the shop needs telling about afterwards. */
+        const done = await this.cancelCustomerOrder(sale, { alreadyKnown: true });
+        await salesCollection.updateOne({ _id: { $eq: _id }, ...tenantFilter }, { $set: said });
+        if (!done.status) return done;
+        return {
+          status: true,
+          message: 'Order cancelled',
+          data: { sale_id: String(saleId), cancelled: true },
+        };
+      }
+
+      const move = orderApproval.transition(sale.order_state, decision);
+      if (!move.allowed) {
+        return {
+          status: false,
+          message: move.reason || 'That order cannot be changed',
+          data: { state: move.state },
+        };
+      }
+
+      const written = await salesCollection.updateOne(
+        { _id: { $eq: _id }, ...tenantFilter },
+        {
+          $set: {
+            order_state: move.state,
+            order_state_at: new Date(),
+            order_state_by: BaseModel.loggedUserName || '',
+            order_state_reason: String(reason || '').slice(0, 300),
+          },
+        }
+      );
+
+      if (move.printKitchenTicket) {
+        /* The printer is in this process. Telling it now rather than letting it
+           find the ticket on its next poll is the whole point of accepting an
+           order by hand: the customer is already waiting. */
+        notifyKotReady({
+          branchId: String(sale.branch_id || BaseModel.currentBranch || ''),
+          saleId: String(saleId),
+          reason: 'approved',
+        });
+      }
+
+      /*
+       * AND THE ALARM STOPS, WHEREVER THE ANSWER CAME FROM.
+       *
+       * An order arriving for approval raises the repeating, escalating alarm
+       * (see helpers/order-attention.js), and the only thing that ever
+       * silenced it from a person's decision was the Online orders PAGE
+       * telling the main process by hand. So an order accepted anywhere else
+       * left the till nagging about an order that had been dealt with:
+       *
+       *   - from the request dock, on any other screen in the till
+       *   - from the captain handset, which never talks to that main process
+       *     at all, and which is exactly what a restaurant answers orders on
+       *
+       * Said from here because this is the one door all three go through, and
+       * the alarm belongs to the order rather than to the screen that
+       * answered it.
+       *
+       * ONLY WHEN THE WRITE MATCHED. This method narrows by whatever tenant
+       * the process was last serving, and reports what it ASKED for rather
+       * than what changed - so on a mismatch it answers success while nothing
+       * moved. Announcing that would stop the alarm for an order still
+       * sitting there, which is the exact failure this whole area exists to
+       * prevent. unanswered-orders.js was reading the order back by hand to
+       * guard against it; matchedCount is the signal it was missing.
+       */
+      if (written && written.matchedCount) {
+        notifyOrderResolved({
+          branchId: String(sale.branch_id || BaseModel.currentBranch || ''),
+          saleId: String(saleId),
+          state: move.state,
+          /* A person unless somebody says otherwise. The shop's own rule says
+             otherwise, and the difference is worth keeping in a log. */
+          by: by ? String(by) : 'person',
+        });
+      }
+
+      return {
+        status: true,
+        message:
+          move.state === orderApproval.ORDER_STATE.ACCEPTED ? 'Order accepted' : 'Order rejected',
+        data: { sale_id: String(saleId), state: move.state, printed: move.printKitchenTicket },
+      };
+    } catch (error) {
+      console.error('Error in decideOnOrder:', error);
+      return { status: false, message: error.message, data: null };
+    }
+  }
+
+  /*
+   * The id of the newest sale on this branch.
+   *
+   * The multi-till poller asks for this while the sales list is open and
+   * refreshes the table when the id changes, so a sale rung up on another till
+   * appears without anyone pressing refresh.
+   *
+   * It used to call Model.getNewSaleModel(), which no model has ever defined.
+   * The route in front of it answered 403 to everyone - it sat in the no-auth
+   * block while demanding a permission - so the call never ran and the
+   * TypeError behind it stayed hidden. Fixing the route uncovered this one.
+   *
+   * Deliberately the cheapest query that answers the question: one document,
+   * one field, newest first. It runs on a timer, so anything more would be
+   * paid over and over for a value that is usually unchanged.
+   */
+  async getNewSaleModel({ SaleModel } = {}) {
+    try {
+      const { ObjectId } = require('mongodb');
+      const Model = this.getModel(SaleModel);
+
+      const branchId = BaseModel.currentBranch;
+      const query = {};
+      if (branchId) {
+        query.branch_id = ObjectId.isValid(branchId) ? new ObjectId(branchId) : branchId;
+      }
+      if (BaseModel.license) query.license = BaseModel.license;
+
+      const latest = await Model.findOne(query)
+        .sort({ created_date: -1 })
+        .select({ _id: 1 })
+        .lean();
+
+      return {
+        status: true,
+        // null on a branch with no sales yet: the poller stores it and waits,
+        // which is exactly right for a till that has not sold anything today
+        data: { sales_document_id: latest ? String(latest._id) : null },
+        message: 'success',
+      };
+    } catch (error) {
+      console.error('Error in getNewSaleModel:', error);
+      return { status: false, data: null, message: error.message };
+    }
+  }
+
+  /**
+   * ONE WAITER'S OWN DAY.
+   *
+   * Owner: "total sales today current user done or some dashboard you can
+   * give. but no on the first page. seperate page. sales history of own and
+   * table wise seperate."
+   *
+   * Not getOrderHistory with a filter. That call takes a userId today and
+   * ignores it, and it must keep ignoring it: the floor needs every table's
+   * orders whoever took them, because any waiter can pick up any table. This
+   * is a different question - what have I sold today - and it gets its own
+   * door.
+   *
+   * WHOSE DAY IS DECIDED BY THE CALLER, not by the request body. The
+   * controller passes the id off the token, so a handset cannot ask for
+   * somebody else's figures by typing a different number.
+   *
+   * A sale names its waiter in two places depending on how old it is:
+   * `user_id` on the sale, and `created_by_id` on rows written by the till's
+   * own flow. Both are asked, because a shop's history is older than either
+   * of them.
+   *
+   * Cancelled sales are left out of the money and counted separately: a day
+   * that reads higher because somebody cancelled four orders is a day nobody
+   * can trust.
+   */
+  async myDayModel(branchId, userId, day, { SaleModel } = {}) {
+    try {
+      const { ObjectId } = require('mongodb');
+      const Model = this.getModel(SaleModel);
+
+      if (!userId) return { total: 0, orders: 0, cancelled: 0, tables: [], recent: [] };
+
+      const who = ObjectId.isValid(userId) ? new ObjectId(userId) : userId;
+      const from = new Date(day);
+      from.setHours(0, 0, 0, 0);
+      const to = new Date(from);
+      to.setDate(to.getDate() + 1);
+
+      const query = {
+        $or: [{ user_id: who }, { created_by_id: who }],
+        $and: [
+          {
+            $or: [{ created_date: { $gte: from, $lt: to } }, { date: { $gte: from, $lt: to } }],
+          },
+        ],
+      };
+      if (branchId) {
+        query.branch_id = ObjectId.isValid(branchId) ? new ObjectId(branchId) : branchId;
+      }
+      if (BaseModel.license) query.license = BaseModel.license;
+
+      const docs = await Model.find(query).sort({ created_date: -1, date: -1 }).limit(300).lean();
+
+      const tables = new Map();
+      let total = 0;
+      let orders = 0;
+      let cancelled = 0;
+
+      for (const doc of docs) {
+        const process = String(doc.sale_process || '').toLowerCase();
+        if (process === 'cancel' || process === 'cancelled') {
+          cancelled += 1;
+          continue;
+        }
+
+        const amount = Number(doc.sales_total || doc.total || 0) || 0;
+        total += amount;
+        orders += 1;
+
+        /* A takeaway has no table and still has money in it, so it is a row
+           of its own rather than something to drop. */
+        const table = String(doc.table_number || '').trim() || 'No table';
+        const held = tables.get(table) || { table, total: 0, orders: 0 };
+        held.total += amount;
+        held.orders += 1;
+        tables.set(table, held);
+      }
+
+      const recent = docs.slice(0, 20).map((doc) => ({
+        order_id: doc.token_id || doc.sales_id || String(doc._id).slice(-6),
+        table_number: doc.table_number || '',
+        total_amount: Number(doc.sales_total || doc.total || 0) || 0,
+        created_at: doc.created_date || doc.date,
+        cancelled: ['cancel', 'cancelled'].includes(String(doc.sale_process || '').toLowerCase()),
+      }));
+
+      return {
+        total,
+        orders,
+        cancelled,
+        /* Biggest table first: the question behind this screen is usually
+           "which table have I put the most through". */
+        tables: [...tables.values()].sort((a, b) => b.total - a.total),
+        recent,
+      };
+    } catch (error) {
+      console.error('myDayModel failed:', error);
+      return { total: 0, orders: 0, cancelled: 0, tables: [], recent: [] };
+    }
+  }
+
+  async getOrderHistoryModel(branchId, limit, page, status, userId, { SaleModel } = {}) {
+    try {
+      const { ObjectId } = require('mongodb');
+      const Model = this.getModel(SaleModel);
+
+      const branchObjectId = ObjectId.isValid(branchId) ? new ObjectId(branchId) : branchId;
+
+      const query = { branch_id: branchObjectId };
+
+      if (status === 'completed') {
+        query.payment_status = { $in: ['Completed', 'completed', 'Paid', 'paid'] };
+      } else if (status === 'cancelled') {
+        query.sale_process = { $in: ['Cancel', 'cancel', 'Cancelled', 'cancelled'] };
+      } else if (status === 'pending') {
+        query.payment_status = { $nin: ['Completed', 'completed', 'Paid', 'paid'] };
+        query.sale_process = { $nin: ['Cancel', 'cancel', 'Cancelled', 'cancelled'] };
+      }
+
+      const safeLimit = parseInt(limit, 10) || 50;
+      const safePage = parseInt(page, 10) || 1;
+      const skip = (safePage - 1) * safeLimit;
+
+      const docs = await Model.find(query)
+        .sort({ created_date: -1, date: -1 })
+        .skip(skip)
+        .limit(safeLimit)
+        .lean();
+
+      const orders = docs.map((doc) => {
+        let derivedStatus = 'pending';
+        const ps = (doc.payment_status || '').toLowerCase();
+        const sp = (doc.sale_process || '').toLowerCase();
+        if (sp === 'cancel' || sp === 'cancelled') {
+          derivedStatus = 'cancelled';
+        } else if (ps === 'completed' || ps === 'paid') {
+          derivedStatus = 'completed';
+        }
+
+        const items = (Array.isArray(doc.items) ? doc.items : []).map((item) => ({
+          id: item.item_id || '',
+          item_id: item.item_id || '',
+          name: item.item_name || item.name || '',
+          item_name: item.item_name || item.name || '',
+          quantity: item.item_quantity || item.quantity || 1,
+          item_quantity: item.item_quantity || item.quantity || 1,
+          price: item.item_price || item.unit_price || 0,
+          unit_price: item.item_price || item.unit_price || 0,
+          tax_price: item.tax_amount || item.tax || 0,
+          discount_price: item.item_discount || item.discount || 0,
+          item_description: item.item_description || '',
+        }));
+
+        return {
+          _id: String(doc._id),
+          order_id: doc.token_id || doc.sales_id || String(doc._id).slice(-6),
+          table_number: doc.table_number || '',
+          table_id: doc.table_id || '',
+          dine_type: doc.dine_type || 'Dine-in',
+          status: derivedStatus,
+          created_at: doc.created_date || doc.date,
+          total_amount: doc.sales_total || doc.total || 0,
+          subtotal: doc.sales_sub_total || doc.subtotal || 0,
+          tax: doc.tax || 0,
+          discount: doc.discount || 0,
+          extra_discount: doc.extra_discount || 0,
+          extra_discount_type: doc.extra_discount_type || 'price',
+          customer_name: doc.customer_name || '',
+          person_count: doc.person_count || '',
+          kiosk_table_no: doc.table_number || '',
+          kiosk_table_id: doc.table_id || '',
+          items,
+        };
+      });
+
+      return { status: true, message: 'Order history fetched', data: { orders } };
+    } catch (error) {
+      console.error('Error in getOrderHistoryModel:', error);
+      return { status: false, message: error.message, data: null };
+    }
+  }
+
+  async updateOrderModel(
+    orderId,
+    items,
+    totalAmount,
+    status,
+    extraDiscountType,
+    extraDiscount,
+    discountDescription,
+    newTableNo,
+    dineType,
+    personCount,
+    { SaleModel, newTableId, seenAt } = {}
+  ) {
+    try {
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+      const itemCollection = db.collection('items');
+
+      const orderObjectId = new mongoose.Types.ObjectId(orderId);
+      const orderDoc = await salesCollection.findOne({
+        _id: orderObjectId,
+        ...activeTenantFilter(),
+      });
+
+      if (!orderDoc) {
+        return { status: false, message: 'Order not found', data: [] };
+      }
+
+      /*
+       * A SAVE WRITTEN AGAINST A VIEW THAT HAS MOVED ON.
+       *
+       * The client sends the whole order, and what it does not send is
+       * deleted - that is how a cancelled dish is cancelled, and it is right.
+       * It is also why two handsets are dangerous: waiter A adds a biryani at
+       * 19:00, waiter B saves at 19:01 from a screen opened at 18:58, B's list
+       * has no biryani, and the till removes it. The kitchen has cooked it and
+       * the bill no longer has it. Nobody is told.
+       *
+       * So a caller may say which version of the order it was looking at, and
+       * a save written against an older one is refused rather than applied.
+       * The client reloads, sees what changed, and decides again - which is
+       * the only safe answer, because only a person knows whether the biryani
+       * was meant to go.
+       *
+       * SILENCE STILL MEANS YES. A caller that sends no `seen_at` is treated
+       * exactly as before: handsets in the wild are older than this code, and
+       * refusing their saves would turn a data-loss bug into an outage.
+       */
+      if (seenAt) {
+        const seen = new Date(seenAt).getTime();
+        const lastChanged = new Date(orderDoc.updated_date || orderDoc.created_date || 0).getTime();
+
+        /* An unreadable timestamp is not a conflict. It is a caller this
+           check cannot help, and blocking it would help nobody either. */
+        if (Number.isFinite(seen) && Number.isFinite(lastChanged) && lastChanged > seen) {
+          return {
+            status: false,
+            message: 'order_changed',
+            data: { updated_date: orderDoc.updated_date || orderDoc.created_date || null },
+          };
+        }
+      }
+
+      // Get license from order document for proper multi-tenant filtering
+
+      // ---------- CANCEL FLOW ----------
+      if (status && status === 'cancelled') {
+        const mongoDate = new Date();
+        const updateFields = {
+          sale_process: 'cancelled',
+          payment_status: 'Cancelled',
+          payment_pending: 0.0,
+          updated_date: mongoDate,
+          updated_by: 'System',
+          updated_by_id: null,
+        };
+
+        const existingItems = Array.isArray(orderDoc.items) ? orderDoc.items : [];
+        const existingChanges = Array.isArray(orderDoc.changes) ? orderDoc.changes : [];
+        const changesItems = [];
+
+        for (const ex of existingItems) {
+          const idStr = ex.item_id ? String(ex.item_id) : '';
+          if (!idStr) continue;
+          const qty = parseFloat(ex.item_quantity || 0);
+          if (qty <= 0) continue;
+          const price = parseFloat(ex.item_price || 0);
+          /*
+           * THE NOTE TRAVELS WITH THE ITEM.
+           *
+           * A change record is what the kitchen ticket is printed FROM - the poller
+           * builds its print jobs out of `changes[].items`, not out of `sale.items` - and
+           * this list carried seven fields, none of them the note. So "less spicy" was
+           * stored correctly on the sale and never reached the paper.
+           *
+           * Owner: "when item print, item notes not printed. example \"less spicy\" not
+           * printed in the kot. its bad very bad". He is right that it is bad: the note
+           * is the one line on a ticket the kitchen cannot work out for itself, and a
+           * customer who asked for something and did not get it blames the restaurant.
+           */
+          changesItems.push({
+            item_id: idStr,
+            item_name: String(ex.item_name || ''),
+            item_quantity: qty,
+            /* The typed note if the line has one. A cancellation ticket is
+               read by the same cook as the order, so it follows the same rule:
+               the waiter's words, never the menu's. */
+            item_description: String(ex.item_note || ex.item_description || ''),
+            spice_level: spiceLevel.levelOf(ex.spice_level),
+            process: 'cancel',
+            item_code: String(ex.item_sku || ''),
+            unit: String(ex.item_unit || 'qty'),
+            price,
+            total: price * qty,
+          });
+        }
+
+        if (changesItems.length > 0) {
+          existingChanges.push({ timestamp: mongoDate, items: changesItems });
+          updateFields.changes = existingChanges;
+        }
+
+        const updateResult = await salesCollection.updateOne(
+          { _id: orderObjectId },
+          { $set: updateFields }
+        );
+
+        /*
+         * AND THE KITCHEN IS TOLD AT ONCE, exactly as a new order tells it.
+         *
+         * A cancellation wrote its change record and returned here, one
+         * branch short of the notify the edit flow below does reach. Nothing
+         * was lost - the poller's thirty second safety net found the ticket -
+         * but the paper waited on a timer. Measured on the owner's counter:
+         * two cancellations at 18:38:57 and 18:39:01, both printed by the
+         * 18:39:24 poll, so 23 and 27 seconds of waiting followed by a 57 ms
+         * print. "when i very first time it took only few seconds to print.
+         * then after than it took almot 30 to 60 seconds."
+         *
+         * Two rounds of work had already made a cancelled ticket cheap to
+         * send: the byte path it was barred from, and a struck line cut from
+         * 1,736 bytes to 188. Neither could show while the ticket was found
+         * by a timer rather than told about. This is the last of that job.
+         *
+         * Gated on a change record existing, because `changes[].items` is
+         * what the poller builds a cancellation ticket out of. A cancellation
+         * with nothing printable must not wake the printer.
+         */
+        if (updateResult.modifiedCount > 0 && changesItems.length > 0) {
+          notifyKotReady({
+            branchId: String(orderDoc?.branch_id || ''),
+            saleId: String(orderId),
+            reason: 'cancelled',
+          });
+        }
+
+        return updateResult.modifiedCount > 0
+          ? {
+              status: true,
+              message: 'Order cancelled',
+              data: { order_id: orderId },
+            }
+          : {
+              status: false,
+              message: 'No changes made to the order',
+              data: [],
+            };
+      }
+
+      // ---------- EDIT FLOW ----------
+      const existingItems = Array.isArray(orderDoc.items) ? orderDoc.items : [];
+      const oldItemsData = {};
+
+      for (const ex of existingItems) {
+        const idStr = ex.item_id ? String(ex.item_id) : '';
+        if (!idStr) continue;
+        oldItemsData[idStr] = {
+          quantity: parseFloat(ex.item_quantity || 0),
+          name: String(ex.item_name || ''),
+          /* Carried so a REMOVED line can still say which one it was. Two of
+             the same dish on one table are told apart by the note, and by how
+             hot each of them was to be. */
+          description: String(ex.item_description || ''),
+          spice_level: spiceLevel.levelOf(ex.spice_level),
+          item_code: String(ex.item_sku || ''),
+          price: parseFloat(ex.item_price || 0),
+          unit: String(ex.item_unit || 'qty'),
+        };
+      }
+
+      const changesItems = [];
+      const existingChanges = Array.isArray(orderDoc.changes) ? orderDoc.changes : [];
+      const existingIndex = {};
+      existingItems.forEach((ex, idx) => {
+        const key = ex.item_id ? String(ex.item_id) : '';
+        if (key) existingIndex[key] = idx;
+      });
+
+      const incomingProductIds = [];
+      const updatedItems = [...existingItems];
+
+      for (const item of items) {
+        // Accept item_id as fallback when product_id is absent (KOT / kiosk items)
+        const rawId = item.product_id || item.item_id || '';
+        if (!rawId) continue;
+        const productId = String(rawId);
+        const qty = parseFloat(item.quantity || item.item_quantity || 0);
+        const price = parseFloat(item.price || item.unit_price || item.item_base_price || 0);
+        if (!productId || qty <= 0 || price < 0) continue;
+
+        const oldQty = oldItemsData[productId] ? parseFloat(oldItemsData[productId].quantity) : 0;
+        if (oldItemsData[productId]) delete oldItemsData[productId];
+
+        let itemDoc = null;
+        if (mongoose.Types.ObjectId.isValid(productId)) {
+          itemDoc = await itemCollection.findOne({
+            _id: new mongoose.Types.ObjectId(productId),
+          });
+        }
+        if (!itemDoc) {
+          // Item not in catalog (e.g. KOT order item) - update in-place using existing data
+          if (existingIndex[productId] !== undefined) {
+            const i = existingIndex[productId];
+            updatedItems[i] = {
+              ...updatedItems[i],
+              item_quantity: qty,
+              ...(item.item_description != null
+                ? { item_description: String(item.item_description) }
+                : {}),
+              /* A KOT line the catalogue no longer holds still belongs to
+                 somebody who may have changed their mind about the chillies. */
+              ...(item.spice_level != null
+                ? { spice_level: spiceLevel.levelOf(item.spice_level) }
+                : {}),
+            };
+            incomingProductIds.push(productId);
+          }
+          continue;
+        }
+
+        let changeQty = 0;
+        let changeProcess = '';
+        if (qty > oldQty) {
+          changeProcess = 'add';
+          changeQty = qty - oldQty;
+        } else if (qty < oldQty) {
+          changeProcess = 'cancel';
+          changeQty = oldQty - qty;
+        }
+
+        if (changeQty > 0) {
+          changesItems.push({
+            item_id: productId,
+            item_name: String(itemDoc.name || item.name || ''),
+            item_quantity: changeQty,
+            /* From the request first: an amendment carries the note the person
+               just typed, and the stored copy is the one before it. */
+            item_description: String(item.item_note || item.item_description || ''),
+            /*
+             * Same order for the spice level, and the stored line is read
+             * through existingIndex rather than oldItemsData because that map
+             * has had this id deleted from it a few lines above.
+             */
+            spice_level: spiceLevel.levelOf(
+              item.spice_level != null
+                ? item.spice_level
+                : (updatedItems[existingIndex[productId]] || {}).spice_level
+            ),
+            process: changeProcess,
+            item_code: String(itemDoc.itemid || ''),
+            unit: String(itemDoc.item_unit || itemDoc.unit || 'qty'),
+            price,
+            total: price * changeQty,
+          });
+        }
+
+        incomingProductIds.push(productId);
+        const itemTaxRate = parseFloat(itemDoc.tax || 0);
+        const taxType = itemDoc.tax_type || 'exclusive';
+
+        if (existingIndex[productId] !== undefined) {
+          const i = existingIndex[productId];
+          const existing = updatedItems[i];
+          const itemAmount = qty * price;
+          const itemDiscountPer = parseFloat(existing.item_discount_percentage || 0);
+          const itemDiscountVal = parseFloat(existing.sale_inline_discount_value || 0);
+          const lineDiscount = (itemAmount * itemDiscountPer) / 100 + itemDiscountVal * qty;
+          const taxableAmount = itemAmount - lineDiscount;
+          let taxAmount = 0;
+          let lineTotal = taxableAmount;
+
+          if (itemTaxRate > 0 && taxType === 'exclusive') {
+            taxAmount = (taxableAmount * itemTaxRate) / 100;
+            lineTotal = taxableAmount + taxAmount;
+          } else if (itemTaxRate > 0 && taxType === 'inclusive') {
+            lineTotal = taxableAmount;
+            taxAmount = (lineTotal * itemTaxRate) / (100 + itemTaxRate);
+          }
+
+          updatedItems[i] = {
+            ...existing,
+            item_quantity: qty,
+            item_price: price,
+            item_discount: lineDiscount,
+            total_amount: lineTotal,
+            tax: itemTaxRate,
+            tax_type: taxType,
+            tax_amount: taxAmount,
+            cgst_tax: taxAmount / 2,
+            sgst_tax: taxAmount / 2,
+          };
+          if (item.item_description)
+            updatedItems[i].item_description = String(item.item_description);
+          /* The ticket is printed from the change record above; THIS is what
+             the customer sees back on their own order and what a shop counts
+             later, so a change of mind has to land on both. */
+          if (item.spice_level != null)
+            updatedItems[i].spice_level = spiceLevel.levelOf(item.spice_level);
+        } else {
+          const itemQuantity = qty;
+          const sellingPrice = price;
+          const discountAmt = parseFloat(itemDoc.discount_amount || 0);
+          const discountPer = parseFloat(itemDoc.discount_percentage || 0);
+          const itemAmount = sellingPrice * itemQuantity;
+          const companyPriceTotal = (itemDoc.company_price || 0) * itemQuantity;
+          const lineDiscount = (itemAmount * discountPer) / 100 + discountAmt * itemQuantity;
+          const taxableAmount = itemAmount - lineDiscount;
+          let taxAmount = 0;
+          let lineTotal = taxableAmount;
+
+          if (itemTaxRate > 0 && taxType === 'exclusive') {
+            taxAmount = (taxableAmount * itemTaxRate) / 100;
+            lineTotal = taxableAmount + taxAmount;
+          } else if (itemTaxRate > 0 && taxType === 'inclusive') {
+            lineTotal = taxableAmount;
+            taxAmount = (lineTotal * itemTaxRate) / (100 + itemTaxRate);
+          }
+
+          updatedItems.push({
+            sale_inline_item_price: sellingPrice,
+            sale_inline_discount_value: discountAmt,
+            sale_inline_discount_pervalue: discountPer,
+            item_discount: lineDiscount,
+            item_discount_percentage: discountPer,
+            item_status: 'Add',
+            return: false,
+            item_name: itemDoc.name || item.name || '',
+            item_sku: itemDoc.itemid || '',
+            item_price: sellingPrice,
+            item_quantity: itemQuantity,
+            item_available_quantity: parseFloat(itemDoc.available_quantity || 0),
+            item_id: productId,
+            item_unit: itemDoc.unit || 'qty',
+            total_amount: lineTotal,
+            barcode_id: itemDoc.barcode_id || '',
+            company_price_total: companyPriceTotal,
+            category_id: itemDoc.category_id || null,
+            category_name: itemDoc.category_name || '',
+            supplier_id: itemDoc.supplier_id || null,
+            supplier_name: itemDoc.supplier_name || '',
+            tax: itemTaxRate,
+            tax_type: taxType,
+            igst_tax: 0,
+            cgst_tax: taxAmount / 2,
+            sgst_tax: taxAmount / 2,
+            tax_name: itemDoc.tax_name || '',
+            tax_amount: taxAmount,
+            tax_fields: itemDoc.tax_fields || [],
+            /*
+             * THE NOTE IS THE WAITER'S, NEVER THE MENU'S.
+             *
+             * Owner: "actually we need to show only item name if any
+             * customization note delibertly captain entered. otherwise dont
+             * show any other details. dont confuse captain."
+             *
+             * This fell back to itemDoc.description, so a dish added with no
+             * note arrived carrying its menu copy - "slow cooked with 21
+             * spices" - which then showed on the handset's live ticket and
+             * printed in the kitchen as though a waiter had asked for it.
+             *
+             * A blank note means nothing was asked for, and blank is the
+             * honest thing to store. The menu description belongs to the item
+             * and is one lookup away for anything that genuinely wants it.
+             */
+            item_description: String(item.item_description || ''),
+            spice_level: spiceLevel.levelOf(item.spice_level),
+            /* Same reason as the priced line: an added dish keeps the time
+               the kitchen said it took on the day it was added. */
+            prep_minutes: Number(itemDoc.prep_minutes) || 0,
+            track_inventory: itemDoc.track_inventory || false,
+            negative_stock: itemDoc.negative_stock || false,
+          });
+        }
+      }
+
+      for (const [remItemId, remItemData] of Object.entries(oldItemsData)) {
+        const remQty = parseFloat(remItemData.quantity || 0);
+        if (remQty <= 0) continue;
+        const remPrice = parseFloat(remItemData.price || 0);
+        changesItems.push({
+          item_id: String(remItemId),
+          item_name: String(remItemData.name || ''),
+          item_quantity: remQty,
+          item_description: String(remItemData.description || ''),
+          spice_level: spiceLevel.levelOf(remItemData.spice_level),
+          process: 'cancel',
+          item_code: String(remItemData.item_code || ''),
+          unit: String(remItemData.unit || 'qty'),
+          price: remPrice,
+          total: remPrice * remQty,
+        });
+      }
+
+      const finalItems = updatedItems.filter((ex) => {
+        if (!ex.item_id) return false;
+        return incomingProductIds.includes(String(ex.item_id));
+      });
+
+      let itemsSub = 0;
+      let taxTotal = 0;
+      let itemDiscountTotal = 0;
+      let grossSubtotal = 0;
+      for (const it of finalItems) {
+        itemsSub += parseFloat(it.total_amount || 0);
+        taxTotal += parseFloat(it.tax_amount || 0);
+        itemDiscountTotal += parseFloat(it.item_discount || 0);
+        grossSubtotal += parseFloat(it.item_quantity || 0) * parseFloat(it.item_price || 0);
+      }
+
+      const baseSubtotal = grossSubtotal;
+      const discountType = extraDiscountType || null;
+      const discountVal = parseFloat(extraDiscount || 0);
+      let extraDiscountAmount = 0;
+
+      if (discountType === 'percent' && discountVal > 0) {
+        extraDiscountAmount = ((baseSubtotal - itemDiscountTotal) * discountVal) / 100;
+      } else if (discountType === 'amount' && discountVal > 0) {
+        extraDiscountAmount = discountVal;
+      }
+      if (extraDiscountAmount > itemsSub) extraDiscountAmount = itemsSub;
+
+      const salesTotal = itemsSub - extraDiscountAmount;
+      const mongoDate = new Date();
+      if (changesItems.length > 0) {
+        existingChanges.push({ timestamp: mongoDate, items: changesItems });
+      }
+
+      const updateFields = {
+        items: finalItems,
+        changes: existingChanges,
+        sales_sub_total: baseSubtotal,
+        items_subtotal: baseSubtotal,
+        sales_total: Math.round(salesTotal * 100) / 100,
+        items_total: salesTotal,
+        tax: taxTotal,
+        discount: itemDiscountTotal,
+        return_tax: 0,
+        return_discount: 0,
+        number_of_items: finalItems.length,
+        updated_date: mongoDate,
+        updated_by: 'System',
+        sale_process: 'KOT',
+      };
+
+      if (extraDiscountType !== null) updateFields.extra_discount_type = String(extraDiscountType);
+      if (extraDiscount !== null) {
+        updateFields.extra_discount = parseFloat(extraDiscount);
+        updateFields.sale_extra_discount = extraDiscountAmount;
+      }
+      if (discountDescription !== null)
+        updateFields.discount_description = String(discountDescription);
+      if (newTableNo !== null && newTableNo !== '') updateFields.table_number = String(newTableNo);
+
+      /*
+       * THE TABLE'S ID MOVES WITH ITS NUMBER.
+       *
+       * A waiter moving an order to another table sends both, and only the
+       * number was ever written. The order then read "table 12" while still
+       * pointing at table 4's id, and nothing said so, because the floor is
+       * drawn by number: the screens agreed while the record did not.
+       *
+       * An empty id is allowed through on purpose. A table typed in by hand
+       * has no id, and leaving the old one there would be the same lie.
+       */
+      if (newTableId !== undefined && newTableId !== null) {
+        updateFields.table_id = String(newTableId);
+      } else if (
+        updateFields.table_number !== undefined &&
+        String(updateFields.table_number) !== String(orderDoc?.table_number ?? '')
+      ) {
+        /*
+         * Moved by a caller that does not know table ids - the till's own KOT
+         * screen sends the number alone. Clearing beats keeping a pointer to
+         * the table the order has just left: wrong and visible is recoverable,
+         * wrong and invisible is what this whole fix is about.
+         */
+        updateFields.table_id = '';
+      }
+      if (dineType !== null && dineType !== '') updateFields.dine_type = String(dineType);
+      if (personCount !== null && personCount !== '')
+        updateFields.person_count = parseInt(personCount, 10);
+
+      const updateResult = await salesCollection.updateOne(
+        { _id: orderObjectId },
+        { $set: updateFields }
+      );
+
+      /* An amended table order needs a fresh ticket in the kitchen just as much
+         as a new one does, and the same event carries it. */
+      if (updateResult.modifiedCount > 0) {
+        notifyKotReady({
+          branchId: String(updateFields.branch_id || orderDoc?.branch_id || ''),
+          saleId: String(orderId),
+          reason: 'updated',
+        });
+      }
+
+      return updateResult.modifiedCount > 0
+        ? {
+            status: true,
+            message: 'Order updated',
+            data: {
+              order_id: orderId,
+              items_updated: finalItems.length,
+              total_amount: totalAmount,
+            },
+          }
+        : {
+            status: false,
+            message: 'No changes made to the order',
+            data: [],
+          };
+    } catch (error) {
+      console.error('Error in updateOrderModel:', error);
+      return {
+        status: false,
+        message: error.message || 'Failed to update order',
+        data: [],
+      };
+    }
+  }
+
+  /* ------------------------------- the customer's own order, after it went */
+
+  /*
+   * One line of an online order: priced, and checked the way the front door
+   * checks it.
+   *
+   * Shared by an order being placed and by a line added to one that has
+   * already gone, so a dish added afterwards costs exactly what the same
+   * dish ordered a minute earlier cost, and meets exactly the same refusals:
+   * an id that is not one, a dish this branch does not sell, a dish outside
+   * its serving period, a dish the shop took off the online channel.
+   *
+   * Answers either a REFUSAL - the very object the caller returns, written
+   * once here so neither caller invents wording of its own - or { line }.
+   * A refusal is the one with status === false.
+   */
+  /**
+   * Was this dish's price set TODAY, where the shop is?
+   *
+   * Part of the daily_price / price_set_on contract. A dish priced from the
+   * morning's market is an ordinary dish once somebody has entered the
+   * morning's number; the question is only ever "is that number from today".
+   *
+   * THE SHOP'S TIMEZONE, never the server's. A till in Chennai and a process
+   * in a data centre disagree about when a day starts, and the hours they
+   * disagree about are the evening - a restaurant's busiest. Getting this
+   * wrong would mean a price entered at 8pm counting as yesterday's, and the
+   * handset asking a waiter for a number that is already on the screen.
+   *
+   * An absent or unreadable date is "not today", which is the safe way round:
+   * the waiter is asked, rather than a stale price being charged quietly.
+   *
+   * @param {*} setOn what price_set_on holds
+   * @param {object} [branch] the branch, for its timezone
+   */
+  _pricedToday(setOn, branch) {
+    /*
+     * The rule lives in utils/trading-day.js now. It was written out here, and
+     * its own comment warned that four screens carried the same constant; a
+     * fifth caller was about to copy it again for dishes marked off for the
+     * night. One copy, so there is one rule.
+     */
+    return tradingDay.isToday(setOn, branch);
+  }
+
+  /*
+   * WHAT THE EXTRAS COST, DECIDED BY THE SHOP.
+   *
+   * A handset says WHICH options the table asked for. It does not say what
+   * they cost, and if it did it would not be believed: the price of extra
+   * cheese is the shop's to set, and a client that could name a price could
+   * also name a discount nobody agreed to.
+   *
+   * So the names are matched against the groups this dish actually carries,
+   * and the money comes from those documents. An option the shop does not
+   * offer on this dish is refused rather than ignored - a phone asking for it
+   * is either holding a stale menu or asking for something the kitchen will
+   * not make, and both are worth stopping before a ticket prints.
+   *
+   * HOW MANY is left to the screen that asked. Min and max are drawn there,
+   * and a shop that tightens them after a phone cached its menu should not
+   * have that phone's orders refused at the till. Duplicates are folded and a
+   * group's ceiling is honoured where it has one, because charging twice for
+   * one tick is a different kind of wrong.
+   */
+  async _priceModifiers(chosen, itemDoc, branchDoc) {
+    const asked = Array.isArray(chosen) ? chosen.filter((one) => one && one.name) : [];
+    if (!asked.length) return { status: true, delta: 0, lines: [] };
+
+    const refuse = (name) => ({
+      status: false,
+      data: { state: 'item_option_unknown', item: itemDoc.name || '', option: name },
+      message: `${itemDoc.name || 'That dish'} does not come with ${name}.`,
+    });
+
+    const ids = (itemDoc.modifier_group_ids || [])
+      .map((id) => String(id))
+      .filter((id) => ObjectId.isValid(id));
+
+    if (!ids.length) return refuse(asked[0].name);
+
+    const collection = await this.getCollection('modifier_groups');
+    const docs = await collection
+      .find({
+        _id: { $in: ids.map((id) => new ObjectId(id)) },
+        license: branchDoc.license || BaseModel.license,
+      })
+      .toArray();
+
+    /* group name -> option name -> what the shop charges for it. */
+    const offered = new Map();
+    const ceilings = new Map();
+    for (const doc of docs) {
+      const groupName = String(doc.name || '');
+      const options = new Map();
+      for (const option of doc.options || []) {
+        options.set(String(option.name || ''), Number(option.price_delta) || 0);
+      }
+      offered.set(groupName, options);
+      ceilings.set(groupName, Number(doc.max) || 0);
+    }
+
+    /** The group that offers this option, when the client did not say. */
+    const groupOffering = (optionName) => {
+      for (const [groupName, options] of offered) {
+        if (options.has(optionName)) return groupName;
+      }
+      return null;
+    };
+
+    const lines = [];
+    const taken = new Map();
+
+    for (const one of asked) {
+      const wanted = String(one.name);
+
+      /*
+       * A client that names the group is taken at its word about which
+       * question it was answering. One that does not is matched on the option
+       * name alone: refusing an order over a missing label helps nobody, and
+       * the price is the shop's either way.
+       */
+      const groupName =
+        one.group != null && offered.has(String(one.group))
+          ? String(one.group)
+          : groupOffering(wanted);
+
+      if (!groupName || !offered.get(groupName).has(wanted)) return refuse(wanted);
+
+      const already = taken.get(groupName) || [];
+      if (already.includes(wanted)) continue;
+
+      const ceiling = ceilings.get(groupName) || 0;
+      if (ceiling > 0 && already.length >= ceiling) continue;
+
+      taken.set(groupName, already.concat(wanted));
+      lines.push({
+        group: groupName,
+        name: wanted,
+        price_delta: offered.get(groupName).get(wanted),
+      });
+    }
+
+    const delta = lines.reduce((sum, one) => sum + one.price_delta, 0);
+    return { status: true, delta, lines };
+  }
+
+  async _priceOnlineLine(item, where) {
+    const {
+      itemCollection,
+      branchDoc,
+      branchObjectId,
+      servingPeriods,
+      orderDay,
+      orderMinutes,
+      servicePoint,
+    } = where;
+    const qty = Number(item.item_quantity) || 1;
+    const itemId = String(item.item_id || '');
+    if (!ObjectId.isValid(itemId)) {
+      return { status: false, message: 'Enter must correct item id', data: null };
+    }
+    const itemDoc = await itemCollection.findOne({
+      _id: new ObjectId(itemId),
+      license: branchDoc.license || BaseModel.license,
+      $or: [{ branch_id: branchObjectId }, { 'branch_access.branch_id': branchObjectId }],
+    });
+    if (!itemDoc) {
+      return {
+        status: false,
+        data: null,
+        message: 'This product has already been removed, so you can not modify anything.',
+      };
+    }
+
+    /*
+     * Breakfast at four in the afternoon.
+     *
+     * The page greys out a dish outside its serving period, and that is a
+     * courtesy - a stale tab, a shared link, or somebody posting straight
+     * to this endpoint all reach here with a dosa in the basket long after
+     * the griddle is cold. The kitchen finds out when the ticket prints,
+     * which is the worst moment for everyone.
+     *
+     * Named in the refusal, because "something in your order is not
+     * available" sends a customer hunting through their own basket.
+     */
+    const timing = onlineOrdering.itemAvailability(itemDoc, servingPeriods, orderDay, orderMinutes);
+    if (!timing.available) {
+      const when = timing.periods.length ? ` It is served at ${timing.periods.join(' and ')}.` : '';
+      return {
+        status: false,
+        data: { state: 'item_out_of_hours', item: itemDoc.name || '' },
+        message: `${itemDoc.name || 'That dish'} is not being served right now.${when}`,
+      };
+    }
+
+    /*
+     * And a dish the shop took off the online channel by hand.
+     *
+     * The menu and the ordering page both leave it out, so reaching here
+     * with one is a stale tab or a direct post - and either way the
+     * kitchen must not see it. Same helper the channel screen uses, so
+     * "off online" means one thing everywhere.
+     */
+    const onChannel = itemChannels.availableOn(itemDoc, salesChannels.CHANNEL.ONLINE, orderMinutes);
+    if (!onChannel.available) {
+      return {
+        status: false,
+        data: { state: 'item_not_on_channel', item: itemDoc.name || '' },
+        message: `${itemDoc.name || 'That dish'} is not available for online orders.`,
+      };
+    }
+
+    /*
+     * The price THIS service point pays.
+     *
+     * A hotel room is quoted the marked-up price, because the hotel takes
+     * a cut of it and the restaurant is not paying that out of a plate of
+     * biryani. The shop's own tables are quoted the house price, which is
+     * what priceFor returns when there is no venue.
+     *
+     * Applied to the selling price before anything is split out of it, so
+     * tax, discount and the inclusive/exclusive arithmetic below all work
+     * on the number the customer was actually shown.
+     */
+    /*
+     * A DISH SOLD AT TODAY'S PRICE.
+     *
+     * Owner, after two fish went out at zero on a live table: "zero price
+     * items are actually dyanmic pricing. its based current price. so if you
+     * find that kind of item we need to allow captain to update the price and
+     * give order."
+     *
+     * Whole fish, crab, lobster: the shop cannot put a number on the card
+     * because it does not know one until the morning's market. The catalogue
+     * carries no selling price, the handset showed 0.00, and the order went to
+     * the kitchen worth nothing.
+     *
+     * THE DOOR OPENS ONLY WHERE THERE IS NO PRICE TO OVERRIDE. Every other
+     * line is still priced from the catalogue and the client's number is
+     * ignored, because a caller that can name its own price can buy a biryani
+     * for one rupee - and the handset is a phone in a pocket, not a trusted
+     * machine. An item is dynamic when the shop marked it `open_price`, or
+     * when it simply has no selling price, which is how these are set up
+     * today.
+     *
+     * Refused rather than silently zeroed if the price is missing or absurd:
+     * a line that reaches the kitchen worth nothing is what started this.
+     */
+    const catalogue = Number(itemDoc.selling_price || 0);
+    /*
+     * THE FLAG CONTRACT: daily_price + price_set_on.
+     *
+     * A dish marked `daily_price` is priced from the morning's market, and
+     * `price_set_on` is when somebody last did it. Priced TODAY, it is an
+     * ordinary dish charged at the catalogue rate - that is the entire point
+     * of the shop updating it when they open. Priced yesterday, it is not:
+     * yesterday's rate for a pomfret is not today's, and quietly charging it
+     * would be worse than the zero this started as, because it would look
+     * right.
+     *
+     * `open_price` is different and stays always-ask: the shop is saying the
+     * price is settled at the counter, every time.
+     *
+     * An item with none of these fields - every shop until the flag ships -
+     * falls through to "has it got a price at all", which is exactly what it
+     * did before.
+     */
+    const dynamic =
+      itemDoc.open_price === true ||
+      (itemDoc.daily_price === true && !this._pricedToday(itemDoc.price_set_on, branchDoc)) ||
+      catalogue <= 0;
+    /* Three spellings because three callers already exist: the handset's order
+       payload says `item_price`, a line added to a live order says
+       `unit_price`, and `price` is what anything hand-written reaches for. */
+    const said = [item.unit_price, item.item_price, item.price].find((v) => v != null);
+    const asked = Number(said);
+
+    if (dynamic) {
+      if (!Number.isFinite(asked) || asked <= 0) {
+        return {
+          status: false,
+          data: { state: 'item_needs_price', item: itemDoc.name || '' },
+          /*
+           * Worded for whoever is holding the screen, and two different people
+           * can be: a waiter with the handset, who needs to be told to enter a
+           * price, and a customer on the self-service page, who cannot be
+           * asked one and must be sent to a member of staff. The `state` above
+           * is what an app keys on; this is the sentence a person reads.
+           */
+          message: `${itemDoc.name || 'That dish'} is priced on the day, so it needs today's price. A member of staff can add it.`,
+        };
+      }
+      /* A ceiling, because a fat finger on a phone is the likeliest way a
+         wrong number gets here and ten lakh for a fish should not be quietly
+         accepted. */
+      if (asked > 1000000) {
+        return {
+          status: false,
+          data: { state: 'item_price_too_high', item: itemDoc.name || '' },
+          message: `${asked} looks wrong for ${itemDoc.name || 'that dish'}. Check the price.`,
+        };
+      }
+    }
+
+    /*
+     * THE EXTRAS, ADDED BEFORE TAX AND DISCOUNT RATHER THAN AFTER.
+     *
+     * Extra cheese on a pizza is part of the pizza: it is taxed at the
+     * pizza's rate and a percentage discount applies to the whole plate. Adding
+     * it afterwards would tax the dish and not the cheese, which is a quiet
+     * way to file a wrong return.
+     *
+     * The delta comes from the shop's own option documents, never from the
+     * caller. See _priceModifiers.
+     */
+    const extras = await this._priceModifiers(item.modifiers, itemDoc, branchDoc);
+    if (extras.status === false) return extras;
+
+    /* A one-off invented at the table: the shop never chose this price on a
+       card, somebody agreed it with a guest. Same reason as a market price. */
+    const oneOff = String(itemDoc.item_status || '').toLowerCase() === 'instant';
+
+    const sellingPrice = partnerVenues.priceFor(
+      (dynamic ? asked : catalogue) + extras.delta,
+      servicePoint.venue
+    );
+    const taxRate = Number(itemDoc.tax || 0);
+    const discountAmount = Number(itemDoc.discount_amount || 0);
+    const discountPercentage = Number(itemDoc.discount_percentage || 0);
+    const isInclusive = itemDoc.tax_type === 'inclusive';
+    const baseUnitPrice =
+      isInclusive && taxRate > 0 ? sellingPrice / (1 + taxRate / 100) : sellingPrice;
+    const discountUnit =
+      discountAmount > 0 ? discountAmount : baseUnitPrice * (discountPercentage / 100);
+    const taxableUnit = baseUnitPrice - discountUnit;
+    const taxUnit = taxableUnit * (taxRate / 100);
+    const finalUnit = isInclusive ? taxableUnit * (1 + taxRate / 100) : taxableUnit + taxUnit;
+    const taxAmt = round(taxUnit * qty);
+    const itemTotal = round(finalUnit * qty);
+
+    return {
+      line: {
+        item_id: itemId,
+        item_name: itemDoc.name || item.item_name || '',
+        name: itemDoc.name || item.item_name || '',
+        quantity: qty,
+        unit_price: round(baseUnitPrice),
+        tax_amount: taxAmt,
+        total: itemTotal,
+        /*
+         * WHAT THE KITCHEN NEEDS TO KNOW ABOUT THE MONEY, and only where it
+         * does.
+         *
+         * Owner: "lets customer wants to have fish for rs500 so that kitchen
+         * will prepare according to that."
+         *
+         * For a whole fish, a crab, or something a waiter typed in at the
+         * table, the PRICE IS THE SPECIFICATION. Five hundred rupees of fish
+         * is a particular fish; the kitchen cannot pick one from the name
+         * alone. For an ordinary dish off the card it is noise - a cook does
+         * not choose a biryani differently because it costs 220 - and a ticket
+         * that prints money on every line is one where the line that matters
+         * stops standing out.
+         *
+         * So it travels only for the two kinds that were priced at the table:
+         * a dish the shop prices on the day, and a one-off somebody invented
+         * for this bill.
+         */
+        ...(dynamic || oneOff ? { priced_at_table: round(finalUnit) } : {}),
+        /*
+         * What the table actually asked for, kept beside the money it cost.
+         * The kitchen ticket needs it to cook the right thing and the bill
+         * needs it to explain a price that is not the one on the card.
+         */
+        ...(extras.lines.length ? { modifiers: extras.lines } : {}),
+        /*
+         * THE CUSTOMER'S NOTE, not the catalogue's blurb.
+         *
+         * The kitchen ticket prints this line under the dish. It carried
+         * the item's marketing description - "charred on skewers, with
+         * mint chutney" on every ticket - and it carried it INSTEAD of
+         * anything the waiter or the customer had typed, because the
+         * catalogue text won the ||. "Less spicy" is what a kitchen needs
+         * to read; the description it already knows.
+         */
+        item_description: String(item.item_note || item.item_description || '')
+          .trim()
+          .slice(0, 200),
+        /*
+         * HOW HOT, AS A NUMBER AND NOT AS A SENTENCE.
+         *
+         * The obvious build appends "less spicy" to the note above, and it is
+         * wrong twice: a customer reading a Tamil menu writes Tamil, so the
+         * ticket carries prose the kitchen may misread, and prose cannot be
+         * counted afterwards. A level prints identically on every ticket
+         * whatever language the order was placed in, and a shop can learn that
+         * four orders in ten ask for mild.
+         *
+         * levelOf refuses anything that is not 1, 2 or 3, so a device sending
+         * nonsense gets no promise made about somebody's food.
+         */
+        spice_level: spiceLevel.levelOf(item.spice_level),
+        /*
+         * How long the kitchen says this dish takes, copied onto the line at
+         * the moment of ordering. On the LINE rather than looked up later
+         * because the shop may retime a section next week, and an order
+         * already placed should keep the estimate it was given.
+         */
+        prep_minutes: Number(itemDoc.prep_minutes) || 0,
+        // receipt-facing fields
+        item_base_price: round(baseUnitPrice),
+        item_quantity: qty,
+        item_tax: taxAmt,
+        item_discount: round(discountUnit * qty),
+        item_discount_percentage: discountPercentage,
+        item_total: itemTotal,
+      },
+    };
+  }
+
+  /*
+   * WHAT WE KEEP ABOUT WHERE AN ORDER CAME FROM.
+   *
+   * An address, what the browser calls itself, the random id that browser
+   * keeps for itself - and, from a handset, the phone's model, the version of
+   * the app, and the name of the waiter signed into it.
+   *
+   * Everything is cut to a length and anything not named here is DROPPED, so a
+   * crafted payload cannot turn a sale into storage of its own. The list is
+   * the point: adding a field is a decision, not something a caller can make
+   * for us.
+   *
+   * Nothing here is shown to a customer - customerOrderView is deliberately
+   * built from a different set of fields, and this is not among them.
+   */
+  _clientFacts(client) {
+    const from = client && typeof client === 'object' ? client : {};
+    /* Control characters go by code point, not by a regular expression: a
+       regex holding them is refused by the linter, for the good reason that
+       nobody can read one. */
+    const text = (value, max) => {
+      let out = '';
+      for (const character of String(value == null ? '' : value)) {
+        const code = character.codePointAt(0);
+        if (code >= 32 && code !== 127) out += character;
+      }
+      return out.trim().slice(0, max);
+    };
+    const facts = {};
+    const ip = text(from.ip, 64);
+    if (ip) facts.ip = ip;
+    const agent = text(from.user_agent, 300);
+    if (agent) facts.user_agent = agent;
+    const device = text(from.device_id, 40);
+    if (device) facts.device_id = device;
+    const language = text(from.language, 24);
+    if (language) facts.language = language;
+    const platform = text(from.platform, 60);
+    if (platform) facts.platform = platform;
+    const screen = text(from.screen, 24);
+    if (/^\d{2,5}x\d{2,5}$/.test(screen)) facts.screen = screen;
+    const zone = text(from.time_zone, 60);
+    if (zone) facts.time_zone = zone;
+    const referrer = text(from.referrer, 200);
+    if (referrer) facts.referrer = referrer;
+
+    /*
+     * WHAT THE HANDSET KNOWS ABOUT ITSELF, and who is holding it.
+     *
+     * Owner: "every order should have some details. example what mobile, user
+     * agent, ip address, mobile type or user account whatever infromation app
+     * can know do it."
+     *
+     * A user agent names a browser engine, which on an Android app is the same
+     * string for every phone in the building. When an order goes wrong the
+     * question is which HANDSET and whose hands, so the app says the model it
+     * reads from the device, the version it is running, and the name of the
+     * waiter signed into it.
+     *
+     * The staff fields are set by the route from the session, never from the
+     * body - a phone may describe its own hardware, but it does not get to
+     * name who was holding it.
+     */
+    const app = text(from.app, 40);
+    if (app) facts.app = app;
+    const appVersion = text(from.app_version, 24);
+    if (appVersion) facts.app_version = appVersion;
+    const model = text(from.device_model, 80);
+    if (model) facts.device_model = model;
+    const network = text(from.network, 24);
+    if (network) facts.network = network;
+    const staffId = text(from.staff_id, 40);
+    if (staffId) facts.staff_id = staffId;
+    const staffName = text(from.staff_name, 80);
+    if (staffName) facts.staff_name = staffName;
+
+    facts.at = new Date();
+    return Object.keys(facts).length > 1 ? facts : null;
+  }
+
+  /**
+   * What this order will be asked back for by the phone that placed it:
+   * where it has got to, and what was on it. Never the whole sale document -
+   * that carries the shop's costs, its margins and the device the order came
+   * from, none of which is the customer's.
+   */
+  customerOrderView(order) {
+    if (!order) return null;
+    const process = String(order.sale_process || '');
+    const paymentStatus = String(order.payment_status || '');
+    const cancelled = process === 'cancelled' || paymentStatus === 'Cancelled';
+    return {
+      order_id: String(order._id),
+      token: String(order.token_id || ''),
+      /*
+       * The shop's own number for it, which is the one printed on the bill
+       * and the one staff read off the queue. A customer holding the order
+       * may quote either that or the token, so the assistant is given both;
+       * it is on their receipt already, and this read is only reached with
+       * the order's id AND its token.
+       */
+      bill_no: String(order.sales_id || ''),
+      placed_at: order.created_date || order.date || null,
+      /*
+       * When the kitchen usually has this ready, and how long that is.
+       *
+       * Counted from when the kitchen was TOLD, which on a shop that holds
+       * orders for approval is not when the order was placed - counting from
+       * the tap would have the food ready before anybody started it.
+       *
+       * Both sent: the instant for a clock time, the minutes for a page that
+       * would rather say "about 25 minutes". Empty and zero mean the shop has
+       * stated no prep times, and the page then says nothing.
+       */
+      ready_minutes: Number(order.ready_minutes) || 0,
+      ready_by: readyBy.readyBy(
+        order.order_state_at || order.created_date || order.date,
+        order.ready_minutes
+      ),
+      /* The three words a customer actually wants: is it off, is it paid,
+         has the shop accepted it. */
+      state: cancelled ? 'cancelled' : String(order.order_state || 'accepted'),
+      cancelled,
+      paid: paymentStatus === 'Paid',
+      /* A bill is a record of money that has changed hands. Until it has,
+         there is nothing to hand anybody. */
+      bill_ready: paymentStatus === 'Paid' && !cancelled,
+      payment_status: paymentStatus,
+      payment_mode: String(order.payment_mode || ''),
+      /*
+       * WHERE IT HAS GOT TO, as a trail of what has actually happened.
+       *
+       * Stage 5's whole point, and the reason it lives here rather than in
+       * the service: every door a customer's phone can reach this order
+       * through - the read, the history page's bulk read, a change, a
+       * cancellation - is drawn from this one shape, so none of them can
+       * describe the same order differently. See utils/order-progress.
+       */
+      progress: orderProgress.progressOf(order),
+      /* Asked for, and waiting on the shop. */
+      cancel_requested: order.cancel_requested === true,
+      fulfilment: String(order.fulfilment || ''),
+      table_number: String(order.table_number || ''),
+      items: (Array.isArray(order.items) ? order.items : []).map((line) => ({
+        item_id: String(line.item_id || ''),
+        name: String(line.item_name || line.name || ''),
+        quantity: Number(line.item_quantity != null ? line.item_quantity : line.quantity || 0),
+        note: String(line.item_description || ''),
+        spice: spiceLevel.levelOf(line.spice_level),
+        total: Number(line.total != null ? line.total : line.item_total || 0),
+      })),
+      total: Number(order.total != null ? order.total : order.sales_total || 0),
+      tax: Number(order.tax || 0),
+      discount: Number(order.discount || 0),
+      delivery_fee: Number(order.delivery_fee || 0),
+      shop: String(order.branch_name || ''),
+    };
+  }
+
+  /**
+   * HOW LONG THIS SHOP USUALLY TAKES TO ANSWER, from its own history.
+   *
+   * Stage 5 asks for "an ETA computed from the shop's own history", and this
+   * is the only ETA the data can honestly produce. There is no cooking time
+   * in here: nothing marks an order ready, so any minutes-until-food figure
+   * would be invented, and an invented ETA is worse than none - it is the
+   * number a customer waits against and then complains about.
+   *
+   * What the data does hold is how long orders sit in the approval queue
+   * before somebody works it, and that is the minute a waiting customer is
+   * actually anxious about: has anyone seen this at all. So the answer is
+   * about acceptance, and the page words it as a description of the past
+   * rather than a promise about this order.
+   *
+   * Null rather than a guess whenever the history is too thin, too old or
+   * unreadable. A shop with four orders behind it gets no figure.
+   */
+  async typicalAcceptMinutes(branchId) {
+    const key = String(branchId || '');
+    if (!key) return null;
+
+    const cached = ACCEPT_MINUTES_CACHE.get(key);
+    if (cached && cached.until > Date.now()) return cached.minutes;
+
+    let minutes = null;
+    try {
+      const db = await BaseModel.getDb();
+      const branchObjectId = mongoose.Types.ObjectId.isValid(key)
+        ? new mongoose.Types.ObjectId(key)
+        : branchId;
+      /*
+       * BOUNDED BY _id, which every collection indexes.
+       *
+       * An ObjectId carries the second it was made, so `_id` above a
+       * fortnight ago is both a date range and an index walk - and the walk
+       * STOPS at the fortnight. Ranging on created_date instead would leave
+       * Mongo sorting a shop's entire sales collection in memory on a
+       * collection with no index for it, which on a busy shop is the kind of
+       * query that takes the rest of the process down with it.
+       *
+       * The minutes are still computed from created_date, which is the field
+       * that means what it says.
+       */
+      const since = Date.now() - ACCEPT_HISTORY_DAYS * 86400000;
+      const rows = await db
+        .collection('sales')
+        .find(
+          {
+            branch_id: branchObjectId,
+            _id: { $gte: mongoose.Types.ObjectId.createFromTime(Math.floor(since / 1000)) },
+            order_state: 'accepted',
+            order_state_by: { $nin: [null, ''] },
+            order_state_at: { $ne: null },
+            ...activeTenantFilter(),
+          },
+          { projection: { created_date: 1, order_state_at: 1 } }
+        )
+        .sort({ _id: -1 })
+        .limit(ACCEPT_HISTORY_ORDERS)
+        .toArray();
+
+      const waits = rows
+        .map((row) => {
+          const from = new Date(row.created_date).getTime();
+          const to = new Date(row.order_state_at).getTime();
+          return Number.isFinite(from) && Number.isFinite(to) ? (to - from) / 60000 : NaN;
+        })
+        /* An order accepted an hour later is a shop that had gone home, not a
+           shop that is slow. Leaving those in drags the middle of a busy
+           evening out to a number no customer would recognise. */
+        .filter((wait) => Number.isFinite(wait) && wait >= 0 && wait <= ACCEPT_OUTLIER_MINUTES)
+        .sort((a, b) => a - b);
+
+      if (waits.length >= ACCEPT_ENOUGH_ORDERS) {
+        const middle = waits[Math.floor(waits.length / 2)];
+        minutes = Math.max(1, Math.ceil(middle));
+      }
+    } catch (error) {
+      /* A figure nobody can read is simply not shown. It is decoration on a
+         status page, and a status page must not fail over decoration. */
+      console.warn('[order-progress] could not read the accept history:', error && error.message);
+      minutes = null;
+    }
+
+    ACCEPT_MINUTES_CACHE.set(key, { minutes, until: Date.now() + ACCEPT_CACHE_MS });
+    return minutes;
+  }
+
+  /** One order of this branch's, by its id. Nothing wider: no list, no search. */
+  async findCustomerOrder({ branchId, orderId }) {
+    if (!mongoose.Types.ObjectId.isValid(String(orderId || ''))) return null;
+    const db = await BaseModel.getDb();
+    const branchObjectId = mongoose.Types.ObjectId.isValid(String(branchId))
+      ? new mongoose.Types.ObjectId(String(branchId))
+      : branchId;
+    return db.collection('sales').findOne({
+      _id: new mongoose.Types.ObjectId(String(orderId)),
+      branch_id: branchObjectId,
+    });
+  }
+
+  /*
+   * One line of an order, at a different quantity.
+   *
+   * EXACT, and it has to be. Every money field on an online order's line is
+   * linear in its quantity: the unit price, the tax, the discount and the
+   * total were each worked out per unit when the order was taken and
+   * multiplied up. Scaling a line to a new quantity therefore reproduces
+   * exactly what that order would have cost had it been placed that way - and
+   * it does it from the order's OWN stored prices, so a customer is held to
+   * the price they were quoted rather than to whatever the catalogue says by
+   * the time they change their mind.
+   */
+  _scaleOrderLine(line, was, now) {
+    if (!(was > 0) || now === was) return { ...line, item_quantity: now, quantity: now };
+    const factor = now / was;
+    const scale = (value) => round(Number(value || 0) * factor);
+    const scaled = { ...line, item_quantity: now, quantity: now };
+    for (const field of [
+      'tax_amount',
+      'item_tax',
+      'total',
+      'item_total',
+      'total_amount',
+      'item_discount',
+      'company_price_total',
+      'cgst_tax',
+      'sgst_tax',
+      'igst_tax',
+    ]) {
+      if (line[field] !== undefined) scaled[field] = scale(line[field]);
+    }
+    return scaled;
+  }
+
+  /** What the order's totals come to, from its lines. */
+  _onlineOrderTotals(lines, orderDoc) {
+    const qtyOf = (l) => Number(l.item_quantity != null ? l.item_quantity : l.quantity || 0);
+    const unitOf = (l) => Number(l.unit_price != null ? l.unit_price : l.item_price || 0);
+    const lineTotalOf = (l) =>
+      Number(l.total != null ? l.total : l.item_total || l.total_amount || 0);
+    const subtotal = round(lines.reduce((s, l) => s + unitOf(l) * qtyOf(l), 0));
+    const tax = round(lines.reduce((s, l) => s + Number(l.tax_amount || l.item_tax || 0), 0));
+    const itemDiscount = round(lines.reduce((s, l) => s + Number(l.item_discount || 0), 0));
+    const extra = Number((orderDoc && orderDoc.extra_discount) || 0);
+    const food = round(lines.reduce((s, l) => s + lineTotalOf(l), 0) - extra);
+    const total = round(food + Number((orderDoc && orderDoc.delivery_fee) || 0));
+    return {
+      subtotal,
+      tax,
+      total,
+      discount: round(itemDiscount + extra),
+      number_of_items: lines.reduce((s, l) => s + qtyOf(l), 0),
+    };
+  }
+
+  /*
+   * The customer changed their mind about something already on the ticket.
+   *
+   * The kitchen is told the difference, line by line, through the same
+   * changes log a waiter's amendment writes, so a screen or a printer that
+   * already knows how to show "one biryani cancelled" needs nothing new.
+   */
+  async changeCustomerOrderItems(orderDoc, wanted, how = {}) {
+    const db = await BaseModel.getDb();
+    const salesCollection = db.collection('sales');
+    const lines = Array.isArray(orderDoc.items) ? orderDoc.items : [];
+
+    const asked = new Map();
+    for (const want of Array.isArray(wanted) ? wanted : []) {
+      const id = String((want && want.item_id) || '');
+      const qty = Math.round(Number(want && want.quantity));
+      if (!id || !Number.isFinite(qty)) continue;
+      asked.set(id, Math.max(0, Math.min(20, qty)));
+    }
+    if (!asked.size) return { status: false, message: 'nothing_asked', data: null };
+
+    /*
+     * A dish that is not on the order yet is ADDED, priced exactly the way
+     * the order itself was priced. Asking for nought of something that was
+     * never there is not a change, it is a typo, and is ignored.
+     */
+    const onOrder = new Set(lines.map((l) => String(l.item_id || '')));
+    const adding = [...asked.entries()].filter(([id, qty]) => !onOrder.has(id) && qty > 0);
+    const added = [];
+    if (adding.length) {
+      const priced = await this._priceAddedLines(orderDoc, adding);
+      if (priced.status === false) return priced;
+      added.push(...priced.lines);
+    }
+
+    const changes = [];
+    const kept = [];
+    for (const line of lines) {
+      const id = String(line.item_id || '');
+      const was = Number(line.item_quantity != null ? line.item_quantity : line.quantity || 0);
+      const now = asked.has(id) ? asked.get(id) : was;
+      if (now !== was) {
+        const unit = Number(line.unit_price != null ? line.unit_price : line.item_price || 0);
+        const moved = Math.abs(now - was);
+        changes.push({
+          item_id: id,
+          item_name: String(line.item_name || line.name || ''),
+          item_quantity: moved,
+          process: now > was ? 'add' : 'cancel',
+          item_code: String(line.item_sku || ''),
+          unit: String(line.item_unit || 'qty'),
+          price: unit,
+          total: round(unit * moved),
+        });
+      }
+      if (now > 0) kept.push(this._scaleOrderLine(line, was, now));
+    }
+
+    for (const line of added) {
+      const qty = Number(line.item_quantity != null ? line.item_quantity : line.quantity || 0);
+      const unit = Number(line.unit_price != null ? line.unit_price : line.item_price || 0);
+      changes.push({
+        item_id: String(line.item_id || ''),
+        item_name: String(line.item_name || line.name || ''),
+        item_quantity: qty,
+        process: 'add',
+        item_code: String(line.item_sku || ''),
+        unit: String(line.item_unit || 'qty'),
+        price: unit,
+        total: round(unit * qty),
+      });
+      kept.push(line);
+    }
+
+    if (!changes.length) return { status: false, message: 'nothing_changed', data: null };
+    /* Every line gone is a cancelled order, and who asked for that is
+       whoever asked for the change: a customer taking their own order to
+       nothing must still be announced, a shop applying a change request has
+       already been told. */
+    if (!kept.length) return this.cancelCustomerOrder(orderDoc, how);
+
+    const totals = this._onlineOrderTotals(kept, orderDoc);
+    const at = new Date();
+    const log = Array.isArray(orderDoc.changes) ? [...orderDoc.changes] : [];
+    log.push({ timestamp: at, items: changes });
+
+    const result = await salesCollection.updateOne(
+      { _id: orderDoc._id },
+      {
+        $set: {
+          items: kept,
+          changes: log,
+          subtotal: totals.subtotal,
+          sales_sub_total: totals.subtotal,
+          items_subtotal: totals.subtotal,
+          total: totals.total,
+          sales_total: totals.total,
+          items_total: totals.total,
+          tax: totals.tax,
+          discount: totals.discount,
+          number_of_items: totals.number_of_items,
+          updated_date: at,
+          updated_by: 'Customer',
+        },
+      }
+    );
+    if (!result.modifiedCount) return { status: false, message: 'nothing_changed', data: null };
+
+    notifyKotReady({
+      branchId: String(orderDoc.branch_id || ''),
+      saleId: String(orderDoc._id),
+      reason: 'updated',
+    });
+
+    return {
+      status: true,
+      message: 'Order updated',
+      data: {
+        order_id: String(orderDoc._id),
+        token_id: String(orderDoc.token_id || ''),
+        items: kept.map((l) => ({
+          item_id: String(l.item_id || ''),
+          name: String(l.item_name || l.name || ''),
+          quantity: Number(l.item_quantity != null ? l.item_quantity : l.quantity || 0),
+        })),
+        total: totals.total,
+      },
+    };
+  }
+
+  /**
+   * The customer wants the order changed, and the window has closed - so ASK.
+   *
+   * Owner, on the history page: "why order history dont have any option to
+   * other than cancel? coz of time?" It was: past the window the plus and
+   * minus went away and only Cancel remained, which is an odd thing to offer
+   * somebody whose actual wish is one more naan. If a customer may ask the
+   * shop to call an order OFF after the kitchen has it, they may ask for it
+   * to be CHANGED, and the kitchen decides either way.
+   *
+   * Nothing is changed here. What they asked for is recorded on the order and
+   * announced into the same queue the shop already accepts orders from, and a
+   * person applies it or refuses it there - see decideOnOrder.
+   *
+   * @param {object} orderDoc
+   * @param {Array<{item_id: string, quantity: number}>} wanted
+   * @param {Array} lines the order's lines, for naming what was asked
+   */
+  async requestCustomerChange(orderDoc, wanted, lines) {
+    const db = await BaseModel.getDb();
+    const at = new Date();
+
+    /*
+     * Said in dish names, not ids.
+     *
+     * The person reading this is standing at a till deciding in a hurry, and
+     * "2 to 3 Chicken Biryani" is a decision they can make. A row of
+     * twenty-four character ids is not.
+     */
+    const onOrder = new Map(
+      (Array.isArray(lines) ? lines : []).map((line) => [
+        String(line.item_id || ''),
+        {
+          name: String(line.item_name || line.name || ''),
+          quantity: Number(line.item_quantity != null ? line.item_quantity : line.quantity || 0),
+        },
+      ])
+    );
+    const asked = [];
+    for (const one of Array.isArray(wanted) ? wanted : []) {
+      const id = String((one && one.item_id) || '');
+      if (!id) continue;
+      const quantity = Math.max(0, Math.round(Number(one.quantity) || 0));
+      const was = onOrder.get(id);
+      asked.push({
+        item_id: id,
+        /* A dish that is not on the order yet has no name here; the queue
+           fills it in from the menu when it draws the card. */
+        name: was ? was.name : String(one.name || ''),
+        was: was ? was.quantity : 0,
+        quantity,
+      });
+    }
+    if (!asked.length) return { status: false, message: 'nothing_asked', data: null };
+
+    const result = await db.collection('sales').updateOne(
+      { _id: orderDoc._id },
+      {
+        $set: {
+          /* The LAST thing they asked for, not a pile of them. A customer who
+             changes their mind twice before anybody looks meant the second
+             one, and a till asked to work through a history of wishes is a
+             till that gets it wrong. */
+          change_requested: { items: asked, at },
+          updated_date: at,
+        },
+      }
+    );
+    if (!result.matchedCount) return { status: false, message: 'not_found', data: null };
+
+    notifyOrderAttention({
+      branchId: String(orderDoc.branch_id || ''),
+      saleId: String(orderDoc._id),
+      alert: 'waiting',
+      state: 'change_requested',
+      total: Number(orderDoc.total || 0),
+    });
+
+    return {
+      status: true,
+      message: 'Change requested',
+      data: {
+        order_id: String(orderDoc._id),
+        token_id: String(orderDoc.token_id || ''),
+        change_requested: true,
+        items: asked,
+      },
+    };
+  }
+
+  /*
+   * Dishes added to an order that has already gone, priced the way the order
+   * was priced.
+   *
+   * Everything the front door checks is checked again here, by the same
+   * method: a dish out of its serving period, or one the shop has taken off
+   * the online channel, cannot be slipped onto an order after the fact any
+   * more than it could be ordered in the first place. The service point
+   * comes off the order itself, so a hotel room keeps its marked-up price.
+   */
+  async _priceAddedLines(orderDoc, adding) {
+    const db = await BaseModel.getDb();
+    const branchObjectId = orderDoc.branch_id;
+    const branchDoc = await db.collection('branches').findOne({ _id: branchObjectId });
+    if (!branchDoc) return { status: false, message: 'not_found', data: null };
+
+    /* The same clock the order was taken by, in the shop's own time zone. */
+    const now = new Date();
+    const local = moment(now).tz(branchDoc.time_zone || 'Asia/Calcutta');
+    const orderDay = local.day();
+    const orderMinutes = local.hours() * 60 + local.minutes();
+    /* The serving periods, read the way the order read them. */
+    let servingPeriods = [];
+    try {
+      const settingsDoc = await db
+        .collection('settings')
+        .findOne({ menu_dayparts: { $exists: true } });
+      servingPeriods = onlineOrdering.normalizeDayparts(
+        (settingsDoc && settingsDoc.menu_dayparts) || []
+      );
+    } catch (e) {
+      /* No dayparts is every dish served all day, which is what a shop that
+         never set one means. */
+    }
+
+    /*
+     * House prices, always. An order bound for a hotel room cannot be
+     * changed from a phone at all - customer-order.service refuses it as
+     * at_the_counter, because its total carries a markup and a commission
+     * that are not the customer's to move - so there is no marked-up case
+     * to reproduce here, and inventing one would be a guess about money.
+     */
+    const servicePoint = { venue: null };
+
+    const lines = [];
+    for (const [itemId, quantity] of adding) {
+      const priced = await this._priceOnlineLine(
+        { item_id: itemId, item_quantity: quantity },
+        {
+          itemCollection: db.collection('items'),
+          branchDoc,
+          branchObjectId,
+          servingPeriods,
+          orderDay,
+          orderMinutes,
+          servicePoint,
+        }
+      );
+      if (priced.status === false) return priced;
+      lines.push(priced.line);
+    }
+    return { status: true, lines };
+  }
+
+  /*
+   * The customer has asked the shop to cancel an order the kitchen has
+   * already had a while.
+   *
+   * Recorded on the order and announced, so it turns up where a shop is
+   * already looking - the queue it accepts orders from - rather than in a
+   * screen somebody has to remember to open. Nothing is cancelled here:
+   * that is the shop's call, and a kitchen that has cooked it needs to say
+   * so.
+   */
+  async requestCustomerCancel(orderDoc) {
+    const db = await BaseModel.getDb();
+    const at = new Date();
+    const result = await db.collection('sales').updateOne(
+      { _id: orderDoc._id },
+      {
+        $set: {
+          cancel_requested: true,
+          cancel_requested_at: at,
+          updated_date: at,
+        },
+      }
+    );
+    if (!result.matchedCount) return { status: false, message: 'not_found', data: null };
+
+    notifyOrderAttention({
+      branchId: String(orderDoc.branch_id || ''),
+      saleId: String(orderDoc._id),
+      alert: 'waiting',
+      state: 'cancel_requested',
+      total: Number(orderDoc.total || 0),
+    });
+
+    return {
+      status: true,
+      message: 'Cancellation requested',
+      data: {
+        order_id: String(orderDoc._id),
+        token_id: String(orderDoc.token_id || ''),
+        cancel_requested: true,
+      },
+    };
+  }
+
+  /*
+   * The whole order, called off.
+   *
+   * The record stays and is marked cancelled - a shop that cooked half of it
+   * needs to see that it existed - and every line goes to the kitchen as a
+   * cancellation, the same shape the console writes.
+   */
+  /**
+   * Call an order off.
+   *
+   * @param {object} orderDoc
+   * @param {{alreadyKnown?: boolean}} [how]
+   *   alreadyKnown: somebody at the shop decided this, so it must NOT be
+   *   stamped as something the shop still has to be told about. Accepting a
+   *   customer's cancellation request runs through here, and stamping that
+   *   put the order straight back in the queue asking to be acknowledged -
+   *   a second decision on something a person had just decided.
+   */
+  async cancelCustomerOrder(orderDoc, how = {}) {
+    const db = await BaseModel.getDb();
+    const salesCollection = db.collection('sales');
+    const at = new Date();
+    const lines = Array.isArray(orderDoc.items) ? orderDoc.items : [];
+    const changes = lines
+      .map((line) => {
+        const qty = Number(line.item_quantity != null ? line.item_quantity : line.quantity || 0);
+        if (!(qty > 0)) return null;
+        const unit = Number(line.unit_price != null ? line.unit_price : line.item_price || 0);
+        return {
+          item_id: String(line.item_id || ''),
+          item_name: String(line.item_name || line.name || ''),
+          item_quantity: qty,
+          process: 'cancel',
+          item_code: String(line.item_sku || ''),
+          unit: String(line.item_unit || 'qty'),
+          price: unit,
+          total: round(unit * qty),
+        };
+      })
+      .filter(Boolean);
+
+    const log = Array.isArray(orderDoc.changes) ? [...orderDoc.changes] : [];
+    if (changes.length) log.push({ timestamp: at, items: changes });
+
+    const result = await salesCollection.updateOne(
+      { _id: orderDoc._id },
+      {
+        $set: {
+          sale_process: 'cancelled',
+          /*
+           * THE SHOP HAS TO LEARN THIS, AND IT NEVER DID.
+           *
+           * Owner: "when i asked cancel, deskto didnt show anthing."
+           *
+           * Inside the window a customer's cancellation simply happens - no
+           * request, nothing to decide - and the only thing told about it
+           * was the PRINTER, over the desktop process bus. Nothing reached a
+           * screen: no badge, no chime, no row in the queue. The order left
+           * the floor silently, and it is the worse of the two cases,
+           * because the ticket printed the moment the order landed and
+           * somebody may already be cooking it.
+           *
+           * So it is stamped, and the queue carries it (pendingOnlineOrders)
+           * until a person has seen it. There is nothing here to approve;
+           * there is something to KNOW.
+           */
+          /* Only where the shop has not been part of it; see the note on
+             this function's `alreadyKnown`. */
+          ...(how.alreadyKnown ? {} : { customer_cancelled_at: new Date(), cancel_seen: false }),
+          payment_status: 'Cancelled',
+          payment_pending: 0,
+          changes: log,
+          updated_date: at,
+          updated_by: 'Customer',
+        },
+      }
+    );
+    if (!result.modifiedCount) return { status: false, message: 'nothing_changed', data: null };
+
+    notifyKotReady({
+      branchId: String(orderDoc.branch_id || ''),
+      saleId: String(orderDoc._id),
+      reason: 'cancelled',
+    });
+
+    return {
+      status: true,
+      message: 'Order cancelled',
+      data: {
+        order_id: String(orderDoc._id),
+        token_id: String(orderDoc.token_id || ''),
+        cancelled: true,
+        total: 0,
+      },
+    };
+  }
+
+  async getFrequentItemsForBranch(branchId, limit, { SaleModel } = {}) {
+    try {
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const branchObjectId = mongoose.Types.ObjectId.isValid(String(branchId))
+        ? new mongoose.Types.ObjectId(String(branchId))
+        : branchId;
+
+      const pipeline = [
+        {
+          $match: {
+            branch_id: branchObjectId,
+            sale_process: { $in: ['Add', 'Edit', 'PartialReturn'] },
+            license: BaseModel.license,
+          },
+        },
+        { $unwind: '$items' },
+        {
+          $group: {
+            _id: '$items.item_id',
+            name: { $first: '$items.item_name' },
+            count: { $sum: 1 },
+            price: { $first: '$items.item_price' },
+          },
+        },
+        { $sort: { count: -1 } },
+        { $limit: Number(limit) || 10 },
+        {
+          $project: {
+            _id: 0,
+            item_id: '$_id',
+            name: 1,
+            count: 1,
+            price: 1,
+          },
+        },
+      ];
+
+      const items = await salesCollection.aggregate(pipeline).toArray();
+      return { status: true, message: 'Frequent items fetched', data: items };
+    } catch (error) {
+      console.error('Error in getFrequentItemsForBranch:', error);
+      return { status: false, message: error.message, data: [] };
+    }
+  }
+
+  async getKotDiscountReports(data, options, { SaleModel } = {}) {
+    try {
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const FromDate = BaseModel.startingDate(data.starting_date, BaseModel.currentTimeZone);
+      const ToDate = BaseModel.endingDate(data.ending_date, BaseModel.currentTimeZone);
+
+      const branchObjectIds = (data.branchid || []).map(
+        (id) => new mongoose.Types.ObjectId(String(id))
+      );
+
+      const discountFilter = {
+        $or: [
+          { sale_extra_discount: { $gt: 0 } },
+          { 'items.item_discount': { $gt: 0 } },
+          { 'items.item_discount_percentage': { $gt: 0 } },
+        ],
+      };
+
+      const filters = {
+        $and: [
+          { branch_id: { $in: branchObjectIds } },
+          { sale_process: { $in: ['Add', 'Edit', 'PartialReturn'] } },
+          { was_kot_proceeded: true },
+          { updated_date: { $gte: FromDate, $lte: ToDate } },
+          { license: BaseModel.license },
+          discountFilter,
+        ],
+      };
+
+      const limit = options.limit || 5;
+      const page = options.page || 1;
+      const skip = Math.max(0, (page - 1) * limit);
+
+      const pipeline = [
+        { $match: filters },
+        { $unwind: '$items' },
+        {
+          $addFields: {
+            price_num: {
+              $let: {
+                vars: {
+                  taxPct: { $ifNull: ['$items.tax', 0] },
+                  line: {
+                    $multiply: [
+                      { $toDouble: { $ifNull: ['$items.item_price', 0] } },
+                      { $toDouble: { $ifNull: ['$items.item_quantity', 0] } },
+                    ],
+                  },
+                },
+                in: {
+                  $cond: [
+                    {
+                      $gt: [
+                        {
+                          $add: [1, { $divide: ['$$taxPct', 100] }],
+                        },
+                        0,
+                      ],
+                    },
+                    {
+                      $divide: ['$$line', { $add: [1, { $divide: ['$$taxPct', 100] }] }],
+                    },
+                    0,
+                  ],
+                },
+              },
+            },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              id: '$_id',
+              sales_id: '$sales_id',
+              date: '$date',
+              updated_date: '$updated_date',
+              table_number: '$table_number',
+            },
+            item_discount_total: {
+              $sum: {
+                $cond: [
+                  { if: { $gt: ['$items.item_discount', 0] } },
+                  {
+                    then: {
+                      $multiply: [
+                        { $toDouble: { $ifNull: ['$items.item_discount', 0] } },
+                        { $toDouble: { $ifNull: ['$items.item_quantity', 0] } },
+                      ],
+                    },
+                  },
+                  {
+                    else: {
+                      $cond: [
+                        {
+                          if: {
+                            $and: [
+                              {
+                                $gt: ['$items.item_discount_percentage', 0],
+                              },
+                              { $eq: ['$items.tax_type', 'exclusive'] },
+                            ],
+                          },
+                        },
+                        {
+                          then: {
+                            $divide: [
+                              {
+                                $multiply: [
+                                  {
+                                    $toDouble: {
+                                      $ifNull: ['$items.total_amount', 0],
+                                    },
+                                  },
+                                  {
+                                    $toDouble: {
+                                      $ifNull: ['$items.item_discount_percentage', 0],
+                                    },
+                                  },
+                                ],
+                              },
+                              100,
+                            ],
+                          },
+                        },
+                        {
+                          else: {
+                            $cond: [
+                              {
+                                if: {
+                                  $and: [
+                                    {
+                                      $gt: ['$items.item_discount_percentage', 0],
+                                    },
+                                    { $eq: ['$items.tax_type', 'inclusive'] },
+                                  ],
+                                },
+                              },
+                              {
+                                then: {
+                                  $divide: [
+                                    {
+                                      $multiply: [
+                                        '$price_num',
+                                        {
+                                          $toDouble: {
+                                            $ifNull: ['$items.item_discount_percentage', 0],
+                                          },
+                                        },
+                                      ],
+                                    },
+                                    100,
+                                  ],
+                                },
+                              },
+                              { else: 0 },
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
+            extra_discount_total: {
+              $first: { $toDouble: { $ifNull: ['$sale_extra_discount', 0] } },
+            },
+            net_amount: {
+              $first: { $toDouble: { $ifNull: ['$sales_total', 0] } },
+            },
+            extra_discount_type: {
+              $first: { $ifNull: ['$extra_discount_type', ''] },
+            },
+            extra_discount: {
+              $first: { $toDouble: { $ifNull: ['$extra_discount', 0] } },
+            },
+            has_item_percent: {
+              $max: {
+                $cond: [
+                  { if: { $gt: ['$items.item_discount_percentage', 0] } },
+                  { then: 1 },
+                  { else: 0 },
+                ],
+              },
+            },
+          },
+        },
+        { $sort: { '_id.updated_date': -1, '_id.sales_id': -1 } },
+        { $skip: skip },
+        { $limit: limit },
+      ];
+
+      const results = await salesCollection
+        .aggregate(pipeline, {
+          allowDiskUse: true,
+        })
+        .toArray();
+
+      const salesValues = [];
+      let totalAmount = 0;
+      let totalDiscountPrice = 0;
+      let totalNetAmount = 0;
+
+      for (const c of results) {
+        const updatedDate = c._id?.updated_date || c._id?.date || null;
+        const itemDisc = c.item_discount_total || 0;
+        const extraDisc = c.extra_discount_total || 0;
+        const netAmount = c.net_amount || 0;
+        const tableNumber = String(c._id?.table_number || '').trim();
+        const extraDiscountType = c.extra_discount_type || '';
+        const extraDiscountRaw = c.extra_discount || 0;
+        const hasItemPercent = c.has_item_percent || 0;
+
+        let formattedTable = 'TA';
+        if (tableNumber !== '') {
+          const lowerTable = tableNumber.toLowerCase();
+          if (lowerTable === 'take away' || lowerTable === 'takeaway') {
+            formattedTable = 'TA';
+          } else {
+            formattedTable = tableNumber;
+          }
+        }
+
+        const totalDiscount = itemDisc + extraDisc;
+        const totalAmountValue = netAmount + totalDiscount;
+
+        salesValues.push({
+          id: c._id.id,
+          sales_id: c._id.sales_id,
+          table_number: formattedTable,
+          string_date: updatedDate ? formatDate(updatedDate) : null,
+          total_amount: Math.round(totalAmountValue * 100) / 100,
+          item_discount_total: Math.round(itemDisc * 100) / 100,
+          extra_discount_total: Math.round(extraDisc * 100) / 100,
+          total_discount: Math.round(totalDiscount * 100) / 100,
+          net_amount: Math.round(netAmount * 100) / 100,
+          extra_discount_type: extraDiscountType,
+          extra_discount_value: Math.round(extraDiscountRaw * 100) / 100,
+          has_item_percent: hasItemPercent,
+        });
+
+        totalAmount += totalAmountValue;
+        totalDiscountPrice += totalDiscount;
+        totalNetAmount += netAmount;
+      }
+
+      const countPipeline = [{ $match: filters }, { $group: { _id: { id: '$_id' } } }];
+      const countResults = await salesCollection.aggregate(countPipeline).toArray();
+      const total = countResults.length;
+
+      return {
+        status: true,
+        total,
+        current_page: page,
+        total_pages: Math.ceil(total / limit),
+        per_page: limit,
+        list: salesValues,
+        totals: {
+          total_amount: Math.round(totalAmount * 100) / 100,
+          total_discount_price: Math.round(totalDiscountPrice * 100) / 100,
+          total_net_amount: Math.round(totalNetAmount * 100) / 100,
+          total_count: salesValues.length,
+        },
+        message: 'Get successfully',
+      };
+    } catch (error) {
+      console.error('Error in getKotDiscountReports:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message || 'Failed to fetch KOT discount reports',
+      };
+    }
+  }
+
+  async kotTablewiseDetailsPage(data, { SaleModel } = {}) {
+    try {
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const FromDate = BaseModel.startingDate(data.starting_date, BaseModel.currentTimeZone);
+      const ToDate = BaseModel.endingDate(data.ending_date, BaseModel.currentTimeZone);
+
+      const branchId = new mongoose.Types.ObjectId(String(data.branchid));
+
+      const filters = {
+        $and: [
+          { sale_process: { $in: ['Add', 'Edit', 'PartialReturn'] } },
+          { date: { $gte: FromDate, $lte: ToDate } },
+          { branch_id: branchId },
+          { license: BaseModel.license },
+          { was_kot_proceeded: true },
+        ],
+      };
+
+      let tablesParam = data.tables || [];
+      if (!Array.isArray(tablesParam)) {
+        tablesParam = [tablesParam];
+      }
+      const tableNumbers = [];
+      for (const t of tablesParam) {
+        if (t !== null && t !== undefined) {
+          const tStr = String(t).trim();
+          if (tStr !== '') {
+            tableNumbers.push(tStr);
+          }
+        }
+      }
+      if (tableNumbers.length > 0) {
+        filters.$and.push({ table_number: { $in: tableNumbers } });
+      }
+
+      /*
+       * $nin, not two $ne keys.
+       *
+       * This was `{ $exists: true, $ne: null, $ne: "" }`. The two $ne are the
+       * same key in one object literal, so the second silently replaced the
+       * first and only the empty string was excluded - every row with a null
+       * table_number passed a filter written to exclude exactly those.
+       */
+      filters.$and.push({
+        table_number: { $exists: true, $nin: [null, ''] },
+      });
+
+      const pipeline = [
+        { $match: filters },
+        { $unwind: '$items' },
+        {
+          $addFields: {
+            price_num: {
+              $let: {
+                vars: {
+                  taxPct: { $ifNull: ['$items.tax', 0] },
+                  line: {
+                    $multiply: [
+                      { $toDouble: { $ifNull: ['$items.item_price', 0] } },
+                      { $toDouble: { $ifNull: ['$items.item_quantity', 0] } },
+                    ],
+                  },
+                },
+                in: {
+                  $cond: [
+                    {
+                      $gt: [
+                        {
+                          $add: [1, { $divide: ['$$taxPct', 100] }],
+                        },
+                        0,
+                      ],
+                    },
+                    {
+                      $divide: ['$$line', { $add: [1, { $divide: ['$$taxPct', 100] }] }],
+                    },
+                    0,
+                  ],
+                },
+              },
+            },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              id: '$_id',
+              sales_id: '$sales_id',
+              date: '$date',
+              updated_date: '$updated_date',
+              table_number: '$table_number',
+              dine_type: '$dine_type',
+              person_count: '$person_count',
+              item_id: '$items.item_id',
+              item_name: '$items.item_name',
+              item_price: '$items.item_price',
+            },
+            qty: {
+              $sum: { $toDouble: { $ifNull: ['$items.item_quantity', 0] } },
+            },
+            line_total: {
+              $sum: { $toDouble: { $ifNull: ['$items.total_amount', 0] } },
+            },
+            base_total: {
+              $sum: {
+                $multiply: [
+                  { $toDouble: { $ifNull: ['$items.item_price', 0] } },
+                  { $toDouble: { $ifNull: ['$items.item_quantity', 0] } },
+                ],
+              },
+            },
+            pre_tax_total: {
+              $sum: '$price_num',
+            },
+            tax_total: {
+              $sum: {
+                $let: {
+                  vars: {
+                    priceTotal: {
+                      $multiply: [
+                        { $toDouble: { $ifNull: ['$items.item_price', 0] } },
+                        { $toDouble: { $ifNull: ['$items.item_quantity', 0] } },
+                      ],
+                    },
+                    itemDiscount: {
+                      $cond: {
+                        if: { $gt: ['$items.item_discount', 0] },
+                        then: {
+                          $multiply: [
+                            {
+                              $toDouble: {
+                                $ifNull: ['$items.item_discount', 0],
+                              },
+                            },
+                            {
+                              $toDouble: {
+                                $ifNull: ['$items.item_quantity', 0],
+                              },
+                            },
+                          ],
+                        },
+                        else: 0,
+                      },
+                    },
+                    taxRate: { $toDouble: { $ifNull: ['$items.tax', 0] } },
+                  },
+                  in: {
+                    $cond: {
+                      if: { $eq: ['$items.tax_type', 'inclusive'] },
+                      then: {
+                        $divide: [
+                          {
+                            $multiply: [
+                              {
+                                $subtract: ['$$priceTotal', '$$itemDiscount'],
+                              },
+                              '$$taxRate',
+                            ],
+                          },
+                          { $add: [100, '$$taxRate'] },
+                        ],
+                      },
+                      else: {
+                        $divide: [
+                          {
+                            $multiply: [
+                              {
+                                $subtract: ['$$priceTotal', '$$itemDiscount'],
+                              },
+                              '$$taxRate',
+                            ],
+                          },
+                          100,
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            item_discount_total: {
+              $sum: {
+                $cond: {
+                  if: { $gt: ['$items.item_discount', 0] },
+                  then: {
+                    $multiply: [
+                      { $toDouble: { $ifNull: ['$items.item_discount', 0] } },
+                      { $toDouble: { $ifNull: ['$items.item_quantity', 0] } },
+                    ],
+                  },
+                  else: {
+                    $cond: {
+                      if: {
+                        $and: [
+                          { $gt: ['$items.item_discount_percentage', 0] },
+                          { $eq: ['$items.tax_type', 'exclusive'] },
+                        ],
+                      },
+                      then: {
+                        $divide: [
+                          {
+                            $multiply: [
+                              {
+                                $toDouble: {
+                                  $ifNull: ['$items.total_amount', 0],
+                                },
+                              },
+                              {
+                                $toDouble: {
+                                  $ifNull: ['$items.item_discount_percentage', 0],
+                                },
+                              },
+                            ],
+                          },
+                          100,
+                        ],
+                      },
+                      else: {
+                        $cond: {
+                          if: {
+                            $and: [
+                              {
+                                $gt: ['$items.item_discount_percentage', 0],
+                              },
+                              { $eq: ['$items.tax_type', 'inclusive'] },
+                            ],
+                          },
+                          then: {
+                            $divide: [
+                              {
+                                $multiply: [
+                                  '$price_num',
+                                  {
+                                    $toDouble: {
+                                      $ifNull: ['$items.item_discount_percentage', 0],
+                                    },
+                                  },
+                                ],
+                              },
+                              100,
+                            ],
+                          },
+                          else: 0,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            extra_discount_total: {
+              $first: { $toDouble: { $ifNull: ['$sale_extra_discount', 0] } },
+            },
+            sales_total: {
+              $first: { $toDouble: { $ifNull: ['$sales_total', 0] } },
+            },
+            payment_mode: {
+              $first: { $ifNull: ['$payment_mode', ''] },
+            },
+            multi_payment: {
+              $first: { $ifNull: ['$multi_payment', null] },
+            },
+          },
+        },
+        {
+          $sort: {
+            '_id.table_number': 1,
+            '_id.updated_date': 1,
+            '_id.sales_id': 1,
+            '_id.item_name': 1,
+          },
+        },
+      ];
+
+      const results = await salesCollection
+        .aggregate(pipeline, {
+          allowDiskUse: true,
+        })
+        .toArray();
+
+      const list = results.map((row) => {
+        const id = row._id || {};
+        const updatedDate = id.updated_date || id.date || null;
+        const personCount = parseInt(id.person_count) || 0;
+
+        let qty = row.qty || 0;
+        const lineTotal = row.line_total || 0;
+        const baseTotal = row.base_total || 0;
+        const preTaxTotal = row.pre_tax_total || 0;
+        let taxTotal = row.tax_total || 0;
+        let itemDisc = row.item_discount_total || 0;
+        let extraDisc = row.extra_discount_total || 0;
+
+        if (qty < 0) qty = 0;
+        if (taxTotal < 0) taxTotal = 0;
+        if (itemDisc < 0) itemDisc = 0;
+        if (extraDisc < 0) extraDisc = 0;
+
+        let salesTotal = row.sales_total || 0;
+        if (salesTotal < 0) salesTotal = 0;
+
+        let baseLineAmount = preTaxTotal;
+        if (baseLineAmount <= 0) baseLineAmount = baseTotal;
+        if (baseLineAmount <= 0) baseLineAmount = lineTotal - taxTotal + itemDisc;
+        if (baseLineAmount < 0) baseLineAmount = 0;
+
+        const amountDisplay = Math.round(baseLineAmount * 100) / 100;
+        let amountWithoutTax = amountDisplay - itemDisc;
+        if (amountWithoutTax < 0) amountWithoutTax = 0;
+
+        let taxRecalc = lineTotal - amountWithoutTax;
+        if (taxRecalc < 0) taxRecalc = 0;
+
+        return {
+          id: id.id,
+          sales_id: id.sales_id || '',
+          table_number: id.table_number || '',
+          string_date: updatedDate ? formatDate(updatedDate) : null,
+          item_name: id.item_name || '',
+          qty: qty,
+          amount: Math.round(amountDisplay * 100) / 100,
+          tax: Math.round(taxRecalc * 100) / 100,
+          discount: Math.round(itemDisc * 100) / 100,
+          extra_discount: Math.round(extraDisc * 100) / 100,
+          total: Math.round(lineTotal * 100) / 100,
+          order_type: id.dine_type || '',
+          pax: personCount,
+          sales_total: Math.round(salesTotal * 100) / 100,
+          payment_mode: row.payment_mode || '',
+          multi_payment: row.multi_payment || null,
+        };
+      });
+
+      return {
+        status: true,
+        data: {
+          list,
+          total: list.length,
+        },
+        message: 'Get successfully',
+      };
+    } catch (error) {
+      console.error('Error in kotTablewiseDetailsPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message || 'Failed to fetch KOT table-wise details',
+      };
+    }
+  }
+
+  async pendingCustomerCategoryReportPage(data, options, { SaleModel } = {}) {
+    try {
+      const timeZone = BaseModel.currentTimeZone || 'Asia/Kolkata';
+      const fromTs = BaseModel.startingDate
+        ? BaseModel.startingDate(data.starting_date, timeZone)
+        : Date.parse(data.starting_date || '') || 0;
+      const toTs = BaseModel.endingDate
+        ? BaseModel.endingDate(data.ending_date, timeZone)
+        : Date.parse(data.ending_date || '') || Date.now();
+
+      const fromDate = new Date(fromTs || 0);
+      const toDate = new Date(toTs || Date.now());
+
+      const rawBranch = data.branchid;
+      const branchIds = Array.isArray(rawBranch) ? rawBranch : rawBranch ? [rawBranch] : [];
+
+      const branchObjectIds = branchIds
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      const andConditions = [];
+      andConditions.push({ sale_process: { $in: ['Add', 'Edit', 'PartialReturn'] } });
+      if (branchObjectIds.length) {
+        andConditions.push({ branch_id: { $in: branchObjectIds } });
+      }
+      andConditions.push({
+        updated_date: { $gte: fromDate, $lte: toDate },
+      });
+      andConditions.push({ category_id: { $ne: '' } });
+      andConditions.push({
+        $or: [
+          { payment_status: 'Partialy Paid' },
+          { payment_status: PAYMENT_STATUS.PENDING },
+          { payment_pending: { $gt: 0 } },
+        ],
+      });
+      if (BaseModel.license) {
+        andConditions.push({ license: BaseModel.license });
+      }
+
+      const filters = { $and: andConditions };
+
+      const limit = parseInt(options.limit, 10) > 0 ? parseInt(options.limit, 10) : BaseModel.limit;
+      const page = parseInt(options.page, 10) > 0 ? parseInt(options.page, 10) : 1;
+      const skip = Math.max(0, (page - 1) * limit);
+
+      const db = await BaseModel.getDb();
+      const salesCollection = db.collection('sales');
+
+      const pipeline = [
+        { $match: filters },
+        {
+          $group: {
+            _id: {
+              category_id: '$category_id',
+              category_name: '$category_name',
+            },
+            number_of_items: { $sum: '$number_of_items' },
+            pending_amount: { $sum: '$items_total' },
+            partial_amount: { $sum: '$partial_balance' },
+            due_amount: { $sum: '$payment_pending' },
+          },
+        },
+        { $sort: { pending_amount: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+      ];
+
+      const aggResults = await salesCollection.aggregate(pipeline).toArray();
+
+      const list = (aggResults || []).map((doc) => {
+        const id = doc._id || {};
+        return {
+          category_id: id.category_id ? id.category_id.toString() : '',
+          category_name: id.category_name || '',
+          sales_payment: round(doc.pending_amount || 0, 2),
+          partial_balance: round(doc.partial_amount || 0, 2),
+          due_balance: round(doc.due_amount || 0, 2),
+          sales_count: doc.number_of_items || 0,
+        };
+      });
+
+      const countPipeline = [
+        { $match: filters },
+        {
+          $group: {
+            _id: {
+              category_id: '$category_id',
+              category_name: '$category_name',
+            },
+          },
+        },
+        { $count: 'total' },
+      ];
+
+      const countDocs = await salesCollection.aggregate(countPipeline).toArray();
+      const total = (countDocs[0] && countDocs[0].total) || 0;
+
+      return {
+        status: true,
+        total,
+        current_page: page,
+        total_pages: limit ? Math.ceil(total / limit) : 0,
+        per_page: limit,
+        list,
+      };
+    } catch (error) {
+      console.error('Error in pendingCustomerCategoryReportPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async kioskReportPage(value, options, { SaleModel } = {}) {
+    try {
+      const baseModel = new BaseModel('sales');
+
+      const FromDate = baseModel.startingDate(
+        value.starting_date,
+        BaseModel.currentTimeZone || 'Asia/Kolkata'
+      );
+      const ToDate = baseModel.endingDate(
+        value.ending_date,
+        BaseModel.currentTimeZone || 'Asia/Kolkata'
+      );
+
+      const branchIds = [];
+      if (Array.isArray(value.branchid)) {
+        value.branchid.forEach((id) => {
+          if (id && mongoose.Types.ObjectId.isValid(String(id))) {
+            branchIds.push(new mongoose.Types.ObjectId(String(id)));
+          }
+        });
+      }
+
+      /*
+       * Self-service sales: a machine in the shop AND a customer own phone.
+       * Both, always - naming this report after either one alone loses the
+       * other, which has happened.
+       *
+       * channelFilter matches the modern `channel` field and, for sales
+       * written before it existed, the legacy `sale_method`. Years of
+       * trading carry only the old one, and a filter that could not see them
+       * would show a shop its history as an empty page with no error.
+       */
+      let methodFilter = {};
+      if (value.kiosk_method) {
+        methodFilter = salesChannels.channelFilter(
+          salesChannels.channelOf({ sale_method: value.kiosk_method, channel: value.kiosk_method })
+        );
+      } else {
+        methodFilter = salesChannels.channelFilter(salesChannels.SELF_SERVICE_CHANNELS);
+      }
+
+      const filters = {
+        $and: [
+          { branch_id: { $in: branchIds } },
+          { sale_process: { $in: ['Add', 'Edit', 'PartialReturn'] } },
+          methodFilter,
+          {
+            updated_date: { $gte: new Date(FromDate), $lte: new Date(ToDate) },
+            license: BaseModel.license,
+          },
+        ],
+      };
+
+      const checkResponse = await baseModel.checkPlan('sales', 'report');
+      const limitCheck = { limit: checkResponse };
+
+      const fields = BaseModel.getSelectFields(
+        SaleModel?.LegacySaleModel?.fields || SaleModel?.fields || {}
+      );
+
+      const pageOptions = {
+        limit: parseInt(options.limit, 10) || 5,
+        page: parseInt(options.page, 10) || 1,
+        sort: { updated_date: -1 },
+      };
+
+      const response = await baseModel.page('sales', limitCheck, filters, pageOptions, fields);
+      return response;
+    } catch (error) {
+      console.error('Error in kioskReportPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message,
+      };
+    }
+  }
+
+  async kiosksSummaryReportsPage(value, { SaleModel } = {}) {
+    try {
+      const baseModel = new BaseModel('sales');
+
+      const FromDate = baseModel.startingDate(
+        value.starting_date,
+        BaseModel.currentTimeZone || 'Asia/Kolkata'
+      );
+      const ToDate = baseModel.endingDate(
+        value.ending_date,
+        BaseModel.currentTimeZone || 'Asia/Kolkata'
+      );
+
+      const branchIds = [];
+      if (Array.isArray(value.branchid)) {
+        value.branchid.forEach((id) => {
+          if (id && mongoose.Types.ObjectId.isValid(String(id))) {
+            branchIds.push(new mongoose.Types.ObjectId(String(id)));
+          }
+        });
+      }
+
+      /*
+       * Self-service sales: a machine in the shop AND a customer own phone.
+       * Both, always - naming this report after either one alone loses the
+       * other, which has happened.
+       *
+       * channelFilter matches the modern `channel` field and, for sales
+       * written before it existed, the legacy `sale_method`. Years of
+       * trading carry only the old one, and a filter that could not see them
+       * would show a shop its history as an empty page with no error.
+       */
+      let methodFilter = {};
+      if (value.kiosk_method) {
+        methodFilter = salesChannels.channelFilter(
+          salesChannels.channelOf({ sale_method: value.kiosk_method, channel: value.kiosk_method })
+        );
+      } else {
+        methodFilter = salesChannels.channelFilter(salesChannels.SELF_SERVICE_CHANNELS);
+      }
+
+      const condition = {
+        branch_id: { $in: branchIds },
+        sale_process: { $in: ['Add', 'Edit', 'PartialReturn', 'FullReturn'] },
+        ...methodFilter,
+        date: { $gte: new Date(FromDate), $lte: new Date(ToDate) },
+        license: BaseModel.license,
+      };
+
+      const collection = await baseModel.getCollection('sales');
+
+      const salesSummary = await collection
+        .aggregate(
+          [
+            { $match: condition },
+            {
+              $addFields: {
+                sales_total_num: {
+                  $toDouble: { $ifNull: ['$items_total', 0] },
+                },
+                tax_num: { $toDouble: { $ifNull: ['$tax', 0] } },
+                items_return_total_num: {
+                  $toDouble: {
+                    $ifNull: [
+                      {
+                        $cond: {
+                          if: { $isArray: '$items_return_total' },
+                          then: { $arrayElemAt: ['$items_return_total', 0] },
+                          else: '$items_return_total',
+                        },
+                      },
+                      0,
+                    ],
+                  },
+                },
+                discount_num: {
+                  $toDouble: { $ifNull: ['$discount', 0] },
+                },
+                company_price_total_num: {
+                  $toDouble: {
+                    $ifNull: [
+                      {
+                        $cond: {
+                          if: { $isArray: '$total_companyprice' },
+                          then: { $arrayElemAt: ['$total_companyprice', 0] },
+                          else: '$total_companyprice',
+                        },
+                      },
+                      0,
+                    ],
+                  },
+                },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                sales_include_tax: { $sum: '$sales_total_num' },
+                sales_exclude_tax: {
+                  $sum: {
+                    $subtract: ['$sales_total_num', '$tax_num'],
+                  },
+                },
+                net_sales: {
+                  $sum: {
+                    $subtract: ['$sales_total_num', { $add: ['$tax_num'] }],
+                  },
+                },
+                net_sales_tax: { $sum: '$tax_num' },
+                discounts: { $sum: '$discount_num' },
+                gross_profit: {
+                  $sum: {
+                    $subtract: [
+                      {
+                        $subtract: ['$sales_total_num', { $add: ['$tax_num'] }],
+                      },
+                      '$company_price_total_num',
+                    ],
+                  },
+                },
+                refunds: { $sum: '$items_return_total_num' },
+                cogs: { $sum: '$company_price_total_num' },
+              },
+            },
+          ],
+          { allowDiskUse: true }
+        )
+        .toArray();
+
+      const result = salesSummary[0] || {};
+
+      const paymentModeSummary = await collection
+        .aggregate([
+          { $match: condition },
+          {
+            $addFields: {
+              sales_total_num: {
+                $toDouble: { $ifNull: ['$items_total', 0] },
+              },
+            },
+          },
+          {
+            $group: {
+              _id: '$payment_mode',
+              amount: { $sum: '$sales_total_num' },
+            },
+          },
+        ])
+        .toArray();
+
+      const paymentModeTotals = {};
+      paymentModeSummary.forEach((row) => {
+        const mode = row._id || 'Unknown';
+        paymentModeTotals[mode] = Math.round(row.amount * 100) / 100;
+      });
+
+      return {
+        status: true,
+        data: {
+          sales_include_tax: result.sales_include_tax || 0,
+          sales_exclude_tax: result.sales_exclude_tax || 0,
+          net_sales: result.net_sales || 0,
+          net_sales_tax: result.net_sales_tax || 0,
+          discounts: result.discounts || 0,
+          gross_profit: result.gross_profit || 0,
+          refunds: result.refunds || 0,
+          cogs: result.cogs || 0,
+          payment_mode_totals: paymentModeTotals,
+        },
+        message: 'Sales summary report retrieved successfully',
+      };
+    } catch (error) {
+      console.error('Error in kiosksSummaryReportsPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: 'Error: ' + error.message,
+      };
+    }
+  }
+
+  async kiosksGraphicalReportsPage(value, { SaleModel } = {}) {
+    try {
+      const baseModel = new BaseModel('sales');
+
+      const FromDate = baseModel.startingDate(
+        value.starting_date,
+        BaseModel.currentTimeZone || 'Asia/Kolkata'
+      );
+      const ToDate = baseModel.endingDate(
+        value.ending_date,
+        BaseModel.currentTimeZone || 'Asia/Kolkata'
+      );
+
+      const branchIds = [];
+      if (Array.isArray(value.branchid)) {
+        value.branchid.forEach((id) => {
+          if (id && mongoose.Types.ObjectId.isValid(String(id))) {
+            branchIds.push(new mongoose.Types.ObjectId(String(id)));
+          }
+        });
+      }
+
+      /*
+       * Self-service sales: a machine in the shop AND a customer own phone.
+       * Both, always - naming this report after either one alone loses the
+       * other, which has happened.
+       *
+       * channelFilter matches the modern `channel` field and, for sales
+       * written before it existed, the legacy `sale_method`. Years of
+       * trading carry only the old one, and a filter that could not see them
+       * would show a shop its history as an empty page with no error.
+       */
+      let methodFilter = {};
+      if (value.kiosk_method) {
+        methodFilter = salesChannels.channelFilter(
+          salesChannels.channelOf({ sale_method: value.kiosk_method, channel: value.kiosk_method })
+        );
+      } else {
+        methodFilter = salesChannels.channelFilter(salesChannels.SELF_SERVICE_CHANNELS);
+      }
+
+      const condition = {
+        branch_id: { $in: branchIds },
+        sale_process: { $in: ['Add', 'Edit', 'PartialReturn'] },
+        ...methodFilter,
+        date: { $gte: new Date(FromDate), $lte: new Date(ToDate) },
+        license: BaseModel.license,
+      };
+
+      const collection = await baseModel.getCollection('sales');
+
+      const pipeline = [
+        { $match: condition },
+        {
+          $project: {
+            payment_mode: 1,
+            amount: { $toDouble: { $ifNull: ['$items_total', 0] } },
+            datetime: {
+              $dateToString: {
+                format: '%Y-%m-%d %H:00',
+                date: { $toDate: '$updated_date' },
+                timezone: BaseModel.currentTimeZone || 'Asia/Kolkata',
+              },
+            },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              datetime: '$datetime',
+              payment_mode: '$payment_mode',
+            },
+            total: { $sum: '$amount' },
+          },
+        },
+        {
+          $group: {
+            _id: '$_id.datetime',
+            payments: {
+              $push: {
+                mode: '$_id.payment_mode',
+                amount: '$total',
+              },
+            },
+          },
+        },
+        {
+          $sort: { _id: 1 },
+        },
+      ];
+
+      const results = await collection.aggregate(pipeline, { allowDiskUse: true }).toArray();
+
+      const data = {
+        labels: [],
+        cash: [],
+        upi: [],
+      };
+
+      results.forEach((entry) => {
+        const hourLabel = entry._id;
+        data.labels.push(hourLabel);
+
+        let cashAmount = 0;
+        let upiAmount = 0;
+
+        entry.payments.forEach((payment) => {
+          if (payment.mode && payment.mode.toLowerCase() === 'cash') {
+            cashAmount = Math.round(payment.amount * 100) / 100;
+          } else if (payment.mode && payment.mode.toLowerCase() === 'upi') {
+            upiAmount = Math.round(payment.amount * 100) / 100;
+          }
+        });
+
+        data.cash.push(cashAmount);
+        data.upi.push(upiAmount);
+      });
+
+      return {
+        status: true,
+        data,
+        message: 'Kiosk hourly payment chart data fetched successfully',
+      };
+    } catch (error) {
+      console.error('Error in kiosksGraphicalReportsPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: 'Error: ' + error.message,
+      };
+    }
+  }
+
+  async itemExpiryReportPage(data, options, { SaleModel } = {}) {
+    try {
+      // Mirror legacy Sale.itemExpiryReportPage behaviour but keep logic in
+      // the repository layer instead of on the Mongoose model.
+      const baseModel = new BaseModel('items');
+
+      const fromDate = baseModel.startingDate(
+        data.starting_date,
+        BaseModel.currentTimeZone || 'Asia/Kolkata'
+      );
+      const toDate = baseModel.endingDate(
+        data.ending_date,
+        BaseModel.currentTimeZone || 'Asia/Kolkata'
+      );
+
+      let branchId = data.branchid;
+      if (Array.isArray(branchId)) {
+        branchId = branchId[0];
+      }
+      if (branchId && typeof branchId === 'string' && mongoose.Types.ObjectId.isValid(branchId)) {
+        branchId = new mongoose.Types.ObjectId(branchId);
+      }
+
+      const limit = parseInt(options.limit, 10) || 5;
+      const page = parseInt(options.page, 10) || 1;
+      const skip = Math.max(0, (page - 1) * limit);
+
+      const collection = await baseModel.getCollection('items');
+
+      // items_expiry_date may be stored as a BSON Date (PHP legacy) or as a
+      // string "YYYY-MM-DD" (Node.js created items).  Use $or to match both.
+      const fromDateObj = new Date(fromDate);
+      const toDateObj = new Date(toDate);
+      const fromDateStr = fromDateObj.toISOString().split('T')[0];
+      const toDateStr = toDateObj.toISOString().split('T')[0];
+
+      const filters = {
+        $or: [
+          { items_expiry_date: { $gte: fromDateObj, $lte: toDateObj } },
+          { items_expiry_date: { $gte: fromDateStr, $lte: toDateStr } },
+        ],
+        available_quantity: { $gt: 0 },
+        'branch_access.branch_id': branchId,
+      };
+
+      const total = await collection.countDocuments(filters);
+
+      const expiredItems = await collection
+        .find(filters, {
+          projection: {
+            name: 1,
+            available_quantity: 1,
+            category_name: 1,
+            items_expiry_date: 1,
+          },
+          skip,
+          limit,
+        })
+        .toArray();
+
+      const itemData = expiredItems.map((item) => {
+        const expiryDate =
+          item.items_expiry_date instanceof Date
+            ? item.items_expiry_date.toISOString().split('T')[0]
+            : new Date(item.items_expiry_date).toISOString().split('T')[0];
+
+        return {
+          item_name: item.name || '',
+          available_quantity: item.available_quantity || 0,
+          category_name: item.category_name || '',
+          expiry_date: expiryDate,
+        };
+      });
+
+      return {
+        status: true,
+        total,
+        current_page: page,
+        total_pages: Math.ceil(total / limit),
+        per_page: limit,
+        list: itemData,
+      };
+    } catch (error) {
+      console.error('Error in itemExpiryReportPage:', error);
+      return {
+        status: false,
+        data: null,
+        message: error.message || 'Failed to fetch item expiry report',
+      };
+    }
+  }
+
+  async salePage(filters, options, branchId, { SaleModel } = {}) {
+    try {
+      const Model = this.getModel(SaleModel);
+
+      const limit = parseInt(options?.limit, 10) || 10;
+      const page = parseInt(options?.page, 10) || 1;
+      const skip = (page - 1) * limit;
+      const sort = options?.sort || { _id: -1 };
+
+      const query = { ...(await demoData.filterCurrent('sales')) };
+
+      // Apply branchId filter
+      if (branchId) {
+        const { ObjectId } = require('mongodb');
+        if (ObjectId.isValid(String(branchId))) {
+          query.branch_id = new mongoose.Types.ObjectId(String(branchId));
+        } else {
+          query.branch_id = branchId;
+        }
+      }
+
+      // Apply filters
+      if (filters && typeof filters === 'object') {
+        for (const [key, value] of Object.entries(filters)) {
+          if (key === 'branch_id') continue; // already handled
+          /*
+           * TAKEAWAY IS SPELLED TWO WAYS AND ONLY ONE READER KNEW.
+           *
+           * getTablesWithActiveOrders has always accepted both - the line
+           * reads `dType === 'Take away' || dType === 'Takeaway'` - which is
+           * the shape of a field that holds both in real data. This path
+           * matched whichever single string the caller happened to send.
+           *
+           * So the handset's floor drew a takeaway card, because the query
+           * behind it takes both, and tapping it asked for exactly
+           * "Take away" and got nothing. Owner: "one order show as take away,
+           * when tap, inside shows no active orders."
+           *
+           * Widened here rather than in the app, because the app that is
+           * asking the wrong question is already installed on handsets and
+           * this is the half that can be fixed without reinstalling any of
+           * them.
+           */
+          if (key === 'dine_type' && TAKEAWAY_SAID.includes(value)) {
+            query[key] = { $in: TAKEAWAY_SAID };
+            continue;
+          }
+          query[key] = value;
+        }
+      }
+
+      // Add license filter
+      if (BaseModel.license) {
+        query.license = BaseModel.license;
+      }
+
+      const [docs, total] = await Promise.all([
+        Model.find(query).sort(sort).skip(skip).limit(limit).lean(),
+        Model.countDocuments(query),
+      ]);
+
+      return {
+        status: true,
+        message: docs.length ? 'Records fetched' : 'No records found',
+        data: {
+          list: docs,
+          total,
+          per_page: limit,
+          current_page: page,
+          total_pages: Math.max(Math.ceil(total / limit), 1),
+        },
+      };
+    } catch (error) {
+      console.error('Error in salePage:', error);
+      return { status: false, message: error.message, data: null };
+    }
+  }
+
+  /**
+   * The next bill number for a branch: the counter and the format together.
+   *
+   * THE ONLY DOOR. Both the till and the customer's own ordering page come
+   * through here, and they have to: they share one counter, so a year that
+   * resets on one path and not the other would have the till issuing numbers
+   * the year had already used. sale.service.js used to take the number and
+   * build it itself, which is how the two would have drifted.
+   *
+   * `fallbackPrefix` exists for those callers, which hold the shop's prefix
+   * already and would rather not have this read the branch to find the same
+   * answer twice.
+   */
+  async generateSalesIdForBranch(branchIdRaw, { reseed = false, fallbackPrefix } = {}) {
+    if (!branchIdRaw) {
+      throw new Error('branchId is required to generate sales_id');
+    }
+
+    const db = await BaseModel.getDb();
+    const branches = db.collection('branches');
+    const salesCollection = db.collection('sales');
+
+    const branchId =
+      branchIdRaw instanceof mongoose.Types.ObjectId
+        ? branchIdRaw
+        : mongoose.Types.ObjectId.isValid(String(branchIdRaw))
+          ? new mongoose.Types.ObjectId(String(branchIdRaw))
+          : branchIdRaw;
+
+    const branchDoc = await branches.findOne({
+      _id: branchId,
+      ...(BaseModel.license ? { license: BaseModel.license } : {}),
+    });
+    // The prefix comes from the branch config. An empty prefix is honoured - a
+    // shop may want plain numbers - so only a branch that never set the field
+    // falls back to the default 'S'.
+    const prefixRaw = branchDoc?.sales_prefix ?? branchDoc?.salesPrefix;
+    const prefix =
+      fallbackPrefix !== undefined
+        ? String(fallbackPrefix)
+        : prefixRaw != null
+          ? prefixRaw.toString().trim()
+          : 'S';
+    const prefixLength = prefix.length;
+
+    void prefixLength;
+    void salesCollection;
+    /*
+     * WHICH NUMBERING PERIOD THIS BILL BELONGS TO.
+     *
+     * Empty for every shop that has not asked for one, which is all of them
+     * until somebody turns it on - and an empty period produces exactly the
+     * number this method produced before it existed. See _billPeriod.
+     */
+    const period = this._billPeriod(branchDoc);
+
+    /* The branch's own licence first: see nextSalesNumberForBranch. The
+       ambient one is a fallback for a branch this process cannot read. */
+    const n = await this.nextSalesNumberForBranch(
+      branchId,
+      (branchDoc && branchDoc.license) || BaseModel.license,
+      { reseed, period }
+    );
+    return this.buildDocNumber('S', branchId, n, {
+      fallbackPrefix: prefix,
+      period: period.label,
+    });
+  }
+
+  /**
+   * The numbering period a bill made RIGHT NOW falls in, for this branch.
+   *
+   * Owner: "we need year pattern required in the sales bill number example
+   * attached have 26 in the year... you suggest per day increase or year wise
+   * reset better tell me international standards", and on the answer: "i
+   * accept recommandation and may configurable if people from EU and
+   * international."
+   *
+   * IN THE SHOP'S OWN CLOCK, not the server's. A bill rung up at half past
+   * midnight on the first of April in Chennai belongs to the new financial
+   * year; a cloud instance running in UTC would still call it March and put
+   * it in the old one - which is a bill numbered into a year that has closed,
+   * and the kind of thing an auditor finds rather than a test.
+   *
+   * Midday local is used rather than the exact instant so that a daylight
+   * shift of an hour either way cannot move a bill across a year boundary.
+   *
+   * Off unless the shop asked, and off is the shape of every number issued in
+   * this product so far. See utils/bill-number.js for the rule this obeys.
+   */
+  _billPeriod(branchDoc, when = new Date()) {
+    const reset = String((branchDoc && branchDoc.bill_number_reset) || '').trim();
+    if (!billNumber.RESET_MODES.includes(reset) || reset === 'off') {
+      return { key: '', label: '', mode: 'off' };
+    }
+    try {
+      const zone = onlineOrdering.normalizeTimeZone(branchDoc && branchDoc.time_zone);
+      const local = moment(when).tz(zone);
+      const atNoon = new Date(local.year(), local.month(), local.date(), 12, 0, 0);
+      return billNumber.periodFor(atNoon, {
+        reset,
+        financialYearStartMonth: Number(branchDoc && branchDoc.bill_number_fy_start_month) || 4,
+      });
+    } catch (e) {
+      /* A time zone nobody can read must not stop a shop billing. Off is the
+         behaviour every shop had before this existed. */
+      console.warn('[bill-number] could not read the shop clock:', e && e.message);
+      return { key: '', label: '', mode: 'off' };
+    }
+  }
+
+  /*
+   * The next bill number for a branch, atomically.
+   *
+   * The old way read the LAST INSERTED sale and added one, which minted
+   * duplicate bill numbers two different ways: two simultaneous saves both
+   * read the same "last" and both got the same next number, and a sync merge
+   * can insert an older-numbered sale last, so the next bill reused a number
+   * the branch had already issued. Both have happened on live data.
+   *
+   * A per-branch counter moved with $inc is atomic in MongoDB: every caller
+   * gets a distinct number no matter how many save at once. It is seeded once
+   * from the highest number the branch ever issued - set-if-absent, so two
+   * concurrent seeders cannot regress it - and it lives in a counters
+   * collection that does not ride the sync wire, so each side numbers its own
+   * writes and never inherits a counter that went backwards.
+   */
+  async nextSalesNumberForBranch(branchIdRaw, licenseRaw, { reseed = false, period = null } = {}) {
+    const db = await BaseModel.getDb();
+    const counters = db.collection('counters');
+
+    /*
+     * ONE COUNTER PER BRANCH, whichever door the sale came through.
+     *
+     * The licence used to be whatever the caller happened to hold, and on the
+     * customer's own ordering page there is no caller to ask: /online-ordering
+     * is public, so BaseModel.license carried whatever the last signed-in
+     * request in this process left behind - the real licence, or nothing. A
+     * branch ended up with two counters, one keyed by the licence and one by
+     * the empty string, each seeded once and each counting on alone. The
+     * moment both existed they issued the same numbers and the unique index
+     * refused the second: the customer got "E11000 duplicate key ... sales_id"
+     * where an order should have been, with a Retry that asked for the same
+     * number again.
+     *
+     * The branch's own licence is the one answer every door agrees on.
+     */
+    let license = licenseRaw;
+    if (!license && branchIdRaw) {
+      try {
+        const owner = await db.collection('branches').findOne(
+          {
+            _id: mongoose.Types.ObjectId.isValid(String(branchIdRaw))
+              ? new mongoose.Types.ObjectId(String(branchIdRaw))
+              : branchIdRaw,
+          },
+          { projection: { license: 1 } }
+        );
+        if (owner && owner.license) license = owner.license;
+      } catch (e) {
+        /* A branch that cannot be read leaves the caller's answer standing;
+           the duplicate backstop below still holds. */
+      }
+    }
+
+    const key = {
+      kind: 'sales_id',
+      branch_key: String(branchIdRaw || ''),
+      license_key: String(license || ''),
+    };
+
+    /* Idempotent and cheap; the unique index is what makes the concurrent
+       seed below safe, so it is ensured before first use rather than hoped
+       for. A failure leaves the flag unset so the next call tries again. */
+    if (!this.constructor._countersIndexEnsured) {
+      this.constructor._countersIndexEnsured = true;
+      try {
+        await counters.createIndex(
+          { kind: 1, branch_key: 1, license_key: 1 },
+          { unique: true, name: 'one_counter_per_scope' }
+        );
+      } catch (e) {
+        this.constructor._countersIndexEnsured = false;
+      }
+    }
+
+    // The bill-number uniqueness backstop, ensured alongside the counter.
+    await this._ensureSalesIdIndex(db);
+
+    /*
+     * WHICH PERIOD THE COUNTER IS COUNTING, stored on the row rather than in
+     * the key.
+     *
+     * Keying on it would mean a second row per branch per year, and the
+     * unique index that guards this collection - one_counter_per_scope, on
+     * kind + branch + licence - would refuse it. Changing that index means a
+     * migration on ninety live shops in the path that numbers every bill, to
+     * store a number that fits perfectly well on the row already there.
+     *
+     * Empty when the shop has not asked for a reset, which is how every
+     * existing row already reads once $ifNull has done its work below.
+     */
+    const wantedPeriod = String((period && period.key) || '');
+
+    const existing = await counters.findOne(key);
+    if (!existing) {
+      const seed = await this.maxIssuedSalesNumber(branchIdRaw, licenseRaw, {
+        periodLabel: (period && period.label) || '',
+      });
+      /* With the unique index, one of two concurrent seeders inserts and the
+         other's upsert errors; both then increment the same row. */
+      await counters
+        .updateOne(key, { $setOnInsert: { seq: seed, period_key: wantedPeriod } }, { upsert: true })
+        .catch(() => {});
+    }
+
+    /*
+     * Asked for after a number came back taken: catch the counter up.
+     *
+     * A counter can sit behind the sales it is numbering - a restore that
+     * brought the sales back without the counters, or numbers issued through
+     * the second counter this method no longer creates. Adding one then walks
+     * into every taken number in turn, a failed order each time. $max only
+     * ever raises, so a number allocated concurrently cannot be undone by it.
+     */
+    if (reseed) {
+      const behind = await this.maxIssuedSalesNumber(branchIdRaw, license, {
+        periodLabel: (period && period.label) || '',
+      });
+      if (behind > 0) {
+        /*
+         * The period is stamped here too, so catching up cannot leave the row
+         * claiming a year it is no longer counting - which would make the
+         * very next bill roll over a second time and restart at one.
+         */
+        await counters
+          .updateOne(
+            key,
+            { $max: { seq: behind }, $set: { period_key: wantedPeriod } },
+            { upsert: true }
+          )
+          .catch(() => {});
+      }
+    }
+
+    /*
+     * THE ROLL-OVER, IN ONE ATOMIC STEP.
+     *
+     * A read, a compare and a write would be three, and a year turns over at
+     * midnight in a restaurant that is still serving: two tills billing in
+     * that second would both read the old year, both reset to zero and both
+     * issue number one. One pipeline update is a single atomic operation on
+     * the document, so the second caller sees whatever the first left.
+     *
+     * Same period, or no period at all: add one, exactly as this did before.
+     * A different period: start again at one and stamp the new period on the
+     * row. `$ifNull` is what makes every counter written before this change
+     * read as "no period" rather than as a mismatch - otherwise the first
+     * bill on every shop in the estate would restart at one.
+     *
+     * Needs MongoDB 4.2 for pipeline updates; the product ships 7.0.
+     */
+    const res = await counters.findOneAndUpdate(
+      key,
+      [
+        {
+          $set: {
+            seq: {
+              $cond: [
+                { $eq: [{ $ifNull: ['$period_key', ''] }, wantedPeriod] },
+                { $add: [{ $ifNull: ['$seq', 0] }, 1] },
+                1,
+              ],
+            },
+            period_key: wantedPeriod,
+          },
+        },
+      ],
+      { returnDocument: 'after' }
+    );
+    const doc = res && typeof res.seq === 'number' ? res : res && res.value;
+    if (!doc || typeof doc.seq !== 'number') {
+      throw new Error('could not allocate a sales number for this branch');
+    }
+    return doc.seq;
+  }
+
+  /*
+   * A short, stable code unique to THIS till.
+   *
+   * The per-branch counter is atomic but LOCAL to each till and never synced,
+   * so two tills in one branch each count their own sequence and hand out the
+   * same numbers - the cause of duplicate bill numbers across devices. A local
+   * counter cannot fix that on its own: independent offline tills cannot agree
+   * on "the next number" without colliding. So each till stamps its own code
+   * into every bill number, and no two tills ever share a numbering space.
+   *
+   * Generated once and kept in device_meta - a collection that, like counters,
+   * does NOT ride the sync wire - so it survives restarts and never travels to
+   * another till. Cached on the class after first read. Four base-36 chars is
+   * ~1.68M codes; with 35 tills the chance any two share one is ~0.04%, and the
+   * unique index below turns even that into a caught retry, never a silent dup.
+   */
+  async deviceTag() {
+    if (this.constructor._deviceTag) return this.constructor._deviceTag;
+    try {
+      const db = await BaseModel.getDb();
+      const meta = db.collection('device_meta');
+      let doc = await meta.findOne({ _id: 'device_tag' });
+      if (!doc || !doc.tag) {
+        const bytes = crypto.randomBytes(6);
+        let n = 0;
+        for (const b of bytes) n = n * 256 + b; // < 2^48, exact in a double
+        const tag = n.toString(36).toUpperCase().slice(-4).padStart(4, '0');
+        // Set-if-absent so two first-sales racing on a fresh till settle on one.
+        await meta
+          .updateOne(
+            { _id: 'device_tag' },
+            { $setOnInsert: { _id: 'device_tag', tag, createdAt: new Date() } },
+            { upsert: true }
+          )
+          .catch(() => {});
+        doc = await meta.findOne({ _id: 'device_tag' });
+      }
+      this.constructor._deviceTag = (doc && doc.tag) || '';
+    } catch (e) {
+      // No tag rather than a failed sale. An untagged number is the old
+      // behaviour, no worse than before; the next sale tries again.
+      this.constructor._deviceTag = '';
+    }
+    return this.constructor._deviceTag;
+  }
+
+  /*
+   * Build a full bill number: prefix, this till's code, then the running
+   * number. Single source of the format, so the normal sale path and the
+   * kiosk/QR path can never drift apart. Falls back to the old untagged form
+   * only if a till code could not be read, which must never fail a sale.
+   */
+  async buildSalesId(prefix, n, { period = '' } = {}) {
+    const tag = await this.deviceTag();
+    const p = (prefix || '').toString().trim();
+    /*
+     * The one shape utils/bill-number.js cannot express: a prefix glued
+     * straight onto the number with no separator, which is what a till with
+     * no code has always produced. Kept byte for byte while no year is asked
+     * for, because changing the shape of every number on those shops is not
+     * something to do on the way past.
+     */
+    if (!tag && !period) return `${p}${String(n).padStart(6, '0')}`;
+    // An empty prefix yields just the tag+number (or a bare number) - no leading
+    // dash - so a shop that clears its prefix still gets clean bill numbers.
+    const head = tag ? (p ? `${p}-${tag}` : tag) : p;
+    const built = billNumber.compose({
+      typeLetter: head,
+      period,
+      sequence: n,
+      sequenceWidth: 6,
+    });
+    if (built.warning) console.warn('[bill-number]', built.warning);
+    return built.number;
+  }
+
+  /*
+   * The gateway-assigned code for this till, like "D1" - unique per shop
+   * because only the gateway sees every device. The sync agent writes it into
+   * device_meta when the till checks in. Empty until then, which is why the
+   * readable format keeps the till-tag fallback: numbering must never wait on
+   * the gateway. Only a real code is cached, so it is picked up the moment it
+   * arrives, without a restart.
+   */
+  async deviceCode() {
+    if (this.constructor._deviceCode) return this.constructor._deviceCode;
+    try {
+      const db = await BaseModel.getDb();
+      const doc = await db.collection('device_meta').findOne({ _id: 'device_code' });
+      const code = (doc && doc.code) || '';
+      if (code) this.constructor._deviceCode = code;
+      return code;
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /*
+   * A short, stable code for a branch, like "B1" - its position among this
+   * licence's branches ordered by when they were created. Deterministic, so
+   * every till derives the same code without coordinating, and stable, because
+   * a newer branch only ever appends. It is a label only: the device code is
+   * what makes a number unique, so a rare mid-sync disagreement is cosmetic.
+   */
+  async branchCode(branchId) {
+    if (!branchId) return '';
+    const id = String(branchId);
+    const cached = this.constructor._branchCodes;
+    if (cached && cached[id]) return cached[id];
+    try {
+      const db = await BaseModel.getDb();
+      const branches = db.collection('branches');
+      const filter = {};
+      if (BaseModel.license) filter.license = BaseModel.license;
+      const rows = await branches
+        .find(filter, { projection: { _id: 1, created_date: 1 } })
+        .toArray();
+      rows.sort((a, b) => {
+        const ca = a.created_date ? new Date(a.created_date).getTime() : 0;
+        const cb = b.created_date ? new Date(b.created_date).getTime() : 0;
+        if (ca !== cb) return ca - cb;
+        return String(a._id).localeCompare(String(b._id));
+      });
+      const map = {};
+      rows.forEach((r, i) => {
+        map[String(r._id)] = 'B' + (i + 1);
+      });
+      this.constructor._branchCodes = map;
+      return map[id] || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  /*
+   * A document number in the readable scheme, when the pieces are there:
+   *
+   *   <R->? <type> <branch> <device> - <number>
+   *   SB1D1-000045   a sale        PB1D1-000008   a purchase
+   *   R-SB1D1-000012 a sales return  R-PB1D1-000003 a purchase return
+   *
+   * Until this till has BOTH a branch code and a gateway-assigned device code
+   * it falls back to the till-tagged number (SID-A3F9-000045), which is already
+   * collision-free - so the visible format changes exactly once, cleanly, and
+   * a sale never waits on the gateway.
+   */
+  /**
+   * The bill number itself, inside the sixteen characters a tax invoice is
+   * allowed.
+   *
+   * CGST Rule 46(b): a consecutive serial number, not exceeding sixteen
+   * characters, of letters, digits, "-" and "/", unique for a financial year.
+   * The shop's own reference invoice - VR26-27VIR006782 - is exactly sixteen,
+   * because whoever built that ran into the same wall.
+   *
+   * The parts are assembled by utils/bill-number.js, which shortens the
+   * RUNNING NUMBER when something has to give and says so: dropping the year
+   * would break uniqueness for the year, and dropping the till code would let
+   * two tills mint the same number. With no year asked for it produces exactly
+   * what the expression here produced before, which is pinned by test.
+   */
+  async buildDocNumber(
+    typeLetter,
+    branchId,
+    n,
+    { isReturn = false, fallbackPrefix = 'S', period = '' } = {}
+  ) {
+    const [branchCode, deviceCode] = await Promise.all([
+      this.branchCode(branchId),
+      this.deviceCode(),
+    ]);
+    if (branchCode && deviceCode) {
+      const built = billNumber.compose({
+        typeLetter: `${isReturn ? 'R-' : ''}${typeLetter}`,
+        branchCode,
+        deviceCode,
+        period,
+        sequence: n,
+        sequenceWidth: 6,
+      });
+      /* A shop whose codes leave no room is told, once per bill, in words it
+         can act on. Never thrown: an ugly legal number beats no sale. */
+      if (built.warning) console.warn('[bill-number]', built.warning);
+      return built.number;
+    }
+    return this.buildSalesId(fallbackPrefix, n, { period });
+  }
+
+  /*
+   * The hard backstop: no two sales in a licence may share a bill number, ever.
+   * The till code above makes a collision astronomically unlikely; this makes a
+   * silent duplicate impossible - a stray collision fails loud and is retried
+   * for the next number instead of quietly becoming a second SID000005.
+   *
+   * Best-effort and lazy, like the counter index: on a shop that still carries
+   * legacy duplicates the build throws and the flag stays unset, so it simply
+   * builds later, once those are cleaned. Partial on a string bill number so
+   * documents without one are ignored.
+   */
+  async _ensureSalesIdIndex(db) {
+    /* Once per DATABASE. The old latch was a static boolean, which on a
+       process serving many shops meant the FIRST shop to make a sale got this
+       index and no other shop ever did. For a unique index that guards bill
+       numbers, that is not a missing optimisation - it is the guarantee
+       quietly not applying to almost everyone. */
+    await ensureIndexOnce(
+      db.collection('sales'),
+      { license: 1, sales_id: 1 },
+      {
+        unique: true,
+        partialFilterExpression: { sales_id: { $type: 'string' } },
+        name: 'unique_sales_id_per_license',
+      }
+    );
+  }
+
+  /*
+   * The answer for an order that already exists.
+   *
+   * Built in one place because it is returned from two: the lookup before the
+   * insert, and the insert that lost the race to a unique index. If those ever
+   * answered differently, a handset would behave differently depending on
+   * which microsecond its retry arrived in.
+   *
+   * `duplicate: true` is on it so the app can tell "your order is in" from "we
+   * took your order just now", which matters when a waiter is standing there
+   * wondering whether to send again.
+   */
+  _duplicateOrderAnswer(already) {
+    return {
+      status: true,
+      message: 'Order placed successfully',
+      data: {
+        tokenId: already.token_id || already.tokenId || '',
+        sale_id: already._id.toString(),
+        sales_id: already.sales_id,
+        branch_name: already.branch_name,
+        items: already.items || [],
+        subtotal: already.sub_total ?? already.subtotal ?? 0,
+        discount: already.discount ?? 0,
+        tax: already.tax ?? 0,
+        total: already.sales_total ?? already.total ?? 0,
+        payment_status: already.payment_status,
+        duplicate: true,
+      },
+    };
+  }
+
+  /*
+   * One order per key, enforced by the database rather than by a lookup.
+   *
+   * A read-then-write cannot stop two simultaneous copies of the same order:
+   * both read nothing, both write. Only the index can, and it has to be there
+   * for EVERY shop, which is why it goes through ensureIndexOnce - a static
+   * boolean would give it to whichever shop made the first table order after
+   * a restart and to nobody else.
+   *
+   * Partial, on a string key, so the millions of till sales that carry no key
+   * are not all colliding on null.
+   */
+  async _ensureIdempotencyIndex(db) {
+    await ensureIndexOnce(
+      db.collection('sales'),
+      { license: 1, idempotency_key: 1 },
+      {
+        unique: true,
+        partialFilterExpression: { idempotency_key: { $type: 'string' } },
+        name: 'unique_idempotency_key_per_license',
+      }
+    );
+  }
+
+  /* A clash on the key above, told apart from a clash on the bill number so
+     the two are handled differently: a bill number is re-taken, a repeated
+     order is answered with the order that already exists. */
+  isDuplicateIdempotencyError(err) {
+    if (!err || (err.code !== 11000 && err.code !== 11001)) return false;
+    const where = `${err.message || ''} ${JSON.stringify(err.keyPattern || err.keyValue || {})}`;
+    return /idempotency_key/i.test(where);
+  }
+
+  isDuplicateSalesIdError(err) {
+    if (!err || (err.code !== 11000 && err.code !== 11001)) return false;
+    const where = `${err.message || ''} ${JSON.stringify(err.keyPattern || err.keyValue || {})}`;
+    return /sales_id/i.test(where);
+  }
+
+  /*
+   * Create a sale, and if the bill number lost a one-in-a-million race, take
+   * the next number and try again rather than fail the sale. `nextId` returns a
+   * freshly allocated bill number. Only a bill-number clash is retried; every
+   * other error is thrown straight through, unchanged.
+   */
+  async createSaleUnique(data, nextId, { attempts = 6 } = {}) {
+    for (let i = 0; ; i++) {
+      try {
+        return await this.create(data);
+      } catch (err) {
+        if (i >= attempts - 1 || !this.isDuplicateSalesIdError(err)) throw err;
+        const sid = await nextId();
+        data.sales_id = sid;
+        data.invoice_number = sid;
+        data.sale_no = sid;
+      }
+    }
+  }
+
+  /*
+   * The highest number this branch has ever put on a bill, whatever the
+   * prefix was at the time. Runs once per branch, to seed its counter.
+   */
+  /*
+   * Insert an order, taking a fresh bill number if this one has just been taken.
+   *
+   * The till has had this since bill numbers became unique (createSaleUnique);
+   * the customer's own ordering page never did, so a collision reached the
+   * phone as "E11000 duplicate key error ... unique_sales_id_per_license",
+   * under a Retry button that asked for the very same number again. Each retry
+   * catches the counter up to the highest number the branch has actually
+   * issued, so a counter that has fallen behind is right on the next attempt
+   * rather than after as many attempts as there are taken numbers.
+   *
+   * Only a duplicate BILL NUMBER is retried. Anything else - a duplicate
+   * idempotency key above all, which means this very order is already saved -
+   * is raised, because retrying it would be how one order becomes two.
+   */
+  async insertSaleWithFreshNumber(salesCollection, document, branchId, { attempts = 5 } = {}) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await salesCollection.insertOne(document);
+      } catch (error) {
+        if (attempt >= attempts || !this.isDuplicateSalesIdError(error)) throw error;
+        const fresh = await this.generateSalesIdForBranch(branchId, { reseed: true });
+        console.warn(
+          `[order] bill number ${document.sales_id} was already issued; taking ${fresh}`
+        );
+        document.sales_id = fresh;
+        if (document.invoice_number) document.invoice_number = fresh;
+        if (document.sale_no) document.sale_no = fresh;
+      }
+    }
+  }
+
+  async maxIssuedSalesNumber(branchIdRaw, licenseRaw, { periodLabel = '' } = {}) {
+    const db = await BaseModel.getDb();
+    const asObjectId = (v) =>
+      v instanceof mongoose.Types.ObjectId
+        ? v
+        : mongoose.Types.ObjectId.isValid(String(v))
+          ? new mongoose.Types.ObjectId(String(v))
+          : v;
+    const filter = { branch_id: asObjectId(branchIdRaw) };
+    if (licenseRaw) filter.license = asObjectId(licenseRaw);
+    const rows = await db
+      .collection('sales')
+      .find(filter, { projection: { sales_id: 1 } })
+      .toArray();
+    /*
+     * ONLY THIS YEAR'S NUMBERS, when the shop numbers by year.
+     *
+     * This is what catches a counter up after a number came back taken. On a
+     * shop that resets every year, the highest number it ever issued is in
+     * some earlier year - and $max-ing the new year's counter to it would
+     * jump the series from 4 to 901 on the first collision, which is a gap an
+     * auditor asks about. The label sits in its own dash-delimited segment
+     * immediately before the running number, so it can be matched exactly
+     * rather than searched for.
+     *
+     * No label means no filter, which is every shop that has not turned the
+     * year on and is exactly what this did before.
+     */
+    const inPeriod = periodLabel
+      ? new RegExp(`(^|-)${String(periodLabel).replace(/[^A-Za-z0-9]/g, '')}-\\d+$`)
+      : null;
+
+    let max = 0;
+    for (const r of rows) {
+      const salesId = String((r && r.sales_id) || '');
+      if (inPeriod && !inPeriod.test(salesId)) continue;
+      const m = /(\d+)\s*$/.exec(salesId);
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    }
+    return max;
+  }
+
+  async getLastSaleForBranch(branchId, licenseId, { SaleModel } = {}) {
+    const Model = this.getModel(SaleModel);
+    return Model.findOne({ branch_id: branchId, license: licenseId }).sort({
+      _id: -1,
+    });
+  }
+}
+
+module.exports = new SalesRepository();

@@ -1,0 +1,424 @@
+<!-- Start Topbar Mobile -->
+<div class="topbar-mobile">
+    <div class="row align-items-center">
+        <div class="col-md-12">
+            <div class="mobile-logobar">
+                <a href="#" class="mobile-logo">
+                    <h1 class="title_h2"><lang class="lang_posnic">Posnic</lang></h1>
+                    <!--                    <img src="static/images/logo.svg" class="img-fluid" alt="logo" loading="lazy" decoding="async">-->
+                </a>
+            </div>
+            <div class="mobile-togglebar">
+                <ul class="list-inline mb-0">
+                    <li class="list-inline-item">
+                        <div class="topbar-toggle-icon">
+                            <a class="topbar-toggle-hamburger" href="javascript:void(0)">
+                                <img src="static/images/svg-icon/horizontal.svg"
+                                    class="img-fluid menu-hamburger-horizontal" alt="horizontal" loading="lazy" decoding="async">
+                                <img src="static/images/svg-icon/verticle.svg" class="img-fluid menu-hamburger-vertical"
+                                    alt="verticle" loading="lazy" decoding="async">
+                            </a>
+                        </div>
+                    </li>
+                    <li class="list-inline-item">
+                        <div class="menubar">
+                            <a class="menu-hamburger" href="javascript:void(0)">
+                                <img src="static/images/svg-icon/menu.svg" class="img-fluid menu-hamburger-collapse"
+                                    alt="collapse" loading="lazy" decoding="async">
+                                <img src="static/images/svg-icon/close.svg" class="img-fluid menu-hamburger-close"
+                                    alt="close" loading="lazy" decoding="async">
+                            </a>
+                        </div>
+                    </li>
+
+
+                </ul>
+
+
+            </div>
+
+
+
+        </div>
+    </div>
+</div>
+
+
+
+
+<!-- Start Topbar -->
+<div class="topbar">
+    <!-- Start row -->
+    <div class="row align-items-center">
+        <!-- Start col -->
+        <div class="col-md-12 align-self-center">
+            <div class="togglebar">
+                <ul class="list-inline mb-0">
+                    <li class="list-inline-item">
+                        <div class="menubar">
+                            <a class="menu-hamburger" href="javascript:void(0)">
+                                <img src="static/images/svg-icon/menu.svg" class="img-fluid menu-hamburger-collapse"
+                                    alt="menu" loading="lazy" decoding="async">
+                                <img src="static/images/svg-icon/horizontal.svg" class="img-fluid menu-hamburger-close"
+                                    alt="close" loading="lazy" decoding="async">
+                            </a>
+                        </div>
+                    </li>
+                    <li>
+                        <div class="dropdown add_dropdown" style="margin-top: -30px; margin-left: 60px;">
+                            <button class="btn btn-rounded dropdown-toggle" type="button" id="dropdownMenuButton"
+                                data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
+                                <i class="feather icon-plus mr-2"></i>
+                                <lang class="lang_nav_add">Add</lang>
+                            </button>
+                            <div class="dropdown-menu" aria-labelledby="dropdownMenuButton"
+                                style="position: absolute; will-change: transform; top: 0px; left: 0px; transform: translate3d(0px, 36px, 0px);">
+                                <a class="dropdown-item sales_new_shortcut" data-module="sales" data-access="write"
+                                    href="#/sales/new">
+                                    <lang class="lang_newsale_title">Sale</lang>
+                                </a>
+                                <a class="dropdown-item receiving_new_shortcut" data-module="receiving"
+                                    data-access="write" href="#/receivings/new">
+                                    <lang class="lang_newpurchase_title">Purchase</lang>
+                                </a>
+                                <a class="dropdown-item item_new_shortcut" data-module="item" data-access="write"
+                                    href="#/items/new">
+                                    <lang class="lang_newitem_title">Item</lang>
+                                </a>
+                                <a class="dropdown-item category_new_shortcut" data-module="category"
+                                    data-access="write" href="#/categories/new">
+                                    <lang class="lang_newcategory_title">Category</lang>
+                                </a>
+                                <a class="dropdown-item variant_new_shortcut" data-module="item" data-access="write"
+                                    href="#/variants/new">
+                                    <lang class="lang_newvariant_title">Variant</lang>
+                                </a>
+                                <a class="dropdown-item supplier_new_shortcut" data-module="supplier"
+                                    data-access="write" href="#/suppliers/new">
+                                    <lang class="lang_newsupplier_title">Supplier</lang>
+                                </a>
+                                <a class="dropdown-item customer_new_shortcut" data-module="customer"
+                                    data-access="write" href="#/customers/new">
+                                    <lang class="lang_newcustomer_title">Customer</lang>
+                                </a>
+                                <a class="dropdown-item branch_new_shortcut" data-module="branch" data-access="write"
+                                    href="#/branches/new">
+                                    <lang class="lang_newbranch_title">Branch</lang>
+                                </a>
+                                <a class="dropdown-item user_new_shortcut" data-module="user" data-access="write"
+                                    href="#/users/new">
+                                    <lang class="lang_newuser_title">User</lang>
+                                </a>
+                                <a class="dropdown-item expenses_new_shortcut" data-module="expense" data-access="write"
+                                    href="#/expenses/new">
+                                    <lang class="lang_newexpense_title">Expense</lang>
+                                </a>
+                            </div>
+                        </div>
+                    </li>
+
+                </ul>
+            </div>
+            <div class="infobar">
+                <ul class="list-inline mb-0">
+                    <li class="list-inline-item mobile-hide">
+                        <div class="languagebar ">
+                            <div class="dropdown">
+                                <a class="dropdown-toggle" href="#" role="button" id="languagelink"
+                                    data-toggle="dropdown" aria-haspopup="true" aria-expanded="false"><span
+                                        class="live-icon select_language"><lang class="lang_english">English</lang></span><span
+                                        class="feather icon-chevron-down live-icon"></span></a>
+                                <!--
+                                    Filled from languages/index.json at load.
+
+                                    This held one hand-written <a> per language
+                                    - the last place where adding a language
+                                    meant editing markup rather than dropping
+                                    in a file. English is left here so the menu
+                                    is never empty if the list cannot be read.
+                                -->
+                                <div class="dropdown-menu dropdown-menu-right" aria-labelledby="languagelink"
+                                    id="change_language">
+                                    <a class="dropdown-item" href="javascript:void(0)" data-code="en"
+                                        data-value="English"><i class="flag flag-icon-us flag-icon-squared"></i>
+                                        <lang class="lang_english">English</lang></a>
+                                </div>
+                            </div>
+                        </div>
+                    </li>
+
+                    <li class="list-inline-item mobile-hide fullscreen-mode add_new_tooltip" data-toggle="tooltip"
+                        title="fullscreen" data-t-title="lang_fullscreen">
+                        <div class="fullscreenbar">
+                            <a href="#" id="infobar-fullscreen-open" class="infobar-icon fullscreen-mode"
+                                onclick="PosnicPro.dashboard.toggleFullScreen();">
+                                <img src="static/images/svg-icon/fullscreenmaximise.svg" class="img-fluid"
+                                    id="fullscreen" style="width: 19px !important;" alt="fullscreen" loading="lazy" decoding="async">
+                            </a>
+                        </div>
+                    </li>
+                    <!-- Shop activity lives inside the ONE notification bell
+                         (user: no need of two different stuff) - see the
+                         notifybar dropdown below. -->
+                    <li class="list-inline-item mobile-hide" id="shift_clock_li" data-toggle="tooltip" title="Clock In / Out" data-t-title="lang_clock_in_out">
+                        <div class="clockbar">
+                            <a href="javascript:void(0);" id="shift_clock_btn" class="infobar-icon"
+                                onclick="PosnicPro.shiftWidget.openWidget();">
+                                <svg class="shift-clock-ico" xmlns="http://www.w3.org/2000/svg" width="19" height="19"
+                                     viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                                     stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                            </a>
+                        </div>
+                    </li>
+                    <script>
+                        /* Staff clock-in can be switched off shop-wide in Settings
+                           (staff_shifts_enable). The header is inlined into every
+                           page at build time, so this runs wherever the button
+                           exists. On unless the shop said off; any error leaves
+                           the button visible. */
+                        (function () {
+                            try {
+                                var s = JSON.parse(localStorage.getItem('general_settings') || '{}');
+                                if (s.staff_shifts_enable === false) {
+                                    document.getElementById('shift_clock_li').style.display = 'none';
+                                }
+                            } catch (e) { /* fail open */ }
+                        })();
+                    </script>
+                    <li class="list-inline-item" data-toggle="tooltip" title="Shortcut Keys" data-t-title="lang_shortcut_title" data-module="dashboard"
+                        data-access="read">
+                        <div class="offlinebar">
+                            <a href="javascript:void(0)" id="shortcut" class="infobar-icon offline-mode"
+                                data-action="add" data-target="#shortcutpage" role="button"
+                                onclick="PosnicPro.settings.showShortcut();">
+                                <img src="static/images/svg-icon/shortcut.svg" class="img-fluid icon-svg"
+                                    alt="shortcut" loading="lazy" decoding="async">
+                            </a>
+                        </div>
+                    </li>
+                    <li class="list-inline-item" data-toggle="tooltip" title="Theme" data-t-title="lang_theme">
+                        <div class="themebar">
+                            <div class="dropdown" id="dropdown-theme">
+                                <a class="infobar-icon" href="javascript:void(0)" role="button"
+                                    id="themelink" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false"
+                                    style="width:auto;justify-content:center;">
+                                    <img src="static/images/svg-icon/theme.svg" class="img-fluid" style="width:21px;" alt="theme" loading="lazy" decoding="async">
+                                </a>
+                                <div class="dropdown-menu dropdown-menu-right" aria-labelledby="themelink"
+                                    style="min-width:234px;padding:6px;">
+                                    <div class="notification-dropdown-title" style="padding:6px 10px 4px;">
+                                        <h4 style="margin:0;"><lang class="lang_theme">Theme</lang></h4>
+                                    </div>
+                                    <h6 class="dropdown-header" style="padding:4px 12px 2px;font-size:11px;text-transform:uppercase;letter-spacing:.4px;"><lang class="lang_light">Light</lang></h6>
+                                    <a class="dropdown-item theme-item d-flex align-items-center" href="javascript:void(0)" data-preset="github"
+                                        style="padding:7px 12px;" onclick="PosnicPro.themeManager.applyPreset('github');">
+                                        <span style="width:18px;height:18px;border-radius:4px;margin-right:10px;flex:0 0 auto;border:1px solid rgba(0,0,0,0.12);background:linear-gradient(135deg,#f6f8fa 50%,#506fe4 50%);"></span>
+                                        <span class="flex-fill"><lang class="lang_default">Default</lang> <small class="text-muted d-block" style="font-size:10px;line-height:1.1;"><lang class="lang_clean_professional">Clean &amp; professional</lang></small></span>
+                                    </a>
+                                    <a class="dropdown-item theme-item d-flex align-items-center" href="javascript:void(0)" data-preset="comfort"
+                                        style="padding:7px 12px;" onclick="PosnicPro.themeManager.applyPreset('comfort');">
+                                        <span style="width:18px;height:18px;border-radius:4px;margin-right:10px;flex:0 0 auto;border:1px solid rgba(0,0,0,0.12);background:linear-gradient(135deg,#F3ECDB 50%,#4F7A69 50%);"></span>
+                                        <span class="flex-fill"><lang class="lang_eye_comfort">Eye Comfort</lang> <small class="text-muted d-block" style="font-size:10px;line-height:1.1;"><lang class="lang_best_for_long_sessions">Best for long sessions</lang></small></span>
+                                    </a>
+                                    <a class="dropdown-item theme-item d-flex align-items-center" href="javascript:void(0)" data-preset="cleanlight"
+                                        style="padding:7px 12px;" onclick="PosnicPro.themeManager.applyPreset('cleanlight');">
+                                        <span style="width:18px;height:18px;border-radius:4px;margin-right:10px;flex:0 0 auto;border:1px solid rgba(0,0,0,0.12);background:linear-gradient(135deg,#fbfbfb 50%,#52525b 50%);"></span>
+                                        <span class="flex-fill"><lang class="lang_clean_light">Clean Light</lang> <small class="text-muted d-block" style="font-size:10px;line-height:1.1;"><lang class="lang_neutral_greys">Neutral greys</lang></small></span>
+                                    </a>
+                                    <a class="dropdown-item theme-item d-flex align-items-center" href="javascript:void(0)" data-preset="brown"
+                                        style="padding:7px 12px;" onclick="PosnicPro.themeManager.applyPreset('brown');">
+                                        <span style="width:18px;height:18px;border-radius:4px;margin-right:10px;flex:0 0 auto;border:1px solid rgba(0,0,0,0.12);background:linear-gradient(135deg,#EFEBE9 50%,#795548 50%);"></span>
+                                        <span class="flex-fill"><lang class="lang_coffee">Coffee</lang> <small class="text-muted d-block" style="font-size:10px;line-height:1.1;"><lang class="lang_warm_cozy">Warm &amp; cozy</lang></small></span>
+                                    </a>
+                                    <a class="dropdown-item theme-item d-flex align-items-center" href="javascript:void(0)" data-preset="macos"
+                                        style="padding:7px 12px;" onclick="PosnicPro.themeManager.applyPreset('macos');">
+                                        <span style="width:18px;height:18px;border-radius:4px;margin-right:10px;flex:0 0 auto;border:1px solid rgba(0,0,0,0.12);background:linear-gradient(135deg,#ececec 50%,#007aff 50%);"></span>
+                                        <span class="flex-fill"><lang class="lang_macos">macOS</lang> <small class="text-muted d-block" style="font-size:10px;line-height:1.1;"><lang class="lang_bright_minimal">Bright &amp; minimal</lang></small></span>
+                                    </a>
+                                    <div class="dropdown-divider" style="margin:6px 0;"></div>
+                                    <h6 class="dropdown-header" style="padding:2px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.4px;"><lang class="lang_dark">Dark</lang></h6>
+                                    <a class="dropdown-item theme-item d-flex align-items-center" href="javascript:void(0)" data-preset="dark"
+                                        style="padding:7px 12px;" onclick="PosnicPro.themeManager.applyPreset('dark');">
+                                        <span style="width:18px;height:18px;border-radius:4px;margin-right:10px;flex:0 0 auto;border:1px solid rgba(0,0,0,0.12);background:linear-gradient(135deg,#252526 50%,#569cd6 50%);"></span>
+                                        <span class="flex-fill"><lang class="lang_vs_code">VS Code</lang> <small class="text-muted d-block" style="font-size:10px;line-height:1.1;"><lang class="lang_developer_dark">Developer dark</lang></small></span>
+                                    </a>
+                                    <a class="dropdown-item theme-item d-flex align-items-center" href="javascript:void(0)" data-preset="softdark"
+                                        style="padding:7px 12px;" onclick="PosnicPro.themeManager.applyPreset('softdark');">
+                                        <span style="width:18px;height:18px;border-radius:4px;margin-right:10px;flex:0 0 auto;border:1px solid rgba(255,255,255,0.2);background:linear-gradient(135deg,#16181d 50%,#4aa3ff 50%);"></span>
+                                        <span class="flex-fill"><lang class="lang_soft_dark">Soft Dark</lang> <small class="text-muted d-block" style="font-size:10px;line-height:1.1;"><lang class="lang_dimmed_all_day">Dimmed, all-day</lang></small></span>
+                                    </a>
+                                    <a class="dropdown-item theme-item d-flex align-items-center" href="javascript:void(0)" data-preset="warmnight"
+                                        style="padding:7px 12px;" onclick="PosnicPro.themeManager.applyPreset('warmnight');">
+                                        <span style="width:18px;height:18px;border-radius:4px;margin-right:10px;flex:0 0 auto;border:1px solid rgba(255,255,255,0.2);background:linear-gradient(135deg,#1c1a17 50%,#e0a458 50%);"></span>
+                                        <span class="flex-fill"><lang class="lang_warm_night">Warm Night</lang> <small class="text-muted d-block" style="font-size:10px;line-height:1.1;"><lang class="lang_warm_late_night">Warm, late-night</lang></small></span>
+                                    </a>
+                                    <a class="dropdown-item theme-item d-flex align-items-center" href="javascript:void(0)" data-preset="terminal"
+                                        style="padding:7px 12px;" onclick="PosnicPro.themeManager.applyPreset('terminal');">
+                                        <span style="width:18px;height:18px;border-radius:4px;margin-right:10px;flex:0 0 auto;border:1px solid rgba(255,255,255,0.2);background:linear-gradient(135deg,#0c0c0c 50%,#e8e8e8 50%);"></span>
+                                        <span class="flex-fill"><lang class="lang_terminal">Terminal</lang> <small class="text-muted d-block" style="font-size:10px;line-height:1.1;"><lang class="lang_b_w_monospace">B&amp;W monospace</lang></small></span>
+                                    </a>
+                                    <a class="dropdown-item theme-item d-flex align-items-center" href="javascript:void(0)" data-preset="dosblue"
+                                        style="padding:7px 12px;" onclick="PosnicPro.themeManager.applyPreset('dosblue');">
+                                        <span style="width:18px;height:18px;border-radius:4px;margin-right:10px;flex:0 0 auto;border:1px solid rgba(255,255,255,0.2);background:linear-gradient(135deg,#0000aa 50%,#ffff55 50%);"></span>
+                                        <span class="flex-fill"><lang class="lang_turbo_c">Turbo C</lang> <small class="text-muted d-block" style="font-size:10px;line-height:1.1;"><lang class="lang_dos_retro_blue">DOS retro blue</lang></small></span>
+                                    </a>
+                                    <div class="dropdown-divider" style="margin:6px 0;"></div>
+                                    <a class="dropdown-item text-center" href="javascript:void(0)"
+                                        style="font-size:12px;padding:6px;"
+                                        onclick="location.hash='#/settings';var n=0,t=setInterval(function(){var el=document.getElementById('v-pills-theme-tab');if(el){clearInterval(t);el.click();if(el.scrollIntoView)el.scrollIntoView({block:'center'});}if(++n>40)clearInterval(t);},150);"><lang class="lang_custom_colours">Custom colours</lang></a>
+                                </div>
+                            </div>
+                        </div>
+                    </li>
+                    <li class="list-inline-item">
+                        <!-- ONE notification centre: live shop activity (fed by
+                             the realtime channel) + low stock, in one panel
+                             behind one bell. Device push opt-in lives here too. -->
+                        <div class="notifybar">
+                            <div class="dropdown" id="dropdown-notification">
+                                <a class="dropdown-toggle infobar-icon" href="javascript:void(0)" role="button"
+                                    id="notoficationlink" data-toggle="dropdown" aria-haspopup="true"
+                                    aria-expanded="false"><img src="static/images/svg-icon/notifications.svg"
+                                        class="img-fluid" alt="notifications" loading="lazy" decoding="async">
+                                    <span class="live-icon" id="low_item_stock_count" style="display:none;"></span>
+                                    <span id="bell_feed_badge" style="display:none;"></span></a>
+
+                                <div class="dropdown-menu dropdown-menu-right low" aria-labelledby="notoficationlink">
+
+                                    <div class="notification-dropdown-title">
+                                        <h4>
+                                            <lang class="lang_notifications_title">Notifications</lang>
+                                        </h4>
+                                    </div>
+                                    <div id="bell_feed_list"></div>
+                                    <div class="lowstock-section">
+                                        <div class="notification-dropdown-title">
+                                            <h4>
+                                                <lang class="lang_lowstock_notify">Low Stock</lang>
+                                            </h4>
+                                        </div>
+                                        <ul class="list-unstyled">
+                                            <li id="list_lowstock_name" class="list_unselect">
+                                            </li>
+                                            <li class="media dropdown-item" data-module="item"
+                                                data-access="read||write||delete">
+                                                <div class="media-body text-center">
+                                                    <h5 class="action-title"><a href="#/lowstockitems">
+                                                            <lang class="lang_view_all">View All</lang>
+                                                        </a> </h5>
+                                                </div>
+                                            </li>
+                                        </ul>
+                                    </div>
+                                    <div id="bell_feed_foot"><button type="button" id="bell_feed_push"
+                                            style="display:none;" onclick="PosnicPro.bellFeed._pushClick();"></button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </li>
+                    <li class="list-inline-item">
+                        <div class="profilebar">
+                            <div class="dropdown">
+                                <a class="dropdown-toggle" href="#" role="button" id="profilelink"
+                                    data-toggle="dropdown" aria-haspopup="true" aria-expanded="false"><img src='/'
+                                        id="user-image" class="img-fluid rounded-circle" alt="profile" loading="lazy" decoding="async"><span
+                                        class="live-icon"><span class="user-name"></span></span><span
+                                        class="feather icon-chevron-down live-icon"></span></a>
+                                <div class="dropdown-menu dropdown-menu-right" aria-labelledby="profilelink">
+                                    <div class="dropdown-item">
+                                        <div class="profilename">
+                                            <h5 class="user-name"> </h5>
+                                        </div>
+                                    </div>
+                                    <div class="userbox">
+                                        <ul class="list-unstyled mb-0">
+                                            <li class="media dropdown-item">
+                                                <a href="javascript:void(0)" id="change_profile"
+                                                    onclick="PosnicPro.users.updateUserImageform();"
+                                                    class="profile-icon"><img src="static/images/svg-icon/crm.svg"
+                                                        class="img-fluid" alt="profile" loading="lazy" decoding="async">
+                                                    <lang class="lang_myacc_title">My Profile</lang>
+                                                </a>
+                                            </li>
+                                            <!--
+                                                The shop's account with Posnic - the subscription, the bill,
+                                                the other tills - as opposed to "My Profile" just above, which
+                                                is this person's profile inside this shop. Two different
+                                                things, so two different words.
+
+                                                Hidden by construction, and shown only by dashboard.js when
+                                                the server says features.account and this user is a
+                                                super_admin. A community shop must never be sent to an account
+                                                page that will tell them they have no account, so the default
+                                                for markup that ships to everybody is "not there".
+                                            -->
+                                            <li class="media dropdown-item" id="posnic_account_item" style="display:none;">
+                                                <a href="https://www.posnic.com/account" target="_blank" rel="noopener noreferrer"
+                                                    id="posnic_account" class="profile-icon"><img src="static/images/svg-icon/crm.svg"
+                                                        class="img-fluid" alt="account" loading="lazy" decoding="async">
+                                                    <lang class="lang_posnic_account_title">Posnic Cloud Account</lang>
+                                                </a>
+                                            </li>
+                                            <li class="media dropdown-item">
+                                                <a href="javascript:void(0)" id="change_password"
+                                                    class="profile-icon"><img src="static/images/svg-icon/email.svg"
+                                                        class="img-fluid" alt="password" loading="lazy" decoding="async">
+                                                    <lang class="lang_password_title">Password</lang>
+                                                </a>
+                                            </li>
+                                            <!--
+                                                Hidden until the lock is known to work here: it is desktop only, and
+                                                only when the shop has switched it on. lock-screen.js reveals it.
+                                            -->
+                                            <li class="media dropdown-item" id="lock_screen_item" style="display:none;">
+                                                <a href="javascript:void(0)" id="lock_screen" class="profile-icon"><img
+                                                        src="static/images/svg-icon/logout.svg" class="img-fluid"
+                                                        alt="lock" loading="lazy" decoding="async">
+                                                    <lang class="lang_lock_title">Lock Screen</lang>
+                                                    <small class="text-muted ml-1">Ctrl+L</small>
+                                                </a>
+                                            </li>
+                                            <li class="media dropdown-item">
+                                                <a href="javascript:void(0)" id="logout" class="profile-icon"><img
+                                                        src="static/images/svg-icon/logout.svg" class="img-fluid"
+                                                        alt="logout" loading="lazy" decoding="async">
+                                                    <lang class="lang_logout_title">Logout</lang>
+                                                </a>
+                                            </li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </li>
+                </ul>
+            </div>
+        </div>
+        <!-- End col -->
+    </div>
+    <!-- End row -->
+</div>
+<!-- End Topbar -->
+
+<!--
+    SAMPLE DATA IS ON.
+
+    Owner: "when demo enable need some notification or obvious demo data
+    exist and able to disable quickly."
+
+    A shop that was set up with samples has products, sales and purchases it
+    never made, and nothing on any screen says so - the figures on the
+    dashboard are the demonstration's, and they are read as the shop's. So
+    while the switch is on, every page says it in one line and offers the
+    door out. Hidden by default and shown by applyModuleSidebar, which is
+    what already knows the switch; a shop that never took the samples, or
+    has switched them off, sees nothing.
+-->
+<div id="demo_data_bar" class="demo-data-bar" style="display:none;">
+    <span class="demo-data-bar-tag"><i class="feather icon-package mr-1"></i><lang class="lang_demo_bar_tag">Sample data</lang></span>
+    <span class="demo-data-bar-text"><lang class="lang_demo_bar_text">Some products, sales and purchases here are samples to try the till with, not your own records.</lang></span>
+    <button type="button" class="btn btn-sm btn-outline-danger" id="demo_data_bar_remove"><lang class="lang_demoremove_button">Remove the sample data</lang></button>
+    <a href="#/settings/demodata" class="demo-data-bar-link" id="demo_data_bar_manage"><lang class="lang_demo_bar_manage">or manage them</lang></a>
+    <button type="button" class="demo-data-bar-hide" id="demo_data_bar_hide" aria-label="Hide" data-t-aria-label="lang_hide"><i class="feather icon-x"></i></button>
+</div>

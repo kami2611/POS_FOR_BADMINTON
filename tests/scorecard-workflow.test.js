@@ -1,0 +1,78 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const test = require('node:test');
+
+const WORKFLOW = fs.readFileSync(
+  path.join(__dirname, '..', '.github', 'workflows', 'scorecard.yml'),
+  'utf8',
+);
+
+const APPROVED_ACTIONS = new Map([
+  ['actions/checkout', '3d3c42e5aac5ba805825da76410c181273ba90b1'],
+  ['ossf/scorecard-action', '2d1146689b8cda280b9bc96326124645441f03bc'],
+  ['actions/upload-artifact', '043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'],
+  /* v4.38.0. Verified against upstream before approving, the same way the
+     previous pin was and for the same reason - a bump arrives as a SHA and a
+     trailing comment, and the comment is written by whoever opened the pull
+     request, not by the registry:
+
+       gh api repos/github/codeql-action/git/ref/tags/v4.38.0
+         -> annotated tag 4bd7200e1f146b1c937cae12d258b50f41a53cf8
+       gh api repos/github/codeql-action/git/tags/4bd7200e...
+         -> commit b96794f015dfd88f77b49b1c93e0fa7110f94c63
+
+     which is the commit the workflow now pins. Dereference the ANNOTATED TAG,
+     not the ref: refs/tags/vX for a signed release points at a tag object, and
+     reading .object.sha off the ref gives the tag, not the commit it names.
+
+     Do this again for the next bump rather than trusting the comment. */
+  ['github/codeql-action/upload-sarif', 'b96794f015dfd88f77b49b1c93e0fa7110f94c63'],
+]);
+
+test('Scorecard runs only on supported default-branch and scheduled triggers', () => {
+  assert.match(WORKFLOW, /^on:\n  push:\n    branches: \[develop\]/m);
+  assert.match(WORKFLOW, /^  schedule:\n    - cron: '[^']+'$/m);
+  assert.match(WORKFLOW, /^  workflow_dispatch:$/m);
+  assert.doesNotMatch(WORKFLOW, /^  pull_request(?:_target)?:/m);
+  assert.match(WORKFLOW, /if: github\.event\.repository\.private == false/);
+});
+
+test('Scorecard uses bounded permissions and the published-result contract', () => {
+  assert.match(WORKFLOW, /^permissions: read-all$/m);
+  for (const permission of [
+    'actions: read',
+    'checks: read',
+    'contents: read',
+    'id-token: write',
+    'issues: read',
+    'pull-requests: read',
+    'security-events: write',
+  ]) {
+    assert.match(WORKFLOW, new RegExp(`^      ${permission}$`, 'm'));
+  }
+  assert.match(WORKFLOW, /^          persist-credentials: false$/m);
+  assert.match(WORKFLOW, /^          results_file: results\.sarif$/m);
+  assert.match(WORKFLOW, /^          results_format: sarif$/m);
+  assert.match(WORKFLOW, /^          publish_results: true$/m);
+  assert.match(WORKFLOW, /^          sarif_file: results\.sarif$/m);
+});
+
+test('every Scorecard workflow dependency is approved and commit-pinned', () => {
+  const actions = [...WORKFLOW.matchAll(/^\s+uses:\s+([^@\s]+)@([^\s#]+)/gm)]
+    .map((match) => ({ action: match[1], ref: match[2] }));
+
+  assert.equal(actions.length, APPROVED_ACTIONS.size);
+  for (const { action, ref } of actions) {
+    assert.equal(APPROVED_ACTIONS.get(action), ref, `${action} is not pinned to the reviewed commit`);
+    assert.match(ref, /^[0-9a-f]{40}$/);
+  }
+});
+
+test('the publishing job contains no mutable execution extensions', () => {
+  assert.doesNotMatch(WORKFLOW, /^env:/m);
+  assert.doesNotMatch(WORKFLOW, /^defaults:/m);
+  assert.doesNotMatch(WORKFLOW, /^    (?:container|services|env|defaults):/m);
+});

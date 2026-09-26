@@ -1,0 +1,615 @@
+/*
+ * THE REQUESTS A CUSTOMER HAS MADE, WHERE STAFF ALREADY ARE.
+ *
+ * Owner: "i want handle change reqeust smarlty like facebook chat pop up.
+ * user able see all request properly easily handle. if possile provide when
+ * its orders like order 10mins before etc."
+ *
+ * And before that: "when i asked cancel, deskto didnt show anthing."
+ *
+ * WHY A DOCK AND NOT A PAGE. The queue already exists and is good - it shows
+ * the dish-level difference a customer asked for, "2 to 3 Chicken Biryani",
+ * which is a decision somebody can make at a glance. Its problem is that it
+ * is a PAGE. A till is on the sale screen with a queue of people in front of
+ * it, and a request that needs answering in the next two minutes cannot live
+ * behind a navigation. So it comes to them: bottom right, above everything,
+ * on every screen, the way a chat window does.
+ *
+ * HOW LONG AGO, because that is the whole decision. "Cancel this?" is a
+ * different question at forty seconds and at eleven minutes - one the kitchen
+ * has not started, the other it has plated - and a timestamp makes a person
+ * do that arithmetic under pressure. The card says "ordered 11 minutes ago"
+ * and updates itself while it sits open.
+ *
+ * IT DECIDES NOTHING OF ITS OWN. Accept and refuse go through the same
+ * endpoint the queue page uses, so there is one implementation of what
+ * accepting a cancellation means; this is a second door onto it, not a second
+ * copy of it.
+ */
+(function () {
+  'use strict';
+
+  /* The queue is read by online-order-watch.js every twenty seconds; this
+     draws whatever that last saw, so the two never disagree and the shop is
+     not asked twice. */
+  var EVERY_MS = 20000;
+  var timer = 0;
+  var open = false;
+  var dock = null;
+  var known = [];
+  var busy = {};
+
+  /* The same door online-order-watch.js uses, for the same reason: before the
+     dictionary is up, the English is the honest answer. */
+  /*
+   * NAMED `i18n`, AND THAT IS THE WHOLE POINT.
+   *
+   * This was a bare `t()` helper, and it is why eleven of this file's
+   * fourteen keys were in NO language pack at all. The coverage scanner
+   * collects keys by matching `i18n.t('lang_x', 'X')` in these files; a
+   * helper called anything else hides every call from it, so the keys were
+   * never gathered, never translated, and fell back to English in every
+   * language - which renders perfectly, which is why nothing ever failed.
+   * A Tamil shop read this panel in English for the life of the feature.
+   *
+   * The guard is real and stays. This file lives in the dashboard bundle and
+   * paints from a poll, so it can run before PosnicPro.i18n is built; a panel
+   * that throws while somebody is answering a cancellation is worse than one
+   * that says "Requests" in English. Calling the object `i18n` keeps both:
+   * the scanner sees every key, and a missing runtime still falls back.
+   */
+  var i18n = {
+    t: function (key, fallback) {
+      try {
+        if (window.PosnicPro && PosnicPro.i18n && typeof PosnicPro.i18n.t === 'function') {
+          return PosnicPro.i18n.t(key, fallback);
+        }
+      } catch (e) {
+        /* fall through to English */
+      }
+      return fallback;
+    },
+  };
+
+  function safe(text) {
+    return String(text == null ? '' : text).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  /**
+   * How long ago, in the words somebody says out loud.
+   *
+   * Owner: "if possile provide when its orders like order 10mins before etc."
+   * Minutes for the first hour, because that is the window in which any of
+   * these decisions are actually different from one another.
+   */
+  function howLongAgo(when) {
+    var at = new Date(when || 0).getTime();
+    if (!at) return '';
+    var mins = Math.floor((Date.now() - at) / 60000);
+    if (mins < 1) return i18n.t('lang_just_now', 'just now');
+    if (mins === 1) return i18n.t('lang_a_minute_ago', '1 minute ago');
+    if (mins < 60) return String(mins) + ' ' + i18n.t('lang_minutes_ago', 'minutes ago');
+    var hours = Math.floor(mins / 60);
+    if (hours === 1) return i18n.t('lang_an_hour_ago', '1 hour ago');
+    return String(hours) + ' ' + i18n.t('lang_hours_ago', 'hours ago');
+  }
+
+  /**
+   * What kind of thing this is, which decides the words, the colour and
+   * whether there is anything to decide at all.
+   *
+   * `gone` is the one that was missing and is the reason this exists: a
+   * customer who cancelled INSIDE the window did not ask for anything - the
+   * order simply went - and until now the only thing told about it was the
+   * printer. Nothing here waits on a yes or a no; the shop just has to learn
+   * that a ticket it may be cooking has been pulled.
+   */
+  function kindOf(order) {
+    /* A table asking for somebody. Its own kind because there is nothing to
+       refuse - the only answer is that a person is coming. */
+    if (order.call_id) return 'waiter';
+    if (order.cancel_seen === false && order.customer_cancelled_at) return 'gone';
+    if (order.cancel_requested === true) return 'cancel';
+    if (order.change_requested && (order.change_requested.items || []).length) return 'change';
+    return 'new';
+  }
+
+/*
+ * WHAT "YES" AND "NO" MEAN TO THE SERVER, WHICH DEPENDS ON THE KIND.
+ *
+ * The dock sent "accept" and "reject" for everything, and for a NEW order the
+ * approval state machine wants the state itself - "accepted" - so it got a
+ * word that is not a state, could not name one, and answered "unknown state".
+ * Owner: "i see some error. why? when click accept it happend."
+ *
+ * The three kinds genuinely mean three different things, and the queue page
+ * (modules/js/online_orders.js) has always known it:
+ *
+ *   a new order          accepted / rejected   the state it moves to
+ *   a cancel request     cancel / keep         the customer's wish, or not
+ *   a change request     accept / keep         make it so, or leave it
+ *
+ * Mirrored here rather than shared because they are in different bundles;
+ * the comment on each side names the other so neither drifts silently.
+ */
+  var VERBS = {
+    new: { accept: 'accepted', reject: 'rejected' },
+    cancel: { accept: 'cancel', reject: 'keep' },
+    change: { accept: 'accept', reject: 'keep' },
+    /* Already off. Either button only marks it seen; decideOnOrder answers
+       that before the state machine is ever reached. */
+    gone: { accept: 'seen', reject: 'seen' },
+    /* Nothing to decide: acknowledging IS the answer. */
+    waiter: { accept: 'seen', reject: 'seen' },
+  };
+
+  var WORDS = {
+    gone: ['lang_customer_cancelled', 'Customer cancelled this'],
+    waiter: ['lang_table_is_calling', 'Table is calling'],
+    cancel: ['lang_cancel_requested', 'Asked to cancel'],
+    change: ['lang_change_requested', 'Asked to change'],
+    new: ['lang_new_online_order', 'New order'],
+  };
+
+  /*
+   * THE WHOLE ORDER, BEFORE AND AFTER.
+   *
+   * Owner: "when customer aks for change. cancel then desktop or captain app
+   * clearly can see the changes. what was before and what change customer
+   * wahts? cancel item or cancel order."
+   *
+   * It listed only the lines that MOVED. "Chicken Biryani: 2 to 1" tells you
+   * nothing about whether that is most of the order or a detail of it, and a
+   * person deciding in a hurry has to open the sales screen to find out - by
+   * which time they are no longer deciding in a hurry.
+   *
+   * So every line is drawn, the untouched ones dimmed, with what it was and
+   * what it would become side by side. A line going to nothing says REMOVED
+   * in words rather than "1 to 0", because zero of something is a sentence
+   * nobody reads at a glance.
+   */
+  function whatChanged(order) {
+    var wants = (order.change_requested && order.change_requested.items) || [];
+    if (!wants.length) return '';
+
+    var asked = {};
+    wants.forEach(function (one) {
+      asked[String(one.item_id || one.name || '')] = one;
+    });
+
+    /*
+     * The order as it stands, plus anything asked for that is not on it.
+     * `items` is what the shop currently has; a dish the customer wants that
+     * was never on the order has no line to sit on, so it gets one.
+     */
+    var rows = (order.items || []).map(function (line) {
+      var key = String(line.item_id || line.name || '');
+      var want = asked[key];
+      return {
+        name: line.name || '',
+        was: Number(line.quantity || 0),
+        now: want ? Number(want.quantity || 0) : Number(line.quantity || 0),
+        moved: !!want,
+      };
+    });
+    var seen = {};
+    rows.forEach(function (r) { seen[r.name] = true; });
+    wants.forEach(function (one) {
+      var name = one.name || '';
+      if (!name || seen[name]) return;
+      rows.push({ name: name, was: Number(one.was || 0), now: Number(one.quantity || 0), moved: true });
+    });
+
+    return (
+      '<ul class="request-dock-diff">' +
+      rows
+        .map(function (r) {
+          var name = safe(r.name);
+          if (!r.moved) {
+            /* Untouched, and shown anyway: what is NOT changing is half of
+               what the decision is about. */
+            return '<li class="is-same">' + r.was + ' &times; ' + name + '</li>';
+          }
+          if (!r.now) {
+            return (
+              '<li class="is-gone">' + name + ' <b>' +
+              i18n.t('lang_removed', 'removed') + '</b></li>'
+            );
+          }
+          /*
+           * A dish that was not on the order at all.
+           *
+           * A customer cannot ASK for one any more - more food needs nobody's
+           * permission and goes straight to the pass - but a request made
+           * before that rule shipped is still sitting in the queue, and a
+           * card that rendered it as "0 to 1" would be a worse sentence than
+           * the one it replaced.
+           */
+          if (!r.was) return '<li class="is-moved">+ ' + r.now + ' &times; ' + name + '</li>';
+          return '<li class="is-moved">' + name + ' <b>' + r.was + ' &rarr; ' + r.now + '</b></li>';
+        })
+        .join('') +
+      '</ul>'
+    );
+  }
+
+  /*
+   * WHICH QUESTION THIS IS, IN THE WORDS THE ANSWER IS ABOUT.
+   *
+   * "Asked to change" covered a customer dropping one naan and a customer
+   * emptying the order, which are not the same decision. Now that ADDING
+   * never becomes a request - more food needs nobody's permission, see
+   * splitTheWish in customer-order.service.js - every change request is
+   * something being taken away, and the card can say which.
+   */
+  function askedFor(order) {
+    var wants = (order.change_requested && order.change_requested.items) || [];
+    var dropped = wants.filter(function (one) { return !Number(one.quantity || 0); }).length;
+    var onOrder = (order.items || []).length;
+
+    /*
+     * SPELLED OUT, not looked up in a table.
+     *
+     * The coverage scanner collects keys by matching the two-argument form of
+     * i18n.t written out in full. A key reached through a
+     * variable is invisible to it: never gathered, never translated, and
+     * falling back to English in every language - which renders perfectly,
+     * which is why nothing ever fails. This file has already paid that once,
+     * when a local t() helper hid fourteen of its words.
+     */
+    if (order.cancel_requested === true) {
+      return i18n.t('lang_cancel_whole_order', 'Cancel the whole order');
+    }
+    /* Every line gone is a cancellation in all but name, and should read as
+       one: a shop that says yes to this has no order left. */
+    if (dropped && dropped >= onOrder) {
+      return i18n.t('lang_remove_everything', 'Remove everything on the order');
+    }
+    if (dropped === 1) return i18n.t('lang_remove_one_item', 'Remove an item');
+    if (dropped > 1) return i18n.t('lang_remove_items', 'Remove some items');
+    return i18n.t('lang_fewer_asked', 'Asked for fewer');
+  }
+
+  function card(order) {
+    var id = String(order.sale_id || order._id || '');
+    var kind = kindOf(order);
+    var words = WORDS[kind];
+    var bill = safe(order.sales_id || '');
+    var token = safe(order.token_id || order.token || '');
+    var where = order.table_number
+      ? i18n.t('lang_table', 'Table') + ' ' + safe(order.table_number)
+      : safe(order.fulfilment || '');
+    var working = busy[id] ? ' is-working' : '';
+
+    return (
+      '<li class="request-dock-card" data-kind="' + kind + '" data-order="' + safe(id) + '">' +
+      '<div class="request-dock-what">' +
+      '<span class="request-dock-kind">' +
+      /*
+       * SPELLED OUT for the new one, not read from the table above.
+       *
+       * The coverage scanner collects keys by matching the two-argument form
+       * of i18n.t written out in full; a key reached through a variable is
+       * invisible to it - never gathered, never translated, falling back to
+       * English in every language, which renders perfectly and so never
+       * fails. This file has already paid that once, when a local helper hid
+       * fourteen of its words. The older entries in WORDS are in the packs
+       * from before that lesson; anything new goes here.
+       */
+      safe(
+        kind === 'waiter'
+          ? i18n.t('lang_table_is_calling', 'Table is calling')
+          : kind === 'change' || kind === 'cancel'
+            ? askedFor(order)
+            : i18n.t(words[0], words[1])
+      ) +
+      '</span>' +
+      '<span class="request-dock-when">' + safe(howLongAgo(order.created_date)) + '</span>' +
+      '</div>' +
+      '<div class="request-dock-who">' +
+      (bill ? '<b>' + bill + '</b>' : '') +
+      (token ? '<span>' + i18n.t('lang_token', 'Token') + ' ' + token + '</span>' : '') +
+      (where ? '<span>' + where + '</span>' : '') +
+      '</div>' +
+      whatChanged(order) +
+      /* Already off: one button, and it says what it does. Two buttons on
+         something nobody can decide is two ways to be confused. */
+      (kind === 'gone' || kind === 'waiter'
+        ? '<div class="request-dock-do">' +
+          '<button type="button" class="request-dock-yes' + working + '" data-do="accept">' +
+          i18n.t('lang_got_it', 'Got it') + '</button>' +
+          '</div>'
+        : '<div class="request-dock-do">' +
+          '<button type="button" class="request-dock-no' + working + '" data-do="reject">' +
+          i18n.t('lang_refuse', 'Refuse') + '</button>' +
+          '<button type="button" class="request-dock-yes' + working + '" data-do="accept">' +
+          i18n.t('lang_accept', 'Accept') + '</button>' +
+          '</div>') +
+      '</li>'
+    );
+  }
+
+  function build() {
+    if (dock) return dock;
+    dock = document.createElement('div');
+    dock.className = 'request-dock';
+    dock.id = 'request-dock';
+    dock.hidden = true;
+    dock.innerHTML =
+      '<button type="button" class="request-dock-tab" id="request-dock-tab" aria-expanded="false">' +
+      '<span class="request-dock-tab-word">' + i18n.t('lang_requests', 'Requests') + '</span>' +
+      '<span class="request-dock-count" id="request-dock-count">0</span>' +
+      '</button>' +
+      '<div class="request-dock-panel" id="request-dock-panel" hidden>' +
+      /*
+       * A WAY OUT THAT IS NOT AN ANSWER.
+       *
+       * Owner: "some way i want close this request right side if i dont want.
+       * close button. dont show this close."
+       *
+       * The tab toggles, but a panel that opened itself over the screen needs
+       * its own way out at the point somebody is looking - and Refuse is NOT
+       * that way out. Without this the only two things on the panel both
+       * decide a customer's order, so "I am busy, go away" had to be spelled
+       * as a refusal.
+       */
+      '<button type="button" class="request-dock-close" id="request-dock-close" ' +
+      'aria-label="' + i18n.t('lang_close', 'Close') + '">&times;</button>' +
+      '<ul class="request-dock-list" id="request-dock-list"></ul>' +
+      '<a class="request-dock-all" href="#/onlineorders">' +
+      i18n.t('lang_see_all_orders', 'Open the order queue') + '</a>' +
+      '</div>';
+    document.body.appendChild(dock);
+
+    dock.querySelector('#request-dock-tab').addEventListener('click', function () {
+      open = !open;
+      /* Opening it by hand is a fresh look at everything: whatever was
+         dismissed before is being asked for now. */
+      if (open) dismissed = {};
+      paint();
+    });
+
+    dock.querySelector('#request-dock-close').addEventListener('click', function () {
+      open = false;
+      /*
+       * AND IT STAYS SHUT. "dont show this close" - closing it must mean
+       * something, or the next poll reopens it and the button is a joke.
+       *
+       * What is remembered is WHICH requests were on screen, not simply
+       * "closed". A shop that waves this away and then receives a genuinely
+       * new order must still be told; one that waves it away and is shown
+       * the same two orders again thirty seconds later learns to ignore it,
+       * which costs more than the panel ever saved.
+       */
+      known.forEach(function (o) { dismissed[String(o.sale_id)] = true; });
+      paint();
+    });
+    dock.addEventListener('click', onDo);
+    return dock;
+  }
+
+  async function onDo(event) {
+    var button = event.target && event.target.closest ? event.target.closest('[data-do]') : null;
+    if (!button) return;
+    var row = button.closest('[data-order]');
+    if (!row) return;
+    var id = row.getAttribute('data-order');
+    var kind = row.getAttribute('data-kind') || 'new';
+    var verb = (VERBS[kind] || VERBS.new)[button.getAttribute('data-do')] || 'accepted';
+    if (busy[id]) return;
+    busy[id] = true;
+    paint();
+
+    /*
+     * THE SAME DOOR THE QUEUE PAGE USES. Accepting a cancellation means one
+     * thing in this shop and it is defined once, on the server; this is a
+     * second way to reach it, never a second copy of it.
+     */
+    try {
+      await new Promise(function (done) {
+        PosnicPro.post(
+          {
+            /*
+             * A call is not an order and has no approval to give: the table
+             * wants a person, and the only answer is that one is coming. So
+             * it is marked SEEN through its own door rather than being run
+             * through a state machine that has no state for it.
+             */
+            url:
+              kind === 'waiter'
+                ? 'sales/waiterCalls/' + encodeURIComponent(id) + '/seen'
+                : 'sales/' + encodeURIComponent(id) + '/approval',
+            data: JSON.stringify({ decision: verb, reason: '' }),
+          },
+          /*
+           * A SHOP THAT SAID NO IS QUOTED, NOT SWALLOWED.
+           *
+           * The first cut ignored both answers and simply re-read the queue,
+           * so a refusal looked exactly like a success that had not arrived
+           * yet - which is how "unknown state" went unexplained until it was
+           * seen in a toast on a real till.
+           */
+          function (answer) {
+            if (answer && answer.type !== 'success' && window.PosnicPro && PosnicPro.alert) {
+              PosnicPro.alert('Alert', String(answer.message || 'That did not go through'));
+            }
+            done();
+          },
+          function (answer) {
+            if (window.PosnicPro && PosnicPro.alert) {
+              PosnicPro.alert('Alert', String((answer && answer.message) || 'The shop could not be reached'));
+            }
+            done();
+          }
+        );
+      });
+    } catch (e) {
+      /* A refusal that did not reach the shop leaves the card where it is,
+         which is the safe side: nothing is marked handled that was not. */
+    }
+    delete busy[id];
+    /* Redrawn from the shop rather than from here, so the dock never claims
+       an outcome the server did not give it. */
+    look();
+    try {
+      if (window.PosnicOnlineOrderWatch && PosnicOnlineOrderWatch.look) PosnicOnlineOrderWatch.look();
+      if (window.PosnicPro && PosnicPro.onlineorders && PosnicPro.onlineorders.load) PosnicPro.onlineorders.load();
+    } catch (e) {
+      /* the queue page refreshes itself on its own clock */
+    }
+  }
+
+  function paint() {
+    var it = build();
+    /* Nothing waiting: the dock goes away entirely rather than sitting there
+       saying zero. A permanent chrome element that is usually empty is a
+       thing people learn to stop seeing. */
+    it.hidden = known.length === 0;
+    if (!known.length) {
+      open = false;
+      return;
+    }
+    var count = it.querySelector('#request-dock-count');
+    if (count) count.textContent = String(known.length);
+    var tab = it.querySelector('#request-dock-tab');
+    if (tab) tab.setAttribute('aria-expanded', open ? 'true' : 'false');
+    var panel = it.querySelector('#request-dock-panel');
+    if (panel) panel.hidden = !open;
+    it.setAttribute('data-open', open ? 'yes' : '');
+    /* The loudest thing waiting decides the tab's colour: a cancellation
+       somebody has to answer should not look like three new orders. */
+    var worst = known.some(function (o) {
+      var k = kindOf(o);
+      return k === 'cancel' || k === 'gone';
+    })
+      ? 'cancel'
+      : known.some(function (o) { return kindOf(o) === 'change'; })
+        ? 'change'
+        : 'new';
+    it.setAttribute('data-worst', worst);
+    var list = it.querySelector('#request-dock-list');
+    if (list && open) list.innerHTML = known.map(card).join('');
+  }
+
+  /* Requests the shop has waved away, by id. Never persisted: a reload is a
+     new shift at the till and everything waiting deserves to be seen again. */
+  var dismissed = {};
+
+  var asking = false;
+
+  function look() {
+    if (asking) return;
+    if (!window.PosnicPro || typeof PosnicPro.get !== 'function') return;
+    asking = true;
+    try {
+      PosnicPro.get(
+        { url: 'sales/pendingOnlineOrders', data: {} },
+        function (response) {
+          asking = false;
+          /* The endpoint answers with the array itself, the way the queue
+             page reads it; anything else is a shop with nothing waiting. */
+          var rows = (response && response.data) || [];
+          /*
+           * The calls ride in their own key, not mixed into the orders.
+           *
+           * Read as a SEPARATE list on purpose: a staff screen that has not
+           * been taught the word draws `data` and is unaffected, where a
+           * merged list would have an older one render a table's call as a
+           * new order with an accept button that means nothing.
+           *
+           * Shaped into rows the rest of this file already understands, so
+           * the card, the count and the dismiss all work without knowing
+           * anything new. `sale_id` carries the CALL's id because that is
+           * what the answer is posted against.
+           */
+          var calls = (response && response.calls) || [];
+          var asRows = (Array.isArray(calls) ? calls : []).map(function (call) {
+            return {
+              sale_id: String(call.call_id || ''),
+              call_id: String(call.call_id || ''),
+              table_number: String(call.table_number || ''),
+              created_date: call.called_at || null,
+              items: [],
+            };
+          });
+          known = (Array.isArray(rows) ? rows : []).concat(asRows);
+          /* Forget the ones that have gone. Otherwise a shop that dismissed
+             an order, answered it on the queue page, and then received a new
+             one carrying a recycled id would never be shown it. */
+          var here = {};
+          known.forEach(function (o) {
+            var id = String(o.sale_id);
+            if (dismissed[id]) here[id] = true;
+          });
+          dismissed = here;
+          paint();
+        },
+        function () {
+          asking = false;
+          /* A shop that cannot be reached is not a shop with nothing waiting;
+             the dock keeps what it last knew. */
+        }
+      );
+    } catch (e) {
+      asking = false;
+    }
+  }
+
+  function start() {
+    if (timer) return;
+    look();
+    timer = setInterval(look, EVERY_MS);
+    /* The words age while the panel sits open, so they are redrawn on their
+       own slower clock - "3 minutes ago" must not stay "3 minutes ago". */
+    setInterval(function () {
+      if (open) paint();
+    }, 30000);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start, { once: true });
+  } else {
+    start();
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) look();
+  });
+
+  /*
+   * A NOTIFICATION HAS TO LEAD SOMEWHERE.
+   *
+   * Owner: "i saw some success message kind of notification about customer.
+   * whats the use of that? how to respond where to check the request is
+   * important."
+   *
+   * He is right, and it was a fair question: the toast said a thing had
+   * happened and then vanished, leaving nowhere to go and nothing to do. A
+   * message that cannot be acted on trains people to dismiss messages. So the
+   * watcher now opens this, and the toast becomes the way IN to the panel
+   * that answers it rather than an announcement on its own.
+   */
+  function show() {
+    /* Only for something the shop has not already waved away. The toast
+       calls this on every arrival, so without the check a dismissed panel
+       springs back the moment anything else happens. */
+    var fresh = known.filter(function (o) { return !dismissed[String(o.sale_id)]; });
+    if (!known.length || fresh.length) open = true;
+    look();
+    paint();
+  }
+
+  window.PosnicRequestDock = {
+    show: show,
+    look: look,
+    paint: paint,
+    howLongAgo: howLongAgo,
+    kindOf: kindOf,
+    card: card,
+    saw: function (rows) { known = rows || []; paint(); },
+    isOpen: function () { return open; },
+    toggle: function (on) { open = !!on; paint(); },
+  };
+})();

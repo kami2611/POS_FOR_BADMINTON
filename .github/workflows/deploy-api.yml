@@ -1,0 +1,178 @@
+# Deploys the API to the Lightsail web instance - ONLY when files under api/
+# change. Runs on push to main (maintainers) with repo variable
+# DEPLOY_ENABLED=true and secrets DEPLOY_SSH_KEY / DEPLOY_HOST / DEPLOY_USER.
+name: Deploy api (Lightsail)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "api/**"
+      # The API serves /menu and /order from these, so a change to either is
+      # a change to what customers see. Without them a menu-only commit
+      # passes CI, merges, and the workflow never even starts.
+      - "menu/**"
+      - "order/**"
+      # And the workflow itself, the way deploy-frontend.yml already does.
+      # A change to HOW the API deploys otherwise sits unused until some
+      # unrelated api/ commit happens to carry it out - so the one commit
+      # that most needs proving is the one that never runs.
+      - ".github/workflows/deploy-api.yml"
+  workflow_dispatch:
+
+# Least privilege for GITHUB_TOKEN.
+#
+# Without this the token takes the repository default, which on a public repo
+# is more than any of these jobs needs. None of them writes to GitHub - they
+# build, test, upload an artifact or deploy outward - so read is the ceiling.
+# Releases are created by release.yml, which asks for contents: write there.
+permissions:
+  contents: read
+jobs:
+  deploy:
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy.pem
+          chmod 600 ~/.ssh/deploy.pem
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+      # Every tenant process runs from this one shared checkout; each gets its
+      # own env file from apps/tenants/env/, which is outside this directory
+      # and so is never touched. The old destination (~/apps/api) matched
+      # nothing on the server, so this workflow used to deploy into thin air.
+      - name: Sync api folder
+        run: |
+          rsync -az --delete \
+            --exclude node_modules --exclude .env --exclude uploads \
+            --exclude .wwebjs_auth --exclude .wwebjs_cache \
+            -e "ssh -i ~/.ssh/deploy.pem" \
+            api/ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:~/apps/tenants/app/api/"
+
+      # The customer-facing bundles, which the API serves and this workflow
+      # never shipped.
+      #
+      # api/app.js mounts them from `path.join(__dirname, '..', 'menu')` and
+      # '../order', guarded by fs.existsSync - so a missing directory is not an
+      # error, it is SILENCE. Every shop's /menu and /order answered 404 from
+      # the day the feature shipped, and the 404 reads as a routing bug rather
+      # than a deployment one, which is why it survived so long.
+      #
+      # tests/bundle-deployment.test.js pins this to what app.js actually
+      # serves, in both directions.
+      - name: Sync the customer bundles
+        run: |
+          # Stamp the asset version with this commit. Scripts and styles are
+          # cached four hours on purpose, and a tag that never changes means a
+          # phone that opened the menu this morning runs this morning's code
+          # until tonight. The literal in the HTML is what a checkout served
+          # straight from the tree uses; tests/bundle-deployment.test.js keeps
+          # the two in step.
+          sed -i "s/v=20260912-design/v=${GITHUB_SHA:0:8}/g" order/*.html menu/index.html
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/deploy.pem" \
+            menu/ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:~/apps/tenants/app/menu/"
+          rsync -az --delete \
+            -e "ssh -i ~/.ssh/deploy.pem" \
+            order/ "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:~/apps/tenants/app/order/"
+      # The processes read api/.env at boot (dotenv), and rsync above
+      # deliberately never touches it. The S3 credentials were put in GitHub
+      # secrets, which the server itself never reads - this is the step that
+      # actually delivers them. Without it every upload silently falls back to
+      # local disk, which is exactly what happened for a week.
+      #
+      # dotenv does not override variables pm2 already holds, so each process
+      # keeps its own PORT and MONGODB_URI; this file only supplies what the
+      # saved environment lacks. Written before the reload so the same deploy
+      # applies it.
+      - name: Write storage env
+        env:
+          STORAGE_TYPE: ${{ secrets.STORAGE_TYPE }}
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ] || [ -z "$AWS_S3_BUCKET" ]; then
+            echo "::warning::S3 secrets not set in this repo; skipping env write - uploads will keep falling back to local disk"
+            exit 0
+          fi
+          {
+            echo "STORAGE_TYPE=${STORAGE_TYPE:-s3}"
+            echo "AWS_S3_BUCKET=$AWS_S3_BUCKET"
+            echo "AWS_REGION=${AWS_REGION:-ap-south-1}"
+            echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID"
+            echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY"
+            # Platform mail (Brevo) - the proven send path; empty until the
+            # BREVO_API_KEY secret is set, and harmless while empty.
+            [ -n "$BREVO_API_KEY" ] && echo "BREVO_API_KEY=$BREVO_API_KEY"
+            [ -n "$EMAIL_FROM" ] && echo "EMAIL_FROM=$EMAIL_FROM"
+          # MERGED INTO THE EXISTING .env, NEVER WRITTEN OVER IT.
+          #
+          # This was `cat > ~/apps/tenants/app/api/.env`, which replaces the
+          # whole file with the handful of keys above. The instance keeps
+          # MONGODB_URI, JWT_SECRET, SESSION_SECRET, ENCRYPTION_KEY and around
+          # a hundred more in that same file, and not one of them is in this
+          # repo to put back afterwards.
+          #
+          # It has never fired, but only because the S3 secrets are unset and
+          # the guard above exits first - so the step reports a reassuring
+          # warning about uploads and nobody reads what the enabled path does.
+          # The day somebody sets AWS_S3_BUCKET to turn uploads on, that
+          # deploy would truncate the estate's configuration to five keys and
+          # every shop would come back with no database URI. A step that is
+          # harmless only while it is switched off is a fuse, not a safeguard.
+          #
+          # So: drop the keys we are setting, keep every other line, append
+          # ours, move the result into place in one step. One .bak is left for
+          # the deploy that gets it wrong anyway.
+          } | ssh -i ~/.ssh/deploy.pem "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            'set -eu
+             umask 077
+             env=$HOME/apps/tenants/app/api/.env
+             dir=$(dirname "$env")
+             incoming=$(mktemp "$dir/.env.incoming.XXXXXX")
+             merged=$(mktemp "$dir/.env.merged.XXXXXX")
+             cat > "$incoming"
+             if [ -f "$env" ]; then
+               cp -p "$env" "$env.bak"
+               cp "$env" "$merged"
+               for k in $(sed -n "s/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p" "$incoming"); do
+                 sed -i "/^$k=/d" "$merged"
+               done
+             fi
+             cat "$incoming" >> "$merged"
+             mv "$merged" "$env"
+             chmod 600 "$env"
+             rm -f "$incoming"
+             echo "storage env merged: $(grep -c = "$env") keys in .env"'
+
+      # Ring-ordered reload with a smoke gate between rings (U3.2).
+      #
+      # The orchestration lives in api/scripts/ring-reload.sh, which the rsync
+      # above just delivered - the script and the code it deploys travel
+      # together, so a fix to the deploy procedure rides the same commit as
+      # the code that needs it. It carries this workflow's hard-won rules
+      # (no --update-env, one pm2 reload per call, online processes only,
+      # shard health check, sign-in smoke for every shop, quiet because this
+      # log is public) - see the script for the full history of each.
+      #
+      # Ring order comes from ~/apps/admin/provisioning/rings.json ON THE
+      # SERVER (operator-owned, not in this repo). Between rings the full
+      # sign-in smoke runs; a red ring HALTS the deploy while every later
+      # ring keeps serving the previous build. No rings file = one ring =
+      # the single-pass deploy this replaces.
+      #
+      # A red deploy is recoverable; a green one that broke sign-in is
+      # discovered by a customer.
+      - name: Reload ring by ring, smoke-gated
+        run: |
+          ssh -i ~/.ssh/deploy.pem "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            'set -e
+             cd ~/apps/tenants/app/api && npm ci --omit=dev --silent
+             bash scripts/ring-reload.sh'

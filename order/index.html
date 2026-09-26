@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+    <!-- The browser chrome follows the page, so a dark phone does not
+         frame a dark page in a white bar. -->
+    <meta name="theme-color" content="#0b0f19" media="(prefers-color-scheme: dark)">
+    <!--
+        WHERE EVERY RELATIVE PATH ON THIS PAGE POINTS.
+        A printed code can be three segments deep - /order/AZ100/venue/RC/123
+        for a hotel room - and without this the browser looks for each asset
+        under /order/AZ100/venue/, a directory that does not exist. The page
+        loads and shows nothing, which is the worst kind of broken: a blank
+        screen with no error anybody sees.
+        Pinned to the mount rather than left to the arriving URL, so one file
+        serves the shop address, a table and a venue alike.
+    -->
+    <base href="/order/" />
+    <title>Order</title>
+    <link href="assets/order.css?v=20260912-design" rel="stylesheet">
+    <script src="assets/jquery-3.7.1.min.js?v=20260912-design"></script>
+    <script src="config.js?v=20260912-design"></script>
+    <!-- Says so when the shop is slow to answer, on every request this
+         page makes. Loaded before anything that fetches. assets/working.js -->
+    <script src="assets/working.js?v=20260912-design"></script>
+    <link href="assets/channel-state.css?v=20260912-design" rel="stylesheet">
+    <script src="assets/channel-state.js?v=20260912-design"></script>
+    <script src="assets/service-point.js?v=20260912-design"></script>
+    <script src="assets/kiosk-core.js?v=20260912-design"></script>
+    <script src="indexedDB.js?v=20260912-design"></script>
+</head>
+
+<body>
+    <!-- The page a scanned code lands on. It reads the store address, fetches
+         the menu and moves on; nobody is meant to see it for longer than the
+         spinner. -->
+    <div id="loader">
+        <div class="loader" role="status" aria-label="Loading"></div>
+    </div>
+
+    <script src="assets/index/script.js?v=20260912-design"></script>
+</body>
+</html>

@@ -1,0 +1,359 @@
+/*
+ ---------------------------------------
+ : Custom - Form X-editable js :
+ ---------------------------------------
+ */
+"use strict";
+$(document).ready(function () {
+    /* -- Form - X-editable -- */
+    $.fn.editable.defaults.mode = 'popup';
+    $.fn.editableform.buttons = '<button type="submit" class="btn btn-success editable-submit btn-sm"><i class="feather icon-check"></i></button><button type="button" class="btn btn-danger editable-cancel btn-sm"><i class="feather icon-x"></i></button>';
+
+    // Glanceable flag on a note's edit link. Once text is set the pencil turns
+    // green and a check + short preview appears next to it (full text on hover);
+    // empty resets to the plain blue pencil. The old behaviour only tinted the
+    // tiny pencil, which was too subtle to notice that a note had been saved.
+    window.PosnicPro = window.PosnicPro || {};
+    /*
+     * A note chip in the sale action bar. Empty it reads as an invitation
+     * ("Payment note"); filled it turns green with a tick and a preview, and
+     * the full text is the tooltip. The label comes from data-label so the
+     * three chips are told apart at a glance - they used to be three pencils
+     * on three separate rows, each with its own heading taking a whole cell.
+     */
+    PosnicPro.updateSaleNoteFlag = function (clickId, iconClass, text) {
+        var $a = $('#' + clickId);
+        if (!$a.length) { return; }
+        var label = $a.data('label') || '';
+        var esc = function (v) { return $('<div>').text(v == null ? '' : v).html(); };
+        var t = (text == null) ? '' : String(text).trim();
+        if (t.length > 0) {
+            var preview = t.length > 22 ? t.slice(0, 22) + '…' : t;
+            $a.attr('title', label ? label + ': ' + t : t)
+                .addClass('is-set')
+                .html('<i class="feather icon-check"></i> '
+                    + (label ? esc(label) + ' ' : '')
+                    + '<span class="note-set-flag">' + esc(preview) + '</span>');
+        } else {
+            $a.attr('title', label ? 'Add a ' + label.toLowerCase() : '')
+                .removeClass('is-set')
+                .html('<i class="' + iconClass + '"></i> ' + esc(label));
+        }
+    };
+
+    $('#extraDisc').editable({
+        mode: 'inline',
+        /*
+         * No tick / cross (owner: "seems uncessory. user can dont want he can
+         * keep 0 or dont enter anyting"). The field commits when it loses
+         * focus or on Enter, so entering a discount is type-and-move-on and
+         * abandoning one is just walking away.
+         */
+        showbuttons: false,
+        onblur: 'submit',
+        type: 'number', // Input type
+        tpl: '<input type="text" value="0.00" id="extraDisc" class="form-control form-control-sm small-input" min="0" step="any" style="width: 60px;"/>', // Template for input
+        pk: 1, // Primary key (if needed for backend updates)
+        placement: 'left', // Position of the editable input
+        placeholder: 'Enter discount', // Placeholder text
+        title: 'Enter extra discount', // Title displayed when editing
+        inputclass: 'form-control form-control-sm', // Additional styling for input
+        validate: function (value) {
+            // Validation function
+            if ($.trim(value) === '') {
+                return 'Discount cannot be empty';
+            }
+            if (isNaN(value) || value < 0) {
+                return 'Please enter a valid number';
+            }
+        },
+        success: function (response, newValue) {
+            $('#extraDisc').text(newValue);
+            PosnicPro.sales.calculation.extraDiscoundCalculation();
+        },
+        error: function (response) {
+            // Error callback in case of failure
+            console.error('Error saving the discount:', response);
+        }
+    });
+
+    // Listen for changes in the input field
+    //    $(document).on('input', '#extraDisc', function () {
+    //        let currentValue = $(this).val();
+    //        $('#extraDisc').text(currentValue);
+    //        PosnicPro.sales.calculation.extraDiscoundCalculation();
+    //    });
+
+
+    $('#payment_description').editable({
+        type: 'textarea',
+        tpl: '<textarea maxlength="500"></textarea>',
+        pk: 1,
+        placement: 'left',
+        placeholder: 'Payment description here...',
+        title: 'Enter comments',
+        inputclass: 'form-control form-control-sm textarea-height',
+        validate: function (value) {
+            if (value.length > 500) {
+                return 'Allowed 500 characters only';
+            }
+        },
+        success: function (k, val) {
+            $('#payment_description').val(val);
+            $('#payment_description').text('');
+            $('#payment_description').hide();
+            PosnicPro.updateSaleNoteFlag('click_payment_description', 'feather icon-edit-1', val);
+        }
+    });
+
+    $('#sales_description').editable({
+        type: 'textarea',
+        tpl: '<textarea maxlength="500"></textarea>',
+        pk: 1,
+        placement: 'left',
+        placeholder: 'Sale description here...',
+        title: 'Enter comments',
+        inputclass: 'form-control form-control-sm textarea-height',
+        validate: function (value) {
+            if (value.length > 500) {
+                return 'Allowed 500 characters only';
+            }
+        },
+        success: function (k, val) {
+            $('#sales_description').val(val);
+            $('#sales_description').text('');
+            $('#sales_description').hide();
+            PosnicPro.updateSaleNoteFlag('click_sales_description', 'feather icon-edit-1', val);
+        }
+    });
+
+    $('#discount_description').editable({
+        type: 'textarea',
+        tpl: '<textarea maxlength="2500" autofocus></textarea>',
+        pk: 1,
+        placement: 'left',
+        placeholder: 'Discount description here...',
+        title: 'Enter comments',
+        inputclass: 'form-control form-control-sm textarea-height',
+        emptytext: '',
+        onblur: 'ignore',
+        validate: function (value) {
+            if (value.length > 2500) {
+                return 'Allowed 2500 characters only';
+            }
+        },
+        success: function (k, val) {
+            $('#discount_description').val(val);
+            $('#discount_description').text('');
+            $('#discount_description').hide();
+            if (val.length > 0) {
+                $('#click_discount_description').css({ color: '#5fd799' });
+            } else {
+                $('#click_discount_description').css({ color: '#506fe4' });
+            }
+        }
+    });
+
+
+    /*
+     * The three sale-page notes (payment, sale, discount) open an inline
+     * editor now - PosnicPro.sales.noteEdit, bound in sales.js. Their
+     * popup openers are gone from here; the .editable() setup above stays
+     * because setDefaults still calls editable('setValue', null) on these
+     * elements to clear them between sales.
+     */
+
+    $('#register_add_payment_description').editable({
+        type: 'textarea',
+        tpl: '<textarea maxlength="500"></textarea>',
+        pk: 1,
+        placement: 'left',
+        placeholder: 'Sale description here...',
+        title: 'Enter comments',
+        inputclass: 'form-control form-control-sm textarea-height',
+        validate: function (value) {
+            if (value.length > 500) {
+                return 'Allowed 500 characters only';
+            }
+        },
+        success: function (k, val) {
+
+            let countedCashData = {
+                id: $('#reg_upd_id').val(),
+                note: val
+            };
+            let params = {
+                method: 'POST',
+                url: 'registers/registerPaymentNote',
+                data: JSON.stringify(Object.assign(countedCashData))
+            };
+            PosnicPro.request(params, function (response) {
+                if (response.type === 'success') {
+                    $('#register_add_payment_description').val(val);
+                }
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+        }
+    });
+
+    $('#editableusername').editable({
+        type: 'text',
+        pk: 1,
+        title: 'Enter firstname',
+        inputclass: 'form-control form-control-sm',
+        validate: function (value) {
+            if (value.length > 50) {
+                return 'Allowed 50 characters only';
+            }
+        },
+        success: function (k, val) {
+            $('#editableusername').val(val);
+            $('#editableusername').text('');
+        }
+    });
+
+
+    $('#editablelastname').editable({
+        type: 'text',
+        pk: 1,
+        emptytext: '..',
+        title: 'Enter lastname',
+        inputclass: 'form-control form-control-sm',
+        validate: function (value) {
+            if (value.length > 50) {
+                return 'Allowed 50 characters only';
+            }
+        },
+        success: function (k, val) {
+            $('#editablelastname').val(val);
+            $('#editablelastname').text('');
+        }
+    });
+
+    $('#counted_cash_amount').editable({
+        type: 'text',
+        pk: 1,
+        emptytext: '..',
+        title: 'Enter Counted Cash Amount',
+        inputclass: 'form-control form-control-sm',
+        validate: function (value) {
+            if ($.trim(value) == '') {
+                return 'Counted Cash Amount is required.';
+            }
+            if (($.isNumeric(value) == '')) {
+                return 'Only numbers allowed';
+            }
+            if (value.length > 5) {
+                return 'Allowed 5 digits only';
+            }
+        },
+        success: function (k, val) {
+            PosnicPro.registers.cashOnRegisterValueCheck(val)
+            var countedCashData = {
+                register_row_Id: $('#reg_upd_id').val(),
+                countedAmount: parseFloat(val),
+                payment_Type: 'cash'
+            };
+            var method = 'POST';
+            var url = 'registers/registerCountedAmount';
+            var params = {
+                method: method,
+                url: url,
+                data: JSON.stringify(Object.assign(countedCashData))
+            };
+            PosnicPro.request(params, function (response) {
+                if (response.type === 'success') {
+
+                }
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+        }
+    });
+    $('#counted_card_amount').editable({
+        type: 'text',
+        pk: 1,
+        emptytext: '..',
+        title: 'Enter lastname',
+        inputclass: 'form-control form-control-sm',
+        validate: function (value) {
+            if ($.trim(value) == '') {
+                return 'Counted Card Amount is required.';
+            }
+            if (($.isNumeric(value) == '')) {
+                return 'Only numbers allowed';
+            }
+            if (value.length > 5) {
+                return 'Allowed 5 digits only';
+            }
+        },
+        success: function (k, val) {
+            PosnicPro.registers.creditOnRegisterValueCheck(val)
+            var countedCardData = {
+                register_row_Id: $('#reg_upd_id').val(),
+                countedAmount: parseFloat(val),
+                payment_Type: 'card'
+            };
+            var method = 'POST';
+            var url = 'registers/registerCountedAmount';
+            var params = {
+                method: method,
+                url: url,
+                data: JSON.stringify(Object.assign(countedCardData))
+            };
+            PosnicPro.request(params, function (response) {
+                if (response.type === 'success') {
+
+                }
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+
+        }
+    });
+    $('#counted_cheque_amount').editable({
+        type: 'text',
+        pk: 1,
+        emptytext: '..',
+        title: 'Enter lastname',
+        inputclass: 'form-control form-control-sm',
+        validate: function (value) {
+            if ($.trim(value) == '') {
+                return 'Counted cheque Amount is required.';
+            }
+            if (($.isNumeric(value) == '')) {
+                return 'Only numbers allowed';
+            }
+            if (value.length > 5) {
+                return 'Allowed 5 digits only';
+            }
+        },
+        success: function (k, val) {
+            PosnicPro.registers.chequeOnRegisterValueCheck(val)
+            var countedChequeData = {
+                register_row_Id: $('#reg_upd_id').val(),
+                countedAmount: val,
+                payment_Type: 'cheque'
+            };
+            var method = 'POST';
+            var url = 'registers/registerCountedAmount';
+            var params = {
+                method: method,
+                url: url,
+                data: JSON.stringify(Object.assign(countedChequeData))
+            };
+            PosnicPro.request(params, function (response) {
+                if (response.type === 'success') {
+
+                }
+            }, function (xhr) {
+                var response = jQuery.parseJSON(xhr.responseText);
+                PosnicPro.alert(response.type, response.message);
+            });
+        }
+    });
+});

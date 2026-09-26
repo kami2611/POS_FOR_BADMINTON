@@ -1,0 +1,752 @@
+const express = require('express');
+const router = express.Router();
+const salesController = require('../controllers/sales.controller');
+const { protect, optionalProtect } = require('../middleware/auth');
+const {
+  validateCreateSale,
+  validateUpdateSale,
+  ensureValidSaleIdParam,
+  validateInstantSaleDetailsQuery,
+  validateDailyReportQuery,
+  prepareItemExpiryReportQuery,
+  validateSalesSummaryReportQuery,
+  preparePaginatedDateRangeQuery,
+  validateSalesReportsQuery,
+  prepareUserReportTableQuery,
+  prepareBranchPaginatedReportQuery,
+  preparePaymentPaginatedReportQuery,
+  prepareBranchReportQuery,
+  prepareGstOneReportContext,
+  prepareGstThreeReportContext,
+  prepareKioskPaginatedReportQuery,
+  prepareKioskReportQuery,
+  prepareCreateSalePayload,
+  prepareUpdateSalePayload,
+  ensureKioskKey,
+  ensurePrintDevice,
+  protectOrKioskKey,
+} = require('../middleware/sales.validation');
+const { handleValidationErrors } = require('../middleware/validation');
+const bindController = (handler) => {
+  if (typeof handler === 'function') {
+    return handler.bind(salesController);
+  }
+
+  return (req, res, next) => {
+    if (typeof salesController.error === 'function') {
+      return salesController.error(res, 'Handler not implemented', 501);
+    }
+
+    res.status(501).json({
+      success: false,
+      message: 'Handler not implemented',
+      data: null,
+    });
+  };
+};
+
+// Apply middleware if needed
+// const { authenticate, authorize } = require('../middleware/auth');
+
+/*
+ * ── Routes that may be called without a login session ──
+ *
+ * Inherited from PHP's sessionExceptionalRequest['sales']: the KOT screen, the
+ * table tablets and the mobile ordering app reach these without going through a
+ * browser login, so optionalProtect authenticates when it can and never returns
+ * 401 when it cannot.
+ *
+ * That alone was not a guard. optionalProtect leaves an unauthenticated caller
+ * as anonymous and lets them through, and these handlers take the branch from
+ * the request when there is no session to take it from - req.body.branch_id,
+ * req.query.branchId, req.body.order_id. So anyone who could reach the API could
+ * name any branch of any shop and read its live orders, its order history, its
+ * catalogue and its receipts. updateOrder was worse than a read: it accepts
+ * items, totals and discounts, so an anonymous caller could rewrite what another
+ * shop's order said it cost.
+ *
+ * protectOrKioskKey now sits behind optionalProtect. A real session passes
+ * exactly as before - which is every caller inside the app. Anything anonymous
+ * must present this installation's kiosk key, which is generated per machine
+ * rather than shipped in the source.
+ */
+router.get(
+  '/getTablesWithActiveOrders',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.getTablesWithActiveOrders)
+);
+router.post(
+  '/getTablesWithActiveOrders',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.getTablesWithActiveOrders)
+);
+
+/*
+ * "The guest on table four would like the bill."
+ *
+ * Guarded exactly like the floor screen above it, because it is the same
+ * waiter on the same handset asking about the same tables. Deliberately NOT
+ * behind ensureKioskKey: that key is per INSTALLATION, and a phone holding one
+ * would be a till.
+ *
+ * This is the only half of billing the floor is trusted with. It asks for the
+ * bill; it cannot say the bill was paid. The two till-side routes that print
+ * it and stamp it are above, behind the kiosk key, because they are the
+ * machine talking to itself about its own printer.
+ */
+router.post(
+  '/requestBillPrint',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.requestBillPrint)
+);
+
+// --- Kiosk-authenticated routes (use kioskkey header, not JWT) ---
+// Must be registered BEFORE router.use(protect)
+router.post('/kioskOrder', ensureKioskKey, bindController(salesController.kioskOrder));
+
+/*
+ * A waiter's own day, for the sales screen on the handset.
+ *
+ * optionalProtect then protectOrKioskKey, like the other calls a phone makes:
+ * a real session passes, a handset's bearer token passes, and an anonymous
+ * caller is refused. The figures are scoped to whoever the token names, in the
+ * controller, never to anything in the body.
+ */
+router.post('/myDay', optionalProtect, protectOrKioskKey, bindController(salesController.myDay));
+/*
+ * The open table calls, for the till's own main process.
+ *
+ * A call that arrived by sync lands in the request dock silently; the sound
+ * a counter-made call raises comes from the insert path, and the agent's pull
+ * line carries a count, not ids. The main process reads this after a pull and
+ * rings each call until "seen" resolves it. Guarded like the floor screen:
+ * a session passes as always, and the anonymous case must hold this
+ * installation's kiosk key. Registered before router.use(protect) because the
+ * main process has no session.
+ */
+router.get(
+  '/waiterCalls/open',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.openWaiterCalls)
+);
+
+/*
+ * An order from a waiter's phone - the captain app.
+ *
+ * Deleted with the rest of the old online-ordering shapes on the grounds that
+ * nobody was using the channel. The captain handsets are signed, published and
+ * already installed, and a phone cannot be updated from here; `kioskOrder`
+ * above survived the same refactor for the same reason, one device along.
+ *
+ * No longer anonymous, which it should never have been: it wrote a real sale
+ * against a branch named only by its database id. A signed-in user or the
+ * shop's own equipment, which is what every captain handset already is.
+ *
+ * The same implementation as `POST /online-ordering/:storeId/orders` - that is
+ * the endpoint to build new work against - so the idempotency key a queued
+ * handset replays is honoured here too, and a retry cannot double a ticket.
+ */
+router.post(
+  '/qrOrder',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.qrOrder)
+);
+router.post(
+  '/generateRazorPayQrCodekiosk',
+  ensureKioskKey,
+  bindController(salesController.generateRazorPayQrCodekiosk)
+);
+router.post(
+  '/getRazorPayQrStatus',
+  ensureKioskKey,
+  bindController(salesController.getRazorPayQrStatus)
+);
+router.post(
+  '/razorPayQrCodeClose',
+  ensureKioskKey,
+  bindController(salesController.razorPayQrCodeClose)
+);
+router.post('/fetchLastSale', ensureKioskKey, bindController(salesController.fetchLastSale));
+router.post('/kitchenPrint', ensureKioskKey, bindController(salesController.kitchenPrint));
+/* What the kitchen is cooking, for the screen on the wall. The shop's own
+   equipment, so the same key as the rest of the kitchen routes. */
+router.post(
+  '/kitchenScreenTickets',
+  ensureKioskKey,
+  bindController(salesController.kitchenScreenTickets)
+);
+router.post(
+  '/multiKitchenPrint',
+  ensureKioskKey,
+  bindController(salesController.multiKitchenPrint)
+);
+/*
+ * The bill a waiter asked for.
+ *
+ * The two the TILL calls are behind ensureKioskKey, like every other printer
+ * route - they are the machine talking to itself about its own hardware. The
+ * one the HANDSET calls sits with the other kiosk routes further down, because
+ * a phone has no kiosk key and never should: that key is per installation and
+ * a phone that held one would be a till.
+ */
+router.post(
+  '/pendingBillPrints',
+  ensureKioskKey,
+  bindController(salesController.pendingBillPrints)
+);
+router.post('/markBillPrinted', ensureKioskKey, bindController(salesController.markBillPrinted));
+/*
+ * THE PRINT QUEUE. A till asking what it should print, and saying what
+ * happened to it. Behind the installation key like every other printer route -
+ * this is a machine talking about its own hardware.
+ */
+/*
+ * These two accept a SECOND kind of caller: a till this shop has allowed.
+ *
+ * A till on the shop's own network is this installation and shares its key. A
+ * till printing for a cloud shop is a different installation with a key of its
+ * own, and the cloud tenant has a different one again - they can never match,
+ * which is why the queue worked and no cloud shop ever printed. The shop
+ * introduces them once in Settings; see middleware/kiosk-key.js.
+ *
+ * An allowed till may take print jobs, say what happened to them, and read
+ * and answer the ones that ended up waiting on a person. Nothing else.
+ *
+ * The last two are how a bill that never came out becomes visible at all:
+ * `needs_attention` is where the queue parks a job whose till went quiet, and
+ * before these there was no door to that status from anywhere.
+ */
+router.post('/claimPrintJobs', ensurePrintDevice, bindController(salesController.claimPrintJobs));
+router.post('/finishPrintJob', ensurePrintDevice, bindController(salesController.finishPrintJob));
+router.post(
+  '/printJobsNeedingAttention',
+  ensurePrintDevice,
+  bindController(salesController.printJobsNeedingAttention)
+);
+router.post('/resolvePrintJob', ensurePrintDevice, bindController(salesController.resolvePrintJob));
+/* What the shadow queue has been seeing, read-only. Behind the same guard:
+   it is the till's own Hardware Manager that shows it. */
+router.post(
+  '/kitchenQueueShadow',
+  ensurePrintDevice,
+  bindController(salesController.kitchenQueueShadow)
+);
+router.post(
+  '/markKitchenPrinted',
+  ensureKioskKey,
+  bindController(salesController.markKitchenPrinted)
+);
+
+// ── Kiosk / mobile-app routes (no JWT auth required, branch_id in body) ──
+/*
+ * getNewSale sits in the no-JWT block but its handler requires sales:write.
+ * With no auth middleware at all, req.user was never populated - so the
+ * permission check saw undefined and answered 403 to EVERYONE, signed in or
+ * not. It is the only route in this block that was missing optionalProtect;
+ * its siblings all carry it. With the session read, a logged-in till passes
+ * the permission check as intended, and anything genuinely anonymous still
+ * has to present this installation's kiosk key.
+ */
+router.get(
+  '/getNewSale',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.getNewSale)
+);
+router.post(
+  '/getOrderHistory',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.getOrderHistory)
+);
+router.post(
+  '/updateOrder',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.updateOrder)
+);
+router.put(
+  '/updateOrder',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.updateOrder)
+);
+router.post(
+  '/searchProducts',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.searchProducts)
+);
+router.post(
+  '/getFrequentItems',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.getFrequentItems)
+);
+router.get(
+  '/getListKot',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.getListKot)
+);
+
+// ── Public customer receipt link ──
+// customersMailPrint.html?id=<encrypted> is opened by customers from an SMS/email
+// link, so it must work WITHOUT a JWT. Access is gated by the encrypted id itself
+// (PHP served getCustomerPrint publicly too). Registered before router.use(protect).
+router.get(
+  '/getCustomerPrint',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.getCustomerPrint)
+);
+
+/*
+ * Turn a clip of a waiter's voice into text, using the shop's own account.
+ *
+ * Behind the same guard as the other handset routes: a signed-in user or the
+ * shop's own equipment. This spends the shop's money per call, so anonymous
+ * traffic has no business here.
+ *
+ * The key never leaves the server; that is the whole reason this endpoint
+ * exists rather than the app calling a provider itself.
+ */
+router.post(
+  '/transcribe',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.transcribe)
+);
+
+/*
+ * What the words MEANT, for a shop whose model does the reading. Same door,
+ * same guards, same reason: the handset never holds a key. A shop with no AI
+ * configured is answered 200 with commands:null and the app parses locally.
+ */
+router.post(
+  '/voiceIntent',
+  optionalProtect,
+  protectOrKioskKey,
+  bindController(salesController.voiceIntent)
+);
+
+router.use(protect);
+
+router.post(
+  '/:id/kotPrint',
+  ensureValidSaleIdParam,
+  handleValidationErrors,
+  bindController(salesController.counterKotPrint)
+);
+
+// POST /api/sales - Create a new sale
+router.post(
+  '/',
+  validateCreateSale,
+  handleValidationErrors,
+  prepareCreateSalePayload,
+  bindController(salesController.create)
+);
+
+/*
+ * The approval queue.
+ *
+ * Behind the normal session, not the kiosk key: deciding whether the kitchen
+ * cooks something is a shop decision made by a person who is signed in, and
+ * the anonymous storefront must never be able to accept its own orders.
+ *
+ * Declared before '/' and before '/:id' so neither swallows it.
+ */
+router.get('/pendingOnlineOrders', bindController(salesController.pendingOnlineOrders));
+
+/* A table called; somebody is going. Marked seen rather than decided. */
+router.post('/waiterCalls/:id/seen', bindController(salesController.seeWaiterCall));
+
+/* What the shop owes its hotels and its aggregators. Same date-range and
+   branch preparation every other report uses, so a report saved from one
+   screen filters the same way as the next. */
+router.get(
+  '/commissionReport',
+  prepareBranchPaginatedReportQuery,
+  bindController(salesController.commissionReport)
+);
+router.post(
+  '/:id/approval',
+  ensureValidSaleIdParam,
+  handleValidationErrors,
+  bindController(salesController.decideOnOrder)
+);
+
+// GET /api/sales - Get all sales with pagination
+router.get('/', bindController(salesController.getAll));
+
+// GET /api/sales/dailySalesReports - Legacy daily sales report endpoint
+router.get(
+  '/dailySalesReports',
+  validateDailyReportQuery,
+  bindController(salesController.dailySalesReports)
+);
+
+// GET /api/sales/dailyReportPdf - Daily sales report PDF generation
+router.get(
+  '/dailyReportPdf',
+  validateDailyReportQuery,
+  bindController(salesController.dailyReportPdf)
+);
+
+// Legacy sales chart endpoint
+router.get('/salesGraphicalReports', bindController(salesController.salesGraphicalReports));
+router.get(
+  '/itemGraphicalReports',
+  preparePaginatedDateRangeQuery,
+  bindController(salesController.itemGraphicalReports)
+);
+
+// Legacy sales report listing endpoint
+router.get(
+  '/salesReports',
+  validateSalesReportsQuery,
+  bindController(salesController.salesReports)
+);
+router.get(
+  '/itemSalesReportTable',
+  preparePaginatedDateRangeQuery,
+  bindController(salesController.itemSalesReportTable)
+);
+// T3: the generic tax filing report - totals per rate class over a period.
+router.get('/taxSummaryReportTable', bindController(salesController.taxSummaryReportTable));
+router.get(
+  '/categorySalesReportTable',
+  preparePaginatedDateRangeQuery,
+  bindController(salesController.categorySalesReportTable)
+);
+router.get(
+  '/supplierSalesReportTable',
+  preparePaginatedDateRangeQuery,
+  bindController(salesController.supplierSalesReportTable)
+);
+router.get(
+  '/customerSalesReportTable',
+  preparePaginatedDateRangeQuery,
+  bindController(salesController.customerSalesReportTable)
+);
+router.get(
+  '/salesSummaryReports',
+  validateSalesSummaryReportQuery,
+  bindController(salesController.salesSummaryReports)
+);
+
+// Instant sales reports endpoints
+router.get(
+  '/instantSalesReports',
+  preparePaginatedDateRangeQuery,
+  bindController(salesController.instantSalesReports)
+);
+router.get(
+  '/instantSaleDetails',
+  validateInstantSaleDetailsQuery,
+  bindController(salesController.instantSaleDetails)
+);
+
+// Legacy endpoint: GET /sales/getLatestSales
+router.get('/getLatestSales', bindController(salesController.getLatestSales));
+
+// Legacy user report routes that frontend still requests under /sales
+router.get(
+  '/userReportTable',
+  prepareUserReportTableQuery,
+  bindController(salesController.userReportTable)
+);
+router.get('/userGraphicalReports', bindController(salesController.userGraphicalReports));
+
+// Legacy return report routes that frontend still requests under /sales
+router.get(
+  '/returnSalesReportTable',
+  prepareBranchPaginatedReportQuery,
+  bindController(salesController.returnSalesReportTable)
+);
+router.get('/productBasedReturnDetails', bindController(salesController.productBasedReturnDetails));
+
+// Legacy pending report routes that frontend still requests under /sales
+router.get(
+  '/pendingSalesReportTable',
+  prepareBranchPaginatedReportQuery,
+  bindController(salesController.pendingSalesReportTable)
+);
+router.get(
+  '/pendingCustomerReportTable',
+  prepareBranchPaginatedReportQuery,
+  bindController(salesController.pendingCustomerReportTable)
+);
+
+// Legacy tax report route that frontend still requests under /sales
+router.get(
+  '/taxSalesReports',
+  prepareBranchReportQuery,
+  bindController(salesController.taxSalesReports)
+);
+
+// Legacy payment report routes that frontend still requests under /sales
+router.get(
+  '/paymentSalesTranscationReportTable',
+  preparePaymentPaginatedReportQuery,
+  bindController(salesController.paymentSalesTranscationReportTable)
+);
+router.get(
+  '/paymentSaleTypeReport',
+  prepareBranchReportQuery,
+  bindController(salesController.paymentSaleTypeReport)
+);
+router.get(
+  '/paymentReturnSalesTranscationReportTable',
+  preparePaymentPaginatedReportQuery,
+  bindController(salesController.paymentReturnSalesTranscationReportTable)
+);
+router.get(
+  '/paymentGraphicalReports',
+  prepareBranchReportQuery,
+  bindController(salesController.paymentGraphicalReports)
+);
+
+// PHP: salesReceipt() - Email sales receipt
+router.post('/salesReceipt', bindController(salesController.salesReceipt));
+
+// PHP: getCustomerPrint() - registered above router.use(protect) as a PUBLIC route
+// (customer receipt link needs no JWT). See "Public customer receipt link" section.
+
+// Frontend: sales_view.js expects this endpoint for PDF open
+router.get('/salesPdf', bindController(salesController.salesPdf));
+
+// Permanent S3 invoice link (cloud): the key is the secret.
+router.post('/:id/invoiceLink', bindController(salesController.createInvoiceLink));
+
+// PHP: salesMailPdf() - Generate and email PDF invoice
+router.get('/salesMailPdf', bindController(salesController.salesMailPdf));
+
+// PHP: returnSales() - Process sales return
+router.post('/returnSales', bindController(salesController.returnSales));
+
+// PHP: exportSales() - Export sales data
+router.post('/exportSales', bindController(salesController.exportSales));
+
+// Frontend POSTs to lowercase /exportsales (from PosnicPro.getExportValue)
+router.post('/exportsales', bindController(salesController.exportSales));
+
+// Frontend sometimes opens this legacy path in a new tab
+// Controller now handles both GET (with query params) and POST (with body)
+router.get('/exportsales', bindController(salesController.exportSales));
+
+// PHP: getDataChanges() - Get data changes for sync
+router.get('/getDataChanges', bindController(salesController.getDataChanges));
+
+// PHP: getReturnSalesDetails() - Get return sales details
+router.get('/getReturnSalesDetails', bindController(salesController.getReturnSalesDetails));
+
+// PHP: returnPrintDetails() - Get return print details
+router.get('/returnPrintDetails', bindController(salesController.returnPrintDetails));
+
+// PHP: getSalesAjaxList() - Get sales list for autocomplete
+router.get('/getSalesAjaxList', bindController(salesController.getSalesAjaxList));
+
+// PHP: getSaleQtyDetail() - Get sale quantity detail
+router.get('/getSaleQtyDetail', bindController(salesController.getSaleQtyDetail));
+
+// PHP: ServerStatus() - Server status check
+router.get('/ServerStatus', bindController(salesController.ServerStatus));
+
+// PHP: customerSaleDetails() - Get customer sale details
+router.get('/customerSaleDetails', bindController(salesController.customerSaleDetails));
+
+// PHP: customerCategorySaleDetails() - Get customer category sale details
+router.get(
+  '/customerCategorySaleDetails',
+  bindController(salesController.customerCategorySaleDetails)
+);
+
+// PHP: itemSaleDetails() - Get item sale details
+router.get('/itemSaleDetails', bindController(salesController.itemSaleDetails));
+
+// PHP: categorySaleDetails() - Get category sale details
+router.get('/categorySaleDetails', bindController(salesController.categorySaleDetails));
+
+// PHP: userSalesDetails() - Get user sales details
+router.get('/userSalesDetails', bindController(salesController.userSalesDetails));
+
+// PHP: returnProductDetails() - Get return product details
+router.get('/returnProductDetails', bindController(salesController.returnProductDetails));
+
+// PHP: returnProductView() - Get return product view
+router.get('/returnProductView', bindController(salesController.returnProductView));
+
+// PHP: pendingProductDetails() - Get pending product details
+router.get('/pendingProductDetails', bindController(salesController.pendingProductDetails));
+
+// PHP: gstOneReportTable() - Get GST-1 report
+router.get(
+  '/gstOneReportTable',
+  prepareGstOneReportContext,
+  bindController(salesController.gstOneReportTable)
+);
+
+// PHP: gstThreeReportTable() - Get GST-3 report
+router.get(
+  '/gstThreeReportTable',
+  prepareGstThreeReportContext,
+  bindController(salesController.gstThreeReportTable)
+);
+
+// Tax Payable (PURCHASE_TAX_PLAN P4): the plain-words monthly view + register
+router.get('/taxPayable', bindController(salesController.taxPayable));
+router.get('/taxPayableRegister', bindController(salesController.taxPayableRegister));
+
+// PHP: gstOneReportTableJson() - Get GST-1 report JSON
+router.get(
+  '/gstOneReportTableJson',
+  prepareGstOneReportContext,
+  bindController(salesController.gstOneReportTableJson)
+);
+
+// PHP: dailySalesMail() - Send daily sales email
+router.post('/dailySalesMail', bindController(salesController.dailySalesMail));
+
+// PHP: salesPaymentClose() - Close sales payment
+router.post('/salesPaymentClose', bindController(salesController.salesPaymentClose));
+
+// PHP: qrCodeClose() - Close QR code
+router.get('/qrCodeClose', bindController(salesController.qrCodeClose));
+
+// PHP: qrSalePayementUpdate() - Update QR sale payment
+router.get('/qrSalePayementUpdate', bindController(salesController.qrSalePayementUpdate));
+
+// PHP: generateQrCode() - Generate QR code
+router.get('/generateQrCode', bindController(salesController.generateQrCode));
+
+// PHP: getQrStatus() - Get QR status
+router.get('/getQrStatus', bindController(salesController.getQrStatus));
+
+// PHP: phonepeQr() - Generate PhonePe QR
+router.get('/phonepeQr', bindController(salesController.phonepeQr));
+
+// PHP: phonepeQrStatus() - Get PhonePe QR status
+router.get('/phonepeQrStatus', bindController(salesController.phonepeQrStatus));
+
+// PHP: createRazorPayMobile() - Create RazorPay for mobile
+router.post('/createRazorPayMobile', bindController(salesController.createRazorPayMobile));
+
+// PHP: fetchRazorPayQrStatusMobile() - Fetch RazorPay QR status for mobile
+router.post(
+  '/fetchRazorPayQrStatusMobile',
+  bindController(salesController.fetchRazorPayQrStatusMobile)
+);
+
+// (getNewSale, getOrderHistory, updateOrder, searchProducts, getFrequentItems moved before protect above)
+
+// PHP: kotDiscountReports() - Get KOT discount reports
+router.get('/kotDiscountReports', bindController(salesController.kotDiscountReports));
+
+// PHP: kotTablewiseDetails() - Get KOT table-wise detailed item report
+router.get('/kotTablewiseDetails', bindController(salesController.kotTablewiseDetails));
+
+// PHP: getListKot() - (moved before protect for kiosk access - see above)
+
+// PHP: pendingCustomerCategoryReportTable() - Get pending customer category report
+router.get(
+  '/pendingCustomerCategoryReportTable',
+  bindController(salesController.pendingCustomerCategoryReportTable)
+);
+
+// PHP: kioskReports() - Get kiosk reports
+router.get(
+  '/kioskReports',
+  prepareKioskPaginatedReportQuery,
+  bindController(salesController.kioskReports)
+);
+
+// PHP: kiosksSummaryReports() - Get kiosk summary reports
+router.get(
+  '/kiosksSummaryReports',
+  prepareKioskReportQuery,
+  bindController(salesController.kiosksSummaryReports)
+);
+
+// PHP: kiosksGraphicalReports() - Get kiosk graphical reports
+router.get(
+  '/kiosksGraphicalReports',
+  prepareKioskReportQuery,
+  bindController(salesController.kiosksGraphicalReports)
+);
+
+// PHP: itemExpiryReportTable() - Get item expiry report
+router.get(
+  '/itemExpiryReportTable',
+  prepareItemExpiryReportQuery,
+  bindController(salesController.itemExpiryReportTable)
+);
+
+// Legacy bulk delete endpoint used by frontend: DELETE /sales/delete
+router.delete('/delete', bindController(salesController.delete));
+
+// Legacy hold endpoint - support creating and updating hold sales
+router
+  .route('/hold')
+  .post(prepareCreateSalePayload, bindController(salesController.holdSale))
+  .put(prepareCreateSalePayload, bindController(salesController.holdSale));
+
+/*
+ * Cancelling a sale must not be a GET.
+ *
+ * A GET is meant to be safe to repeat and safe for anything to follow.
+ * Browsers prefetch them, link scanners and antivirus fetch them, and - the
+ * part that matters - a bare `<img src="https://.../sales/cancel/ID">` on any
+ * page reached while logged in fires one WITH cookies, because SameSite=Lax
+ * still sends them on top-level GETs. That is a working CSRF vector against a
+ * destructive operation.
+ *
+ * POST is the real route now. The GET stays only because tills already
+ * deployed still call it (KOT cancel, two call sites), and it is hardened so
+ * it cannot be triggered from another site: X-Requested-With is a header no
+ * <img>, <script>, form or navigation can set, and cross-origin XHR cannot
+ * set it either - the CORS allowlist refuses the preflight. So the legacy path
+ * keeps working for real clients and is dead to an attacker page.
+ *
+ * Remove the GET once no shipped till calls it.
+ */
+const requireXhrForLegacyCancel = (req, res, next) => {
+  if (String(req.get('x-requested-with') || '').toLowerCase() === 'xmlhttprequest') {
+    return next();
+  }
+  return res.status(405).json({
+    type: 'error',
+    message: 'Cancelling a sale requires POST',
+    data: null,
+  });
+};
+
+router.post('/cancel/:id', ensureValidSaleIdParam, bindController(salesController.cancel));
+router.get(
+  '/cancel/:id',
+  requireXhrForLegacyCancel,
+  ensureValidSaleIdParam,
+  bindController(salesController.cancel)
+);
+
+// Single sale routes
+// Legacy edit screens request /sales/:id/edit expecting same payload as /sales/:id
+router.get('/:id/edit', ensureValidSaleIdParam, bindController(salesController.getOne));
+router.get('/:id', ensureValidSaleIdParam, bindController(salesController.getOne));
+router.put(
+  '/:id',
+  ensureValidSaleIdParam,
+  validateUpdateSale,
+  handleValidationErrors,
+  prepareUpdateSalePayload,
+  bindController(salesController.update)
+);
+// router.delete("/:id", salesController.delete);
+
+module.exports = router;

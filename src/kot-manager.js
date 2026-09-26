@@ -1,0 +1,1429 @@
+const { BrowserWindow, app } = require('electron');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { kotJobKey, kotFallbackKey } = require('./kot-job-key');
+const os = require('os');
+/* Windows uses SumatraPDF via pdf-to-printer; everything else uses CUPS.
+   This used to call pdf-to-printer directly, which is Windows-only, so a
+   kitchen ticket falling back to PDF printing on a Mac or Linux till failed
+   silently - caught, reported, and nothing printed. */
+const { printPdfFile } = require('./print-pdf');
+const { hardenPrintWindow } = require('./print-window-guard');
+const { normalizeTargets, pageSizeFor, columnsFor } = require('./printer-targets');
+const orderAlert = require('./order-alert');
+const kitchenAnnounce = require('./kitchen-announce');
+const { renderKitchenTicket, spiceLine } = require('./escpos-kot');
+const printLedger = require('./print-ledger');
+
+/*
+ * What a print attempt came back as.
+ *
+ * silentPrint answers with one entry per printer per copy. One printer failing
+ * while another succeeded is not a failed ticket - the kitchen has its copy and
+ * the file copy did not print, and those are different events.
+ */
+function _anyPrinted(results) {
+  if (!Array.isArray(results)) return false;
+  return results.some((r) => r && r.status === 'success');
+}
+
+function _firstReason(results) {
+  if (!Array.isArray(results)) return '';
+  const bad = results.find((r) => r && r.status !== 'success');
+  return bad ? String(bad.reason || 'unknown') : '';
+}
+
+/*
+ * Where our own API is listening, right now.
+ *
+ * Read inside the function, never at module load. main.js sets PORT while it
+ * starts up, so a const evaluated when this file is first required captures
+ * the fallback instead - the mistake that has already cost three separate
+ * outages in this codebase.
+ *
+ * 5555 is the pre-derived-ports default and is kept only as a last resort for
+ * a development run where nothing set PORT.
+ */
+function kotApiUrl() {
+  const port = Number(process.env.PORT) || 5555;
+  return `http://127.0.0.1:${port}/api`;
+}
+
+/*
+ * How often to poll when nothing has happened.
+ *
+ * This used to be five seconds because polling was the only way a ticket could
+ * ever reach the printer. Sales now announce themselves the moment they are
+ * saved, so this is only the net that catches what the event missed - a ticket
+ * written while the app was starting, or one whose print failed. Thirty seconds
+ * is frequent enough to recover an order and quiet enough to stop hammering the
+ * API all day.
+ */
+const KOT_FALLBACK_POLL_MS = 30000;
+
+class KOTManager {
+  constructor(options = {}) {
+    /*
+     * The printer, injected rather than reached for.
+     *
+     * Given one, a ticket is rendered straight to ESC/POS and sent to the roll
+     * - the same path a receipt takes, and the reason an order now reaches
+     * paper in a fraction of the time. Without one, everything below falls
+     * back to the HTML window and PDF it always used, which is also what a
+     * non-thermal printer still needs.
+     */
+    this.hardware = options.hardware || null;
+    /*
+     * WHICH MACHINE THIS IS.
+     *
+     * The server hands a kitchen ticket to ONE till, and this is how it tells
+     * them apart. The machine's own name, which is what BillManager already
+     * uses for exactly this - two pollers in one shop must not be the same
+     * name, and must be the same name across a restart.
+     */
+    this.tillId = options.tillId || require('os').hostname();
+    this.pollingTimer = null;
+    this.config = null;
+    this.isPolling = false;
+    this.lastPollTime = null;
+    this.lastPollStatus = null;
+
+    // Daily KOT counter (resets at midnight)
+    this.kotCounterDate = null;
+    this.kotCounter = 0;
+    this.kotSlotMapping = {};
+
+    // Dedup: track printed job hashes
+    /*
+     * In-memory, and now backed by src/print-ledger.js so it survives a
+     * restart. The Set alone was the whole reason a crash mid-batch reprinted
+     * every ticket in it.
+     */
+    this.printedJobs = new Set();
+
+    /*
+     * The API is require()d into this same process, so a sale that needs a
+     * kitchen ticket can say so directly instead of us asking every few
+     * seconds. See api/src/helpers/kot-notify.js for why `process` is the bus.
+     *
+     * The poll underneath stays, slowed down: it is also what recovers a ticket
+     * that failed to print, or one saved while the app was starting. Losing an
+     * order is worse than printing it a little late, so the safety net stays.
+     */
+    this._kotNudgeTimer = null;
+    /* One pass at a time, and a note that another was asked for while
+       this one was busy. See _poll. */
+    this._passRunning = false;
+    this._pollAgain = false;
+    this._onKotCreated = (payload) => this._onKotEvent(payload);
+    try { process.on('posnic:kot-created', this._onKotCreated); } catch (e) { /* never fatal */ }
+
+    const base = this._getWritablePath();
+    this.configPath = path.join(base, 'kot-config.json');
+    this.statePath  = path.join(base, 'kot-state.json');
+    this.logsDir    = path.join(base, 'kot-logs');
+    /* Beside the ticket logs, in the app's own data directory, so it survives
+       an update as well as a restart. */
+    printLedger.setDir(base);
+    this._ensureLogsDir();
+
+    this._loadState();
+  }
+
+  _getWritablePath() {
+    try { return app.getPath('userData'); } catch (e) { return __dirname; }
+  }
+
+  /*
+   * WHO ASKED FOR THIS TICKET.
+   *
+   * The log had a Device IP column that was this till's OWN address, from
+   * os.networkInterfaces(). It is the same on every row whatever sent the
+   * order, so it looked like it identified the handset and answered nothing.
+   * Asked directly: "i dont see which asked to print from mobile app printed
+   * or not."
+   *
+   * The sale itself knows. Every one carries a channel - and years of older
+   * ones carry only the legacy `sale_method` - so both are read, the same way
+   * sales-channels.js does it on the server. Reading `sale_method` alone is
+   * what makes a shop's history vanish at a version boundary.
+   *
+   * A staff name is worth more than a device to somebody reading this: on a
+   * floor with four handsets, "Ravi" answers the question and an IP address
+   * starts another one.
+   */
+  /*
+   * Lifted into src/order-source.js, because the bill needs the same words and
+   * the two must not drift. An aggregator is named there too - a ticket that
+   * says "Swiggy" is more use than one that says "Marketplace".
+   */
+  _orderSource(sale) {
+    return require('./order-source').orderSource(sale);
+  }
+
+  _getLocalIp() {
+    try {
+      const ifaces = os.networkInterfaces();
+      for (const name of Object.keys(ifaces)) {
+        for (const iface of ifaces[name]) {
+          if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+        }
+      }
+    } catch (e) { /* ignore */ }
+    return '127.0.0.1';
+  }
+
+  // ─── Log helpers ─────────────────────────────────────────────────────────
+
+  _ensureLogsDir() {
+    try { if (!fs.existsSync(this.logsDir)) fs.mkdirSync(this.logsDir, { recursive: true }); } catch (e) { /* ignore */ }
+  }
+
+  _getLogPath(date) {
+    return path.join(this.logsDir, `kot-logs-${date}.json`);
+  }
+
+  _appendLog(entry) {
+    try {
+      const date    = new Date(entry.time).toISOString().slice(0, 10);
+      const logPath = this._getLogPath(date);
+      let   logs    = [];
+      /* Read first rather than asking whether it exists: the answer can stop
+         being true before the read, and an absent log is the ordinary case on
+         the first ticket of the day. */
+      try { logs = JSON.parse(fs.readFileSync(logPath, 'utf8')); } catch (e) { logs = []; }
+      logs.push(entry);
+      fs.writeFileSync(logPath, JSON.stringify(logs, null, 2), 'utf8');
+    } catch (e) { console.error('[KOT] Failed to write log:', e.message); }
+  }
+
+  getLogs(date) {
+    try {
+      const logPath = this._getLogPath(date);
+      return JSON.parse(fs.readFileSync(logPath, 'utf8'));
+    } catch (e) { /* no log for that day, or it went away mid-read */ }
+    return [];
+  }
+
+  deleteLog(date, logId) {
+    try {
+      const logPath = this._getLogPath(date);
+      let logs;
+      try {
+        logs = JSON.parse(fs.readFileSync(logPath, 'utf8'));
+      } catch (e) {
+        /* ENOENT is "no log for that day", which is the message this always
+           gave; anything else is a real read failure and says so. */
+        if (e && e.code === 'ENOENT') return { success: false, error: 'Log file not found' };
+        throw e;
+      }
+      logs = logs.filter((l) => l.id !== logId);
+      fs.writeFileSync(logPath, JSON.stringify(logs, null, 2), 'utf8');
+      return { success: true };
+    } catch (e) { return { success: false, error: e.message }; }
+  }
+
+  async _waitForPrintPage(webContents) {
+    await webContents.executeJavaScript(`
+      new Promise((resolve) => {
+        if (document.readyState === 'complete') {
+          requestAnimationFrame(() => requestAnimationFrame(resolve));
+        } else {
+          window.addEventListener('load', () => {
+            requestAnimationFrame(() => requestAnimationFrame(resolve));
+          }, { once: true });
+        }
+      })
+    `);
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+
+  _sendPrintJob(printWindow, printOpts) {
+    return new Promise((resolve) => {
+      printWindow.webContents.print(printOpts, (success, reason) => {
+        resolve({ success, reason: reason || '' });
+      });
+    });
+  }
+
+  async _printViaPdfFallback(printWindow, deviceName) {
+    const tmpPdf = path.join(
+      app.getPath('temp'),
+      `posnic-kot-${Date.now()}-${Math.random().toString(16).slice(2)}.pdf`
+    );
+
+    try {
+      const pdfBuffer = await printWindow.webContents.printToPDF({
+        printBackground: true,
+        marginsType: 1
+      });
+      fs.writeFileSync(tmpPdf, pdfBuffer);
+
+      const pdfOptions = {};
+      if (deviceName) pdfOptions.printer = deviceName;
+
+      await printPdfFile(tmpPdf, pdfOptions);
+      console.log(`[KOT] Printed via PDF fallback -> ${deviceName || 'default printer'}`);
+      return { success: true, reason: '' };
+    } catch (error) {
+      console.error(`[KOT] PDF print fallback failed (${deviceName}):`, error.message);
+      return { success: false, reason: error.message || 'PDF print fallback failed' };
+    } finally {
+      try {
+        if (fs.existsSync(tmpPdf)) fs.unlinkSync(tmpPdf);
+      } catch (_) {}
+    }
+  }
+
+  async _printWithSystemDefaultFallback(printWindow) {
+    console.warn('[KOT] Retrying with Windows default printer');
+
+    let result = await this._sendPrintJob(printWindow, {
+      silent: true,
+      printBackground: true,
+      margins: { marginType: 'none' }
+    });
+
+    if (!result.success) {
+      console.warn('[KOT] Windows default Electron print failed, retrying default PDF fallback:', result.reason || 'unknown');
+      result = await this._printViaPdfFallback(printWindow, '');
+    }
+
+    return result;
+  }
+
+  async _printToDeviceWithFallback(printWindow, deviceName, pageSizeKey, strictPrinter = false) {
+    const baseOptions = {
+      silent: true,
+      printBackground: true,
+      margins: { marginType: 'none' },
+      deviceName
+    };
+
+    /* The paper this printer is actually loaded with, rather than 80mm for
+       everyone. A kitchen on a 58mm roll was being handed an 80mm page and
+       relying on the driver to shrink it. */
+    let result = await this._sendPrintJob(printWindow, {
+      ...baseOptions,
+      pageSize: pageSizeFor(pageSizeKey)
+    });
+
+    if (!result.success) {
+      console.warn(`[KOT] Receipt page size rejected (${deviceName}), retrying with printer defaults:`, result.reason || 'unknown');
+      result = await this._sendPrintJob(printWindow, baseOptions);
+    }
+
+    if (!result.success) {
+      console.warn(`[KOT] Electron print failed (${deviceName}), retrying through PDF fallback:`, result.reason || 'unknown');
+      result = await this._printViaPdfFallback(printWindow, deviceName);
+    }
+
+    if (!result.success && deviceName && !strictPrinter) {
+      console.warn(`[KOT] Named printer "${deviceName}" failed, falling back to Windows default printer`);
+      result = await this._printWithSystemDefaultFallback(printWindow);
+    }
+
+    return result;
+  }
+
+  async printCounterTicket(sale) {
+    const config = this.config || await this.loadConfig();
+    const printers = config?.printerNames || [];
+    if (!printers.length) return { available: false };
+    if (!sale || !Array.isArray(sale.print_jobs) || !sale.print_jobs.length || sale.print_jobs.length > 100) {
+      return { available: true, success: false, error: 'Invalid kitchen ticket' };
+    }
+    for (const job of sale.print_jobs) {
+      if (!['new', 'modified', 'cancel', 'copy'].includes(job.type) || !Array.isArray(job.items)) {
+        return { available: true, success: false, error: 'Invalid kitchen ticket' };
+      }
+      const key = job.type === 'copy' ? null : job.key;
+      if (job.type !== 'copy' && (typeof key !== 'string' || key.length > 200)) {
+        return { available: true, success: false, error: 'Missing kitchen ticket identity' };
+      }
+      if (key && !this._claimForPrint(key, { saleId: sale._id, kind: job.type })) {
+        if (printLedger.state(key) === 'printed') continue;
+        return { available: true, success: false, error: 'A previous print attempt needs checking. Confirm only if the ticket came out.' };
+      }
+      const counterResults = await this.silentPrint({ ...sale, items: job.items,
+        _printKind: job.type === 'modified' ? 'edit' : job.type }, printers, false, true);
+      if (key) printLedger.settle(key, _anyPrinted(counterResults), _firstReason(counterResults));
+      if (!counterResults?.length || counterResults.some((r) => r.status !== 'success')) {
+        return { available: true, success: false, error: _firstReason(counterResults) || 'The kitchen printer did not confirm printing.' };
+      }
+    }
+    return { available: true, success: true };
+  }
+
+  async reprint(logEntry) {
+    const printerNames = this.config?.printerNames || [];
+    if (!printerNames.length) throw new Error('No printers configured. Start KOT polling first.');
+    const sale = {
+      ...(logEntry._saleData || {}),
+      _printKind: logEntry.printKind,
+      _isReprint: true,
+      _kotNumber: logEntry.kotNumber,
+      items:      logEntry.items || []
+    };
+    return await this.silentPrint(sale, printerNames, true);
+  }
+
+  // ─── Config ──────────────────────────────────────────────────────────────
+
+  async loadConfig() {
+    let saved = null;
+    try {
+      if (fs.existsSync(this.configPath)) {
+        saved = JSON.parse(fs.readFileSync(this.configPath, 'utf8'));
+      }
+    } catch (e) { /* ignore */ }
+
+    const cfg = saved || { branchId: '', printerNames: [] };
+
+    /*
+     * Always take the API address from this process, never from the file.
+     *
+     * The port used to be fixed at 5555 and is now derived per installation,
+     * so every saved config written before that change points at a port
+     * nothing listens on - and a kitchen printer that quietly stops printing
+     * is not something anyone notices until service.
+     *
+     * The address is not a user setting; it is where our own API happens to be
+     * today. Recomputing it means an upgrade, a rename or a second brand on
+     * the same machine cannot leave a stale one behind.
+     */
+    cfg.apiUrl = kotApiUrl();
+    return cfg;
+  }
+
+  async saveConfig(config) {
+    try {
+      fs.writeFileSync(this.configPath, JSON.stringify(config, null, 2), 'utf8');
+    } catch (e) {
+      console.error('[KOT] Failed to save config:', e.message);
+      throw e;
+    }
+  }
+
+  // ─── Daily counter state ──────────────────────────────────────────────────
+
+  _loadState() {
+    try {
+      if (fs.existsSync(this.statePath)) {
+        const s = JSON.parse(fs.readFileSync(this.statePath, 'utf8'));
+        this.kotCounterDate  = s.kotCounterDate  || null;
+        this.kotCounter      = s.kotCounter      || 0;
+        this.kotSlotMapping  = s.kotSlotMapping  || {};
+      }
+    } catch (e) { /* ignore */ }
+    this._maybeDailyReset();
+  }
+
+  _saveState() {
+    try {
+      fs.writeFileSync(this.statePath, JSON.stringify({
+        kotCounterDate: this.kotCounterDate,
+        kotCounter:     this.kotCounter,
+        kotSlotMapping: this.kotSlotMapping
+      }, null, 2), 'utf8');
+    } catch (e) { /* ignore */ }
+  }
+
+  /*
+   * May this ticket print, and has it been written down first?
+   *
+   * The write happens BEFORE the paper, which is the whole point: a till that
+   * dies halfway must not reprint on the way back up. The cost of that choice
+   * is that a ticket lost to a crash stays lost until somebody notices, which
+   * is the trade the owner asked for - a duplicate is silent and costs food, a
+   * miss is loud and costs a reminder.
+   *
+   * Returns false when this exact ticket has been attempted before, on this run
+   * or any earlier one. False means DO NOT PRINT.
+   */
+  _claimForPrint(key, about) {
+    /*
+     * A FAILURE WE WATCHED IS NOT THE SAME AS A CRASH.
+     *
+     * Owner: "sometime cancel not getting printed."
+     *
+     * This is how. The record above is written before the paper, so a
+     * till that dies does not reprint - right, and unchanged. But the
+     * same record also closed the door on a ticket whose printer simply
+     * ANSWERED NO: switched off, out of paper, or ten seconds late
+     * waking up. That is a different thing. Nothing came out, we know
+     * nothing came out, and there is no paper to duplicate - and yet the
+     * ticket was never offered again by anything, anywhere. One sleepy
+     * printer and a cancellation is gone for good, silently, which on a
+     * cancellation means a kitchen carries on cooking.
+     *
+     * The comment in the constructor has claimed for months that the
+     * poll underneath "recovers a ticket that failed to print". It could
+     * not: this line refused it and markKitchenPrinted had already told
+     * the server the sale was done. A belief written down, tested by
+     * nobody, doing nothing.
+     *
+     * retry() is false for a ticket the ledger has never seen, so a
+     * first print falls straight through to the claim below.
+     */
+    if (printLedger.retry(key)) {
+      this.printedJobs.add(key);
+      console.warn(`[KOT] did not print last time, trying again: ${about.saleId || key}`);
+      return true;
+    }
+    if (this.printedJobs.has(key)) return false;
+    /* The durable half. A false here is a duplicate that would have printed
+       before this existed, so it is worth saying out loud rather than passing
+       over in silence. */
+    if (!printLedger.claim(key, about)) {
+      this.printedJobs.add(key);
+      console.warn(`[KOT] already printed on an earlier run, not printing again: ${about.saleId || key}`);
+      return false;
+    }
+    this.printedJobs.add(key);
+    return true;
+  }
+
+  _maybeDailyReset() {
+    const today = new Date().toISOString().slice(0, 10);
+    if (this.kotCounterDate !== today) {
+      this.kotCounter     = 0;
+      this.kotSlotMapping = {};
+      this.kotCounterDate = today;
+      this._saveState();
+    }
+  }
+
+  getDailyKotNumber(printKind, saleId) {
+    this._maybeDailyReset();
+    const isEdit = printKind === 'edit' || printKind === 'cancel';
+    if (isEdit && saleId && this.kotSlotMapping[saleId]) {
+      return this.kotSlotMapping[saleId];
+    }
+    if (saleId && this.kotSlotMapping[saleId]) {
+      return this.kotSlotMapping[saleId];
+    }
+    this.kotCounter += 1;
+    if (saleId) this.kotSlotMapping[saleId] = this.kotCounter;
+    this._saveState();
+    return this.kotCounter;
+  }
+
+  // ─── Event driven ─────────────────────────────────────────────────────────
+
+  /**
+   * A sale just asked for a kitchen ticket.
+   *
+   * Debounced rather than printed inline: a table of six sending six courses
+   * produces six events in a moment, and each poll already fetches every
+   * pending ticket. One pass shortly after the last event prints them all,
+   * where six immediate passes would race each other for the same printer.
+   *
+   * A branch arriving on the event is used when nothing is configured, which is
+   * what lets the Branch ID field stop being something a shopkeeper types.
+   */
+  _onKotEvent(payload = {}) {
+    if (!this.isPolling || !this.config) return;
+
+    if (!this.config.branchId && payload.branchId) {
+      this.config.branchId = String(payload.branchId);
+      console.log('[KOT] branch taken from the sale:', this.config.branchId);
+    }
+
+    if (this._kotNudgeTimer) return;
+    this._kotNudgeTimer = setTimeout(() => {
+      this._kotNudgeTimer = null;
+      if (!this.isPolling) return;
+      console.log('[KOT] sale event -> printing now (' + (payload.reason || 'created') + ')');
+      /* Cancel the scheduled poll so this pass replaces it rather than running
+         alongside it and fetching the same tickets twice. */
+      if (this.pollingTimer) { clearTimeout(this.pollingTimer); this.pollingTimer = null; }
+      this._poll();
+    }, 250);
+  }
+
+  // ─── Polling lifecycle ────────────────────────────────────────────────────
+
+  async startPolling(config) {
+    const next = { ...config, enabled: true };
+    await this.saveConfig(next);
+    this.stopPolling();
+    this.config    = next;
+    this.isPolling = true;
+    console.log('[KOT] Polling started — branch:', config.branchId, '| printers:', config.printerNames);
+    this._poll();
+  }
+
+  async pausePolling() {
+    const config = { ...(this.config || await this.loadConfig()), enabled: false };
+    await this.saveConfig(config);
+    this.config = config;
+    this.stopPolling();
+  }
+
+  stopPolling() {
+    if (this.pollingTimer) {
+      clearTimeout(this.pollingTimer);
+      this.pollingTimer = null;
+    }
+    if (this._kotNudgeTimer) {
+      clearTimeout(this._kotNudgeTimer);
+      this._kotNudgeTimer = null;
+    }
+    /* A note left by a nudge must not outlive the polling it was for. */
+    this._pollAgain = false;
+    this.isPolling = false;
+    console.log('[KOT] Polling stopped');
+  }
+
+  getStatus() {
+    return {
+      isPolling:      this.isPolling,
+      branchId:       this.config?.branchId    || '',
+      printerNames:   this.config?.printerNames || [],
+      lastPollTime:   this.lastPollTime,
+      lastPollStatus: this.lastPollStatus
+    };
+  }
+
+  // ─── Poll loop ────────────────────────────────────────────────────────────
+
+  /*
+   * ONE PASS AT A TIME, AND THE NEXT ONE ON TIME.
+   *
+   * Owner: "or printing after few minutes."
+   *
+   * Two faults, both about the clock.
+   *
+   * The next poll was scheduled at the END of this one, so the gap was
+   * thirty seconds PLUS however long the printing took. A printer that
+   * is off answers in twenty seconds (raw-print-service JOB_TIMEOUT_MS)
+   * and the helper is then killed and restarted, which costs up to eight
+   * more on the next ticket. Three tickets against a sleeping printer is
+   * a minute and a half before the poll after it even begins, and every
+   * ticket raised in the meantime waits behind it. That is the few
+   * minutes, and it compounds exactly when things are already going
+   * wrong.
+   *
+   * And the nudge could start a second pass on top of a running one:
+   * _onKotEvent clears the scheduled timer, but a pass that is mid-print
+   * has no timer to clear, so the guard guarded nothing. Both passes then
+   * asked the server for the same tickets - the server lets a till past
+   * its OWN claim on purpose - and raced through the same printer queue.
+   * Nothing printed twice, because the ledger holds that line, but the
+   * work was doubled at the worst possible moment.
+   *
+   * So a pass in flight takes a note instead, and the note is honoured
+   * the moment the pass ends.
+   */
+  async _poll() {
+    if (!this.isPolling || !this.config) return;
+    if (this._passRunning) { this._pollAgain = true; return; }
+    this._passRunning = true;
+    const passStartedAt = Date.now();
+    try {
+      await this._pollOnce();
+    } finally {
+      this._passRunning = false;
+      this._scheduleNextPoll(passStartedAt);
+    }
+  }
+
+  /*
+   * Measured from when this pass STARTED, not from when it finished, so
+   * a slow pass eats into the gap rather than being added to it. A floor
+   * of a second, because a pass that took longer than the interval must
+   * not turn into a tight loop against a printer that is already
+   * struggling.
+   */
+  _scheduleNextPoll(startedAt) {
+    if (this.pollingTimer) { clearTimeout(this.pollingTimer); this.pollingTimer = null; }
+    if (!this.isPolling) return;
+    if (this._pollAgain) {
+      this._pollAgain = false;
+      this.pollingTimer = setTimeout(() => this._poll(), 250);
+      return;
+    }
+    const elapsed = Date.now() - (startedAt || Date.now());
+    this.pollingTimer = setTimeout(
+      () => this._poll(),
+      Math.max(1000, KOT_FALLBACK_POLL_MS - elapsed)
+    );
+  }
+
+  async _pollOnce() {
+
+    // Resolved per poll rather than captured when polling started, so a
+    // restart that lands on a different port keeps working.
+    const { branchId, printerNames } = this.config;
+    const apiUrl = kotApiUrl();
+
+    try {
+      console.log('[KOT] Polling server...');
+
+      // The same per-installation key the API expects, set by main.js at
+      // startup. Read here rather than at module load, for the same reason the
+      // port is.
+      const KIOSK_KEY = process.env.KIOSK_API_KEY || '';
+      const res  = await fetch(`${apiUrl}/sales/multiKitchenPrint`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'kioskkey': KIOSK_KEY },
+        /* WHO IS ASKING. Two tills in one shop were handed the same tickets
+           and both printed them; the server now gives each ticket to one of
+           them. The machine's own name, which is what the bill queue already
+           uses for the same purpose. */
+        body:    JSON.stringify({ branchId, tillId: this.tillId })
+      });
+
+      const data  = await res.json();
+      this.lastPollTime   = new Date().toLocaleTimeString();
+      this.lastPollStatus = 'ok';
+
+      console.log(`[KOT] API status=${data?.status} message="${data?.message}" sales=${Array.isArray(data?.data) ? data.data.length : 'null'}`);
+
+      const sales = Array.isArray(data?.data) ? data.data : [];
+      if (sales.length === 0) return;
+
+      console.log(`[KOT] ${sales.length} pending order(s) to print`);
+
+      const printedSaleIds = [];
+      const printedIndexes = {};
+      /* The names of the tickets this pass actually put on paper. */
+      const printedKeys = [];
+
+      for (const sale of sales) {
+        // MongoDB driver returns ObjectId instance — use .toString(), not .$oid
+        const saleId = sale?._id?.toString ? sale._id.toString() : String(sale?._id || '');
+        if (!saleId) continue;
+
+        const printJobs = Array.isArray(sale?.print_jobs) ? sale.print_jobs : null;
+
+        if (printJobs && printJobs.length > 0) {
+          /* Set when a ticket on this sale failed with a try left. */
+          let stillOwed = false;
+          for (const job of printJobs) {
+            /*
+             * The key is now one shared definition, not an expression only
+             * this file knows. The server needs the same name for the same
+             * ticket or it can never answer "did the ticket I expected to
+             * print actually print" - see src/kot-job-key.js.
+             *
+             * Byte-identical to what stood here: 144 combinations of timestamp
+             * shape, type and contents were compared before the swap, because
+             * a changed key renames every ticket in flight on ninety shops.
+             */
+            const jobType  = (job.type || '').toLowerCase();
+            const jobItems = Array.isArray(job.items) ? job.items : [];
+            const jobKey   = kotJobKey(saleId, job);
+
+            /* Written down first, then printed. See _claimForPrint. */
+            if (!this._claimForPrint(jobKey, { saleId, kind: jobType })) continue;
+
+            /*
+             * AND THE KITCHEN IS TOLD, out loud.
+             *
+             * Here rather than after printing, on purpose. A printer that has
+             * jammed or run out of paper is exactly when a kitchen most needs
+             * to hear that a table has ordered - the silent failure this is for
+             * is a ticket nobody knows about.
+             *
+             * Behind the same claim that stops a ticket printing twice, so a
+             * poll that sees the same job again does not say it again.
+             */
+            this._announceToKitchen(sale, jobItems, jobType);
+
+            const jobResults = await this.silentPrint(
+              { ...sale, _printKind: jobType === 'modified' ? 'edit' : jobType, items: jobItems },
+              printerNames
+            );
+            /* Recorded for measurement only. Nothing reads this to decide
+               whether to print - a failed ticket is not retried here, and
+               changing that is a bigger decision than this change. */
+            const cameOut = _anyPrinted(jobResults);
+            printLedger.settle(jobKey, cameOut, _firstReason(jobResults));
+            /* Named for the server's shadow queue. Only when paper actually
+               came out - reporting a failed ticket as printed would close a
+               row that SHOULD be showing up as a disagreement. */
+            if (cameOut) printedKeys.push(jobKey);
+            else if (!printLedger.spent(jobKey)) stillOwed = true;
+          }
+
+          /*
+           * AND THE SERVER IS ONLY TOLD WHEN IT IS TRUE.
+           *
+           * This advanced last_printed_change_index whatever happened -
+           * every ticket refused, the printer off at the wall, and the
+           * sale was still reported as printed and never offered again.
+           * Between that and the ledger refusing a second attempt, a
+           * failed cancellation had two locks on it and no key.
+           *
+           * `stillOwed` means a ticket on this sale failed and has a try
+           * left. Leaving the sale unreported is what brings it back on
+           * the next poll, which is the only way the retry above ever
+           * happens. Once the tries are spent the sale is reported as
+           * before, or the queue would offer it for ever.
+           */
+          if (!stillOwed) {
+            printedSaleIds.push(saleId);
+            if (sale.new_last_printed_change_index !== undefined) {
+              printedIndexes[saleId] = sale.new_last_printed_change_index;
+            }
+          }
+          continue;
+        }
+
+        // Fallback: sale_process-based
+        const proc     = (sale.sale_process || '').toUpperCase();
+        const isKOT    = proc.includes('KOT');
+        const isCancel = proc.includes('CANCEL');
+        if (!isKOT && !isCancel) continue;
+
+        /* The second naming scheme, for a sale with no print_jobs array. Also
+           shared now, and also proven byte-identical over 180 combinations -
+           see src/kot-job-key.js for why there are two rather than one. */
+        const key = kotFallbackKey(sale, { cancelled: isCancel });
+
+        if (!this._claimForPrint(key, { saleId, kind: isCancel ? 'cancel' : 'kot' })) continue;
+
+        if (!isCancel) {
+          /* Durable too, so a ticket after a restart is still an amendment
+             rather than announcing itself as a brand new order. */
+          const firstEver = printLedger.claim(`ever:${saleId}`, { saleId, kind: 'marker' });
+          sale._printKind = firstEver && !this.printedJobs.has(`ever:${saleId}`) ? 'new' : 'edit';
+          this.printedJobs.add(`ever:${saleId}`);
+        } else {
+          sale._printKind = 'cancel';
+        }
+
+        const results = await this.silentPrint(sale, printerNames);
+        const cameOut = _anyPrinted(results);
+        printLedger.settle(key, cameOut, _firstReason(results));
+        if (cameOut) printedKeys.push(key);
+        /* Same rule as the jobs path above: a ticket with a try left keeps
+           the sale in the queue, because that is what brings it back. */
+        if (cameOut || printLedger.spent(key)) printedSaleIds.push(saleId);
+      }
+
+      if (printedSaleIds.length > 0) {
+        /*
+         * THE ANSWER IS CHECKED, because this call is the only thing that stops
+         * a ticket being offered again.
+         *
+         * fetch does not throw on a 401 or a 500 - it resolves with ok:false -
+         * so this was `await fetch(...)` followed by a line claiming success
+         * whatever came back. If the call was failing, nothing advanced
+         * `last_printed_change_index` on the server, every poll re-offered the
+         * same jobs, and only the in-memory set was hiding it. Restart the till
+         * and the whole day printed again.
+         *
+         * Owner: "whenver i start polling, i see all prints are going. i dont
+         * know how 10 or 15 prints going".
+         *
+         * This is the third time in this area that a return value which was the
+         * only evidence of success was thrown away: the winspool calls, the
+         * result of silentPrint, and now this.
+         */
+        const marked = await fetch(`${apiUrl}/sales/markKitchenPrinted`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'kioskkey': KIOSK_KEY },
+          /* printedKeys names the exact tickets, so the server can tell a
+             second ticket for an amended order from a duplicate of the first.
+             Additive: a server that does not read it is unaffected. */
+          body:    JSON.stringify({ saleIds: printedSaleIds, printedIndexes, printedKeys })
+        });
+        if (marked && marked.ok) {
+          console.log(`[KOT] Marked ${printedSaleIds.length} order(s) as printed`);
+        } else {
+          /* Loud, because the consequence is silent: tickets that print again
+             on the next start, and nothing else anywhere says why. */
+          console.error(
+            `[KOT] COULD NOT mark ${printedSaleIds.length} order(s) as printed ` +
+            `(HTTP ${marked ? marked.status : '?'}). They will be offered again; ` +
+            `the print ledger is what stops them printing twice.`
+          );
+        }
+      }
+    } catch (err) {
+      console.error('[KOT] Poll error:', err.message);
+      this.lastPollStatus = 'error: ' + err.message;
+    }
+  }
+
+  // ─── Silent print ─────────────────────────────────────────────────────────
+
+  /**
+   * The ticket as bytes, for a roll.
+   *
+   * Returns null when it cannot be done - no printer injected, nothing to say
+   * - and the caller uses the window and PDF instead. Never throws: a layout
+   * problem must fall back, not lose the order.
+   */
+  _rawTicket(sale, printKind, kotNumber, columns) {
+    try {
+      const f = this._ticketFields(sale, printKind, kotNumber);
+      if (!f) return null;
+      return renderKitchenTicket(
+        {
+          title: f.duplicate ? 'DUPLICATE KOT' : f.title,
+          duplicate: f.duplicate,
+          originalTitle: f.duplicate && printKind !== 'copy' ? f.title : '',
+          number: kotNumber,
+          dateText: f.dateText,
+          tableNo: f.tableNo,
+          personCount: f.personCount,
+          dineType: f.dineType,
+          saleId: f.saleIdDisplay,
+          deliverTo: f.deliverTo,
+          note: f.orderNote,
+          items: f.items.map((it) => ({
+            name: it.item_name || it.name || it.product_name || it.itemName || '',
+            quantity: it.item_quantity ?? it.quantity ?? it.qty ?? 1,
+            /* The note a waiter typed. `description` is the catalogue
+               sentence and must never reach a cook - see escpos-kot.js. */
+            description: it.item_note || it.item_description || it.note || '',
+            /* Carried through so the thermal renderer can print it; see
+               spiceLine in escpos-kot.js. */
+            spice_level: it.spice_level != null ? it.spice_level : it.spice,
+          })),
+          /* The HTML ticket has struck out cancelled dishes for as long as it
+             has existed; the bytes could not, until strikeLine. Same field
+             feeds both, so the two paths cannot drift. */
+          cancelled: f.isCancelled,
+          /*
+           * Where the order came from, printed. Off only if the shop says so:
+           * a kitchen that has one way of taking orders does not need a line
+           * on every ticket saying which one it was.
+           */
+          source: this.config && this.config.kot_print_source === false
+            ? ''
+            : this._orderSource(sale),
+        },
+        {
+          paperWidth: String(columns),
+          /* Off only for a printer that will not overprint - one shop setting
+             rather than a release. See Receipt.strikeLine. */
+          strikeCancelled: !(this.config && this.config.strikeCancelled === false),
+        }
+      );
+    } catch (error) {
+      console.error('[KOT] could not build the ticket as bytes:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * The ticket straight to the roll, or null to mean "use the window".
+   *
+   * Null is returned only when the ticket could not be BUILT. A printer that
+   * refuses is a failure and is reported as one: falling through to the window
+   * there would put the same order on paper twice.
+   */
+  async _printRaw(sale, printKind, kotNumber, printerNames) {
+    const targets = normalizeTargets(
+      { printers: this.config?.printers, printerNames, pageSize: this.config?.pageSize },
+      '80mm'
+    );
+    if (!targets.length) return null;
+
+    const results = [];
+    for (const target of targets) {
+      const columns = columnsFor(target.pageSize);
+      const bytes = this._rawTicket(sale, printKind, kotNumber, columns);
+      if (!bytes) return null;          // a layout we cannot draw: use the window
+
+      for (let copy = 0; copy < target.copies; copy += 1) {
+        const label = `Posnic KOT #${kotNumber}`
+          + (target.copies > 1 ? ` (${copy + 1}/${target.copies})` : '');
+        /* eslint-disable-next-line no-await-in-loop -- printers are serial
+           devices; two jobs at once interleave on the same roll. */
+        const startedAt = Date.now();
+        const sent = await this.hardware.sendRawToPrinter(target.name, bytes, label);
+        const ms = Date.now() - startedAt;
+        if (sent && sent.success) {
+          console.log(`[KOT] Printed -> ${target.name} (${ms} ms)`);
+          results.push({ name: target.name, status: 'success', ms, via: 'bytes' });
+        } else {
+          const reason = (sent && sent.error) || 'unknown';
+          console.error(`[KOT] Print failed (${target.name}) after ${ms} ms:`, reason);
+          results.push({ name: target.name, status: 'failed', reason, ms, via: 'bytes' });
+        }
+      }
+    }
+    return results;
+  }
+
+  /**
+   * One line in the day's ticket log, whichever way the ticket was printed.
+   *
+   * @param {object} [timing]       how long it took and which path it took
+   * @param {number} [timing.ms]    order accepted to last copy accepted
+   * @param {string} [timing.via]   'bytes' for ESC/POS, 'window' for the PDF
+   *                                fallback, which is about ten times slower
+   */
+  _logTicket(sale, printKind, kotNumber, saleDispId, saleDbId, printerResults, timing = {}) {
+    const uid = crypto.randomUUID ? crypto.randomUUID()
+              : crypto.createHash('md5').update(`${Date.now()}-${Math.random()}`).digest('hex');
+    this._appendLog({
+      id:           uid,
+      time:         new Date().toISOString(),
+      saleDisplayId: String(saleDispId),
+      saleDbId,
+      table:        String(sale.table_number || sale.tableNo || sale.table || sale.table_no || ''),
+      pax:          sale.person_count ?? sale.pax ?? sale.no_of_person ?? '',
+      dineType:     sale.dine_type || sale.order_type || '',
+      printKind,
+      kotNumber,
+      deviceIp:     this._getLocalIp(),
+      /* Where the order came from, and who sent it. Absent on tickets logged
+         before this shipped, so the screen has to cope with undefined rather
+         than print "undefined" at somebody. */
+      source:       this._orderSource(sale),
+      /* Absent on tickets logged before this shipped, so every reader has to
+         cope with undefined rather than print "NaN ms" at somebody. */
+      ms:           Number.isFinite(timing.ms) ? timing.ms : undefined,
+      via:          timing.via || undefined,
+      items:        Array.isArray(sale.items) ? sale.items : [],
+      printers:     printerResults,
+      _saleData: {
+        sales_id:     saleDispId,
+        table_number: sale.table_number || '',
+        person_count: sale.person_count || '',
+        dine_type:    sale.dine_type || sale.order_type || '',
+        sale_process: sale.sale_process || '',
+        updated_date: sale.updated_date || null,
+        created_date: sale.created_date || null,
+      }
+    });
+  }
+
+  /*
+   * Say a ticket out loud, where a machine has been told to.
+   *
+   * PER MACHINE, NOT PER SHOP: only the one in the kitchen has the speaker,
+   * and a counter till that started talking is a till somebody mutes - which
+   * mutes the kitchen's own speaker with it.
+   *
+   * Never throws. A kitchen that missed one announcement is a worse evening; a
+   * till that fell over printing is a worse week.
+   */
+  _announceToKitchen(sale, items, jobType) {
+    try {
+      const wants = kitchenAnnounce.settings();
+      if (!wants.ting && !wants.speak) return;
+
+      const kind = String(jobType || '').toLowerCase();
+
+      /*
+       * WHOLE ORDER, OR SOME OF IT.
+       *
+       * The cancel ticket carries the lines coming off. If that is every line
+       * the sale has, the table is being cleared and the kitchen should hear
+       * "order cancelled"; otherwise two dishes are coming off a ticket the
+       * pass is already working on, which is a different instruction.
+       *
+       * Counted off the sale rather than a flag, because no flag says this:
+       * the server builds a cancel job out of whichever items were struck.
+       */
+      const onTheSale = Array.isArray(sale.items) ? sale.items.length : 0;
+      const whole = kind === 'cancel' && onTheSale > 0 && items.length >= onTheSale;
+
+      orderAlert.announceKitchenTicket(
+        () => orderAlert.speakingWindow(BrowserWindow),
+        {
+          table: String(sale.table_number || sale.tableNo || sale.table || sale.table_no || ''),
+          items,
+          changed: kind === 'modified',
+          cancelled: kind === 'cancel',
+          whole,
+        },
+        wants
+      );
+    } catch (e) {
+      /* Quiet. This is an announcement, not the ticket. */
+    }
+  }
+
+  async silentPrint(sale, printerNames, skipLog = false, strictPrinter = false) {
+    /*
+     * HOW LONG IT ACTUALLY TOOK, ON THE SHOP'S OWN COUNTER.
+     *
+     * The order-to-paper numbers behind this work - 2,080 ms before, 184 ms
+     * after - were measured on one developer machine with two virtual
+     * printers. That is enough to choose a design and not enough to know what
+     * a real kitchen sees, on a real roll, at the end of a long USB extension
+     * run down a corridor.
+     *
+     * Owner: "every seconds counts here." There was no way to answer him with
+     * anything but a number from somebody else's laptop.
+     *
+     * So every ticket records what it cost: per printer, and end to end. The
+     * log already exists and already has a screen; it simply never said this.
+     * Now a slow shop is a fact somebody can read off Hardware Manager rather
+     * than an impression.
+     *
+     * `via` matters as much as the milliseconds. A ticket that quietly fell
+     * back to the window and PDF path is roughly ten times slower, and until
+     * now it looked identical in the log to a fast one.
+     */
+    const ticketStartedAt = Date.now();
+    const printKind  = (sale._printKind || '').toLowerCase();
+    const saleDispId = sale.sales_id || sale.sid || sale.sale_id || '';
+    const saleDbId   = sale._id?.toString ? sale._id.toString() : String(sale._id || '');
+    const kotNumber  = sale._isReprint && Number.isInteger(sale._kotNumber) && sale._kotNumber > 0
+      ? sale._kotNumber
+      : this.getDailyKotNumber(printKind, saleDispId || saleDbId);
+
+    /*
+     * BYTES FIRST, if there is a printer to send them to.
+     *
+     * The window and PDF below cost 1,114 ms of a 2,080 ms order-to-paper
+     * time, measured on a real till. The same ticket as ESC/POS is the path a
+     * receipt already takes, and a receipt reaches paper in 124 ms.
+     *
+     * Anything that stops this - no printer injected, a layout that will not
+     * render, a roll size we do not know - simply falls through to the window,
+     * which is also what a non-thermal printer needs. A printer that REFUSES
+     * is not a reason to fall through: that would print the ticket twice.
+     */
+    /*
+     * A CANCELLATION GOES THE SLOW WAY, ON PURPOSE.
+     *
+     * Owner: "whenever order cancel or item cancel those line item name should
+     * be strick in the middle. it symbolic that we cancelled it", and then,
+     * having seen a rule printed underneath instead: "no no. this is not what
+     * we want. can send as image ?" and "how about make pdf and send ?"
+     *
+     * Right on both counts, and the PDF is already here. ESC/POS cannot draw a
+     * line THROUGH text - there is no command for it, and no way back over a
+     * line the printer has already committed - so the fast path can only ever
+     * put the rule somewhere near the name. The window below renders HTML,
+     * where `.in.cx { text-decoration: line-through }` has drawn it correctly
+     * all along.
+     *
+     * It costs about a second more per ticket. That is the right trade HERE
+     * and nowhere else: a cancellation is rare, it is the ticket a cook must
+     * not misread, and every ordinary ticket still takes the 124ms path.
+     */
+    /*
+     * A CANCELLATION TAKES THE FAST PATH TOO, NOW THAT THE BYTES CAN DRAW IT.
+     *
+     * This used to read `!isCancellation && ...`, and the comment above
+     * explained why: ESC/POS cannot draw a line THROUGH text, so a cancelled
+     * dish had to go through the hidden window that renders HTML, where
+     * `text-decoration: line-through` has always worked.
+     *
+     * That was true when it was written, at 01:24. By 12:46 the same day the
+     * byte builder was taking a `strikeCancelled` option, and by 13:16
+     * escpos-raster-text was drawing the stroke as dots. The capability landed
+     * eleven hours after the exclusion and nobody came back to flip the
+     * switch, so every cancellation since has paid for a BrowserWindow it no
+     * longer needed.
+     *
+     * Owner, on the paper: "new order print is so so fast. very immediate but
+     * cancel order took some time."
+     *
+     * Measured: the window path costs about a second; the bytes cost 124ms
+     * plus the stroke, which is 5,272 bytes against 208 for a plain ticket and
+     * under half a second even on a slow serial link.
+     */
+    if (this.hardware && typeof this.hardware.sendRawToPrinter === 'function') {
+      const rawResults = await this._printRaw(sale, printKind, kotNumber, printerNames);
+      if (rawResults) {
+        if (!skipLog) {
+          this._logTicket(sale, printKind, kotNumber, saleDispId, saleDbId, rawResults,
+            { ms: Date.now() - ticketStartedAt, via: 'bytes' });
+        }
+        return rawResults;
+      }
+    }
+
+    /*
+     * webSecurity stays ON here, unlike the receipt printer in
+     * hardware-manager.js.
+     *
+     * The difference is what the document loads. This one is built by
+     * _buildKOTHtml below and is entirely self-contained: inline CSS, a system
+     * font, no images, no stylesheet link, nothing fetched. So the page never
+     * needs to reach past its own opaque data: origin, and disabling web
+     * security would buy nothing while removing a boundary.
+     *
+     * The receipt path is genuinely different - see the comment there before
+     * assuming the two should match. If a logo or an external stylesheet is
+     * ever added to a KOT ticket it will silently stop loading here, which is
+     * what tests/print-window-hardening.test.js exists to catch.
+     */
+    const printWindow = new BrowserWindow({
+      show: false, width: 302, height: 600,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, webSecurity: true }
+    });
+
+    hardenPrintWindow(printWindow);
+
+    const printerResults = [];
+
+    try {
+      const html = this._buildKOTHtml(sale, printKind, kotNumber);
+      await printWindow.loadURL(`data:text/html;charset=UTF-8,${encodeURIComponent(html)}`);
+      await this._waitForPrintPage(printWindow.webContents);
+
+      /*
+       * Each printer carries its own paper and its own copy count now, so a
+       * kitchen roll and a pass copy are one configuration rather than two
+       * incompatible ones.
+       *
+       * The name POS-80C used to be rewritten to '' here, which quietly sent
+       * the job to the SYSTEM DEFAULT instead of the printer the shop chose.
+       * It is the factory name on a great many generic 80mm printers, so any
+       * shop that never renamed theirs was printing somewhere else and had no
+       * way to tell. If a device name is genuinely unreachable the print fails
+       * and says so, which is recoverable; silently printing elsewhere is not.
+       */
+      const targets = normalizeTargets(
+        Array.isArray(printerNames) && printerNames.length
+          ? { printers: printerNames }
+          : this.config || {},
+        '80mm'
+      );
+
+      /* Flattened so one entry is one sheet: two copies is two passes through
+         the same printer, which is what the driver expects for a roll. */
+      const jobs = [];
+      for (const t of targets) {
+        for (let c = 0; c < t.copies; c += 1) {
+          jobs.push({ name: t.name, pageSize: t.pageSize, copy: c + 1, of: t.copies });
+        }
+      }
+
+      await new Promise((resolve) => {
+        let idx = 0;
+        const next = async () => {
+          const job = jobs[idx];
+          const deviceName = job.name;
+          const startedAt = Date.now();
+          const result = await this._printToDeviceWithFallback(printWindow, deviceName, job.pageSize, strictPrinter);
+          const ms = Date.now() - startedAt;
+          if (!result.success) {
+            console.error(`[KOT] Print failed (${deviceName}) after ${ms} ms:`, result.reason);
+            printerResults.push({ name: deviceName, status: 'failed', reason: result.reason || 'unknown', ms, via: 'window' });
+          } else {
+            console.log(`[KOT] Printed -> ${deviceName} (${ms} ms, window)`);
+            printerResults.push({ name: deviceName, status: 'success', ms, via: 'window' });
+          }
+          idx++;
+          if (idx < jobs.length) next(); else resolve();
+        };
+        next();
+      });
+    } finally {
+      printWindow.close();
+    }
+
+    if (!skipLog) {
+      /* 'window' is the loud part of this line. A shop whose tickets are all
+         coming out this way has lost the fast path, and the only visible sign
+         used to be that printing felt slow. */
+      this._logTicket(sale, printKind, kotNumber, saleDispId, saleDbId, printerResults,
+        { ms: Date.now() - ticketStartedAt, via: 'window' });
+    }
+
+    return printerResults;
+  }
+
+  // ─── HTML builder ─────────────────────────────────────────────────────────
+
+  _esc(s) {
+    if (typeof s !== 'string') return String(s ?? '');
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+            .replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+  }
+
+  _fmtDate(raw) {
+    if (!raw) return '';
+    let d;
+    if (raw instanceof Date) {
+      d = raw;
+    } else if (typeof raw === 'object') {
+      if (raw.$date)       return this._fmtDate(raw.$date);
+      if (raw.$numberLong) return this._fmtDate(Number(raw.$numberLong));
+      return String(raw);
+    } else if (/^\d+$/.test(String(raw))) {
+      d = new Date(Number(raw));
+    } else {
+      d = new Date(raw);
+    }
+    if (isNaN(d)) return String(raw);
+    const p = n => String(n).padStart(2,'0');
+    let h = d.getHours(); const ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
+    return `${p(d.getDate())}-${p(d.getMonth()+1)}-${d.getFullYear()} ${h}:${p(d.getMinutes())}:${p(d.getSeconds())} ${ap}`;
+  }
+
+  /**
+   * Everything a ticket says, worked out once.
+   *
+   * Both the bytes and the HTML are built from this. They used to be one
+   * function, and the moment a second way of printing existed that would
+   * have meant two copies of the rules about what a cancellation is called
+   * and which field holds the table - the kind of pair that drifts quietly
+   * until one printer says something the other does not.
+   */
+  _ticketFields(sale, printKind, kotNumber) {
+    const isCancelled = printKind === 'cancel';
+
+    /*
+     * WHAT THE KITCHEN READS FIRST.
+     *
+     * Owner, on how a cook actually treats these: "we actually sent as item
+     * cancelled even quantity reduced. for labours they dont care mostly.
+     * only cancelled they just cancel while doing it. so keep as it is on
+     * this. when whole order cancelled then send as Order cancelled instead
+     * of item cancelled. one item or two item removal items cancelled okay.
+     * plural. quantity reduced is bad for them."
+     *
+     * So a reduction keeps printing as a cancellation, deliberately: a cook
+     * who reads "cancelled" against a line stops making that many, which is
+     * the behaviour the kitchen already has. What changes is the difference
+     * between losing the whole table's order and losing a line off it, which
+     * every ticket used to call the same thing.
+     *
+     * A whole-order cancel is the only path that stamps sale_process
+     * 'cancelled' on the sale (sale.repository.js, updateOrderModel); a line
+     * removed or reduced leaves the order open and still says KOT. So the
+     * sale itself answers which of the two this is, and the count of lines on
+     * THIS ticket decides the plural.
+     *
+     * "Modified Order" is gone. Owner: "azure asking like new order instead
+     * of modified order." A second ticket for the same table is an additional
+     * order to the kitchen, not an edit of a sheet they have already cooked
+     * from and thrown away.
+     */
+    const cancelledWholeOrder = /cancel/i.test(String(sale.sale_process || ''));
+    const cancelledLines = Array.isArray(sale.items) ? sale.items.length : 0;
+    const title = isCancelled
+      ? (cancelledWholeOrder
+          ? 'Order Cancelled'
+          : (cancelledLines > 1 ? 'Items Cancelled' : 'Item Cancelled'))
+      : (printKind === 'copy' ? 'DUPLICATE KOT' : printKind === 'edit' ? 'Additional Order' : 'New Order');
+    const duplicate = printKind === 'copy' || sale._isReprint === true;
+
+    const dateText    = this._fmtDate(sale.updated_date || sale.updated_at || sale.created_date || sale.created_at || '');
+    const tableNo     = sale.table_number || sale.tableNo || sale.table || sale.table_no || '';
+    const personCount = sale.person_count ?? sale.pax ?? sale.no_of_person ?? '';
+    const dineType    = sale.dine_type || sale.order_type || '';
+    /* Whatever is left to say about where this goes, once the table has had
+       its own line. A takeaway has no table and says so rather than printing
+       an empty box; a table with no pax count prints nothing extra rather
+       than an empty line. */
+    const placeParts = [];
+    if (!tableNo) placeParts.push('Table: -');
+    if (personCount !== '' && personCount !== null && personCount !== undefined) {
+      placeParts.push(`Pax: ${personCount}`);
+    }
+    const placeLine = placeParts.join('   ');
+    /* What the customer said about the whole order, and - for a delivery -
+       where it is going. Both were on the sale and neither was printed. */
+    const orderNote   = String(sale.notes || sale.note || '').trim();
+    const deliverTo   = String(sale.fulfilment || '') === 'delivery'
+      ? [sale.customer_name, sale.customer_address, sale.customer_phone].filter(Boolean).map(String).join(' / ')
+      : '';
+
+    const rawId = sale.sales_id || sale.sid || sale.sale_id || '';
+    const saleIdDisplay = rawId ? (String(rawId).toUpperCase().startsWith('SID') ? rawId : 'SID' + rawId) : '';
+
+    let items = [];
+    if (Array.isArray(sale.items) && sale.items.length > 0) {
+      items = sale.items;
+    } else if (printKind === 'edit' && Array.isArray(sale.changes) && sale.changes.length) {
+      const last = sale.changes[sale.changes.length - 1];
+      items = Array.isArray(last?.items) ? last.items : [];
+    }
+
+    return {
+      title,
+      duplicate,
+      dateText,
+      tableNo,
+      personCount,
+      dineType,
+      placeLine,
+      orderNote,
+      deliverTo,
+      saleIdDisplay,
+      items,
+      isCancelled,
+    };
+  }
+
+  _buildKOTHtml(sale, printKind, kotNumber) {
+    const {
+      title, duplicate, dateText, tableNo, personCount, dineType, placeLine,
+      orderNote, deliverTo, saleIdDisplay, items, isCancelled,
+    } = this._ticketFields(sale, printKind, kotNumber);
+
+    const itemsHtml = items.map(it => {
+      const name = it.item_name || it.name || it.product_name || it.itemName || '';
+      const qty  = it.item_quantity || it.quantity || it.qty || it.item_qty || 1;
+      /* The note only; the catalogue sentence is not an instruction. */
+      const desc = it.item_note || it.item_description || it.desc || '';
+      /* The same line the thermal path prints, from the same function, so the
+         two ways of printing one ticket cannot say different things. */
+      const hot = spiceLine(it.spice_level != null ? it.spice_level : it.spice);
+      return `<div class="ir">
+        <div class="im">
+          <div class="in ${isCancelled ? 'cx' : ''}">${this._esc(String(name))}</div>
+          <div class="iq">x${qty}</div>
+        </div>
+        ${hot ? `<div class="is">${this._esc(hot)}</div>` : ''}
+        ${desc ? `<div class="id">** ${this._esc(String(desc))} **</div>` : ''}
+      </div>`;
+    }).join('');
+
+    return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>KOT</title><style>
+html,body{margin:0;padding:0;font-family:"Courier New",monospace;}
+body{padding:6px;width:72mm;box-sizing:border-box;}
+.c{text-align:center;}
+.lt{font-size:18px;font-weight:700;}
+.kn{font-size:48px;font-weight:900;text-align:center;margin:8px 0;border:3px solid #000;padding:8px;background:#f5f5f5;}
+.ml{font-size:13px;margin:2px 0;text-align:center;font-weight:700;}
+/* The table is the second thing a cook needs after what kind of ticket this
+   is, and it used to print at the same size as the date, sharing a line with
+   the pax count inside square brackets. Owner: "with table number clearly
+   mentioned." */
+.tb{font-size:26px;font-weight:900;text-align:center;margin:4px 0;letter-spacing:1px;}
+.rl{border-top:4px dashed #777;margin:5px 0;}
+.fl{border-top:4px dashed #777;margin-top:5px;}
+.ir{padding:3px 0;border-top:1px dashed #777;}
+.im{display:flex;justify-content:space-between;}
+.in{font-weight:800;font-size:15px;text-transform:uppercase;margin-right:4px;}
+.in.cx{text-decoration:line-through;}
+.iq{font-weight:700;font-size:14px;min-width:24px;text-align:right;}
+.id{font-size:11px;font-style:italic;font-weight:700;}
+/* How hot, upright and bold rather than italic: it is a setting the cook
+   acts on, not a remark somebody added. */
+.is{font-size:12px;font-weight:800;letter-spacing:0.5px;}
+.nt{font-size:12px;font-weight:700;border:1px dashed #000;padding:3px 4px;margin:4px 0;white-space:pre-wrap;}
+@media print{@page{size:72mm auto;margin:0;}body{width:72mm;margin:0;padding:0;}}
+</style></head><body>
+<div class="c"><div class="lt">${this._esc(duplicate ? 'DUPLICATE KOT' : title)}</div></div>
+${duplicate ? '<div class="ml">Do not prepare again</div>' : ''}
+${duplicate && printKind !== 'copy' ? `<div class="ml">Original: ${this._esc(title)}</div>` : ''}
+<div class="kn">#${kotNumber}</div>
+<div class="ml">${this._esc(dateText)}</div>
+${dineType    ? `<div class="ml">${this._esc(dineType)}</div>` : ''}
+${saleIdDisplay ? `<div class="ml">${this._esc(saleIdDisplay)}</div>` : ''}
+${tableNo ? `<div class="tb">TABLE ${this._esc(String(tableNo))}</div>` : ''}
+${placeLine ? `<div class="ml">${this._esc(placeLine)}</div>` : ''}
+${deliverTo ? `<div class="nt">DELIVER TO: ${this._esc(deliverTo)}</div>` : ''}
+${orderNote ? `<div class="nt">NOTE: ${this._esc(orderNote)}</div>` : ''}
+<div class="rl"></div>
+${itemsHtml}
+<div class="fl"></div>
+</body></html>`;
+  }
+}
+
+module.exports = KOTManager;
+/* The one place that works out where this machine's own API is. Exported so
+   the kitchen screen's feed asks the same question the printer does, rather
+   than keeping a second copy of the answer that can drift from it. */
+module.exports.kotApiUrl = kotApiUrl;

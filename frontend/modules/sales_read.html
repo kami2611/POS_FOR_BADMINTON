@@ -1,0 +1,80 @@
+<div class="vertical-layout page_loader" id="sales" style="display: none">
+    <!--Start Containerbar-->
+    <div id="containerbar">
+        <div class="breadcrumbbar crumbbar_padding">
+            <div class="row align-items-center row_filter">
+                <div class="col-auto">
+                    <h4 class="page-title break_title mb-0">
+                        <lang class="lang_salehistory_title">Sales History</lang>
+                    </h4>
+                </div>
+                <div class="col">
+                    <div id="sales_filter_panel" class="lf-panel" style="display:none;"></div>
+                </div>
+                <div class="col-auto text-right">
+                    <div class="widgetbar">
+                        <span id="sales_sort_host"></span>
+                        <button type="button" id="sales_filter_btn"
+                            class="btn btn-primary-rgba lf-btn"
+                            data-toggle="tooltip" title="Filter sales" data-t-title="lang_filter_sales">
+                            <i class="feather icon-filter mr-2"></i><lang class="lang_filter">Filter</lang>
+                        </button>
+                        <a id="sales_new_button" data-module="sales" data-access="write" href='#/sales/new'
+                            class="btn btn-primary-rgba dash_sale_count" data-toggle="tooltip" title="New Sale" data-t-title="lang_addnewsale_title">
+                            <i class="feather icon-plus mr-2"></i>
+                            <lang class="lang_addvariant_title">New</lang>
+                        </a>
+                    </div>
+                </div>
+            </div>
+            <!--
+                KEPT DELIBERATELY, and not a filter control any more.
+
+                Twenty other modules - branches, lowstock, receiving_add and
+                every report - read THIS element to label their own empty
+                states: $('#view_sales_daterange span span[data-toggle=tooltip]')
+                .attr('data-original-title'), rendered as "No Records on <range>".
+                It became the shared date label because it carries
+                .daterange-timepicker-all, which PosnicPro.dashboard.datePicker
+                keeps in step across pages.
+
+                So deleting it with the rest of the old filter row would not have
+                broken this screen - it would have put "No Records on undefined"
+                on twenty others, none of which are being touched here. That is
+                a worse trade than keeping one hidden element, and untangling it
+                (each screen should label with its OWN range, or say nothing) is
+                its own piece of work rather than a side effect of this one.
+
+                Hidden rather than removed for exactly that reason. The bar owns
+                the date filtering on this page now; this only carries the label.
+            -->
+            <div id="view_sales_daterange"
+                 class="daterange-timepicker-all daterange-style" style="display:none;">
+                <span></span>
+            </div>
+            <!--
+                The "filtering by X" badges are gone with the controls that fed
+                them - PosnicPro.search was the only thing that ever wrote them,
+                and the button's count states the same fact where it can be seen
+                with the panel closed.
+            -->
+        </div>
+    </div>
+
+    <!--Start Contentbar-->
+    <div class="contentbar">
+        <div id="sales_split">
+            <div class="card m-b-30 md-rail" id="sales_list_card">
+                <div class="card-body">
+                    <div id="sales_list_rows" class="md-rail-rows text-muted"><lang class="lang_loading_sales">Loading sales ...</lang></div>
+                    <div class="q-pager" id="sales_list_paging"></div>
+                </div>
+            </div>
+            <div class="card m-b-30 md-detail" id="sales_detail_card" style="display:none;">
+                <div id="sales_doc"></div>
+            </div>
+        </div>
+    </div>
+    <!--End Contentbar-->
+</div>
+<!--End Containerbar-->

@@ -1,0 +1,96 @@
+<div class="vertical-layout page_loader" id="taxsummaryreport_new" style="display: none">
+    <!-- Start Containerbar -->
+    <div id="containerbar">
+        <div class="breadcrumbbar crumbbar_padding">
+            <div class="row align-items-center row_filter">
+                <div class="col-lg-4 col-xl-4">
+                    <h4 class="page-title break_title"><lang class="lang_taxsummary_title">Tax Summary</lang></h4>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Start Contentbar : totals per tax rate over a period - the filing
+         shape. Sums what sales stored; recomputes nothing. -->
+    <div class="contentbar">
+        <div class="row">
+            <div class="col-md-12 col-lg-12 col-xl-12 m-t-10">
+                <div class="card m-b-30">
+                    <div class="card-body">
+                        <div class="form-row align-items-end mb-3">
+                            <div class="form-group col-md-3 col-6 mb-2">
+                                <label for="taxsummary_from" style="font-size:.8rem; font-weight:600;"><lang class="lang_from">From</lang></label>
+                                <input type="date" class="form-control" id="taxsummary_from">
+                            </div>
+                            <div class="form-group col-md-3 col-6 mb-2">
+                                <label for="taxsummary_to" style="font-size:.8rem; font-weight:600;"><lang class="lang_to_2">To</lang></label>
+                                <input type="date" class="form-control" id="taxsummary_to">
+                            </div>
+                            <div class="form-group col-md-2 col-4 mb-2">
+                                <button type="button" class="btn btn-primary-rgba" onclick="PosnicPro.taxsummaryreport.run();"><lang class="lang_run_title">Run</lang></button>
+                            </div>
+                            <div class="form-group col-md-4 col-8 mb-2 text-right">
+                                <button type="button" class="btn btn-outline-primary" onclick="PosnicPro.taxsummaryreport.exportCsv();">
+                                    <i class="feather icon-download mr-1"></i><lang class="lang_csv">CSV</lang>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-borderless m-sticky-first" cellspacing="0" width="100%">
+                                <thead>
+                                    <tr>
+                                        <th><lang class="lang_rate_2">Rate</lang></th>
+                                        <th><lang class="lang_module_tax">Tax</lang></th>
+                                        <th class="text-right"><lang class="lang_net">Net</lang></th>
+                                        <th class="text-right"><lang class="lang_tax_amount">Tax Amount</lang></th>
+                                        <th class="text-right"><lang class="lang_gross">Gross</lang></th>
+                                        <th class="text-right"><lang class="lang_lines">Lines</lang></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="taxsummary_body">
+                                    <tr><td colspan="6" class="text-center text-muted"><lang class="lang_pick_a_range_and_run">Pick a range and Run.</lang></td></tr>
+                                </tbody>
+                                <tfoot id="taxsummary_foot"></tfoot>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!--
+                    The GST position (owner: "we need to know how we already
+                    paid tax while purchase... how much need to pay"). Output
+                    tax on sales, minus the input tax credit already paid to
+                    suppliers, is what the period owes - the GSTR-3B shape.
+                -->
+                <div class="card m-b-30" id="taxsummary_gst_card" style="display:none;">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0"><lang class="lang_gst_position">GST position for this period</lang></h5>
+                        <small class="text-muted"><lang class="lang_gst_position_hint">Tax collected on sales, minus the input tax credit already paid on purchases. The excess of credit over output carries forward.</lang></small>
+                    </div>
+                    <div class="card-body">
+                        <div class="row" id="taxsummary_gst"></div>
+                        <div class="table-responsive mt-3">
+                            <table class="table table-hover mb-0">
+                                <thead>
+                                    <tr>
+                                        <th colspan="5"><lang class="lang_gst_itc_title">Input tax credit - purchases by rate</lang></th>
+                                    </tr>
+                                    <tr>
+                                        <th><lang class="lang_rate_2">Rate</lang></th>
+                                        <th class="text-right"><lang class="lang_net">Net</lang></th>
+                                        <th class="text-right"><lang class="lang_tax_paid">Tax paid</lang></th>
+                                        <th class="text-right"><lang class="lang_gross">Gross</lang></th>
+                                        <th class="text-right"><lang class="lang_lines">Lines</lang></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="taxsummary_purchase_body"></tbody>
+                                <tfoot id="taxsummary_purchase_foot"></tfoot>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- End Contentbar -->
+</div>

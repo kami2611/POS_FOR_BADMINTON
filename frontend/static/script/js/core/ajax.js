@@ -1,0 +1,328 @@
+/*
+ * MOBILE BOOT STAGING. Every death record from the iOS crash hunt shows the
+ * same scene: a dozen parallel warm-up calls (master lists, reference data)
+ * landing together at 1-3s and the engine dying in the churn. On phones,
+ * those calls now WAIT: nothing on the defer list leaves the device until
+ * 8s after boot (or the first navigation away from the dashboard), and then
+ * one at a time, 300ms apart. Dashboard content itself (overview, checklist,
+ * low stock, auth) is never deferred. Desktop is untouched.
+ */
+PosnicPro._bootStage = {
+    start: Date.now(),
+    queue: [],
+    draining: false,
+    DEFER: /(AjaxList|getJSON(Country|State|Currency|TimeZone|GstState)|getDenomAll|getPaymentAll|getTableOrderAll|taxProfile|getDefaultCustomer|getDefaultSupplier|getTaxAll$|getBranchList|quantityCount)/,
+    shouldDefer: function (params, method) {
+        if (!window.__mobileSafeMode || method !== 'GET' || this.draining) { return false; }
+        /* a convalescent boot (reopened within minutes of a kill) never
+           fires the warm-ups at all - the tab is living on the smallest
+           memory budget iOS will ever give it */
+        if (window.__posnicConvalescent) { return true; }
+        if (Date.now() - this.start > 8000) { return false; }
+        var h = window.location.hash;
+        if (h && h !== '#/' && h !== '#/dashboard') { return false; }
+        return this.DEFER.test(String(params.url || ''));
+    },
+    drain: function () {
+        if (this.draining) { return; }
+        this.draining = true;
+        var self = this;
+        (function next() {
+            var job = self.queue.shift();
+            if (!job) { return; }
+            try { PosnicPro.request(job.p, job.cb, job.fail); } catch (e) { }
+            setTimeout(next, 300);
+        })();
+    }
+};
+setTimeout(function () {
+    if (!window.__posnicConvalescent) { PosnicPro._bootStage.drain(); }
+}, 8000);
+window.addEventListener('hashchange', function () {
+    if (window.location.hash !== '#/dashboard') { PosnicPro._bootStage.drain(); }
+});
+
+// Register ownership belongs to a browser profile, not its IP address or
+// Electron version. Keep this across sign-ins, restarts and application updates.
+PosnicPro.requestDeviceId = function () {
+    if (PosnicPro._requestDeviceId) { return PosnicPro._requestDeviceId; }
+    var key = 'posnic_request_device_id';
+    var id;
+    try { id = localStorage.getItem(key); } catch (e) { /* storage unavailable */ }
+    if (!/^[a-f0-9]{32}$/.test(id || '')) {
+        if (!window.crypto || !window.crypto.getRandomValues) { return null; }
+        var bytes = new Uint8Array(16);
+        window.crypto.getRandomValues(bytes);
+        id = Array.from(bytes, function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+        try { localStorage.setItem(key, id); } catch (e) { /* stable for this page */ }
+    }
+    PosnicPro._requestDeviceId = id;
+    return id;
+};
+
+PosnicPro.request = function (params, callback, failure = null) {
+    var method = params.method ? params.method : 'GET';
+    if (PosnicPro._bootStage.shouldDefer(params, method)) {
+        PosnicPro._bootStage.queue.push({ p: params, cb: callback, fail: failure });
+        return;
+    }
+    var url = API_URL + params.url;
+    var data = params.data ? params.data : {};
+
+
+    /*
+     * The offline layer that used to live here (Dexie mirror reads and a
+     * write-queue) was removed: the mirrors were never populated, and the
+     * queue was write-only - an offline sale was silently discarded while
+     * the cashier saw a success toast. Requests now always go to the API;
+     * a network failure surfaces honestly in the error handler below.
+     */
+    {
+        // JWT Token support for Electron cross-origin requests
+        var headers = {};
+        var deviceId = PosnicPro.requestDeviceId();
+        if (deviceId) { headers['X-Device-Id'] = deviceId; }
+        /* The API returns this derived token on any cookie-authenticated
+         * response. It is useless without the HttpOnly credential it is bound
+         * to, but proves an unsafe browser request came from code that could
+         * read a prior API response rather than from an attacker page. */
+        if (PosnicPro.csrfToken && !/^(GET|HEAD|OPTIONS)$/i.test(method)) {
+            headers['X-XSRF-TOKEN'] = PosnicPro.csrfToken;
+        }
+        if (navigator.userAgent.indexOf('Electron') !== -1) {
+            const token = localStorage.getItem('posnic_jwt_token');
+            if (token) {
+                headers['Authorization'] = 'Bearer ' + token;
+                console.log('✅ JWT added to PosnicPro.request:', url.substring(0, 50) + '...');
+            } else {
+                console.log('❌ No JWT for PosnicPro.request:', url.substring(0, 50) + '...');
+            }
+        }
+
+        var request = $.ajax({
+            url: url,
+            method: method,
+            dataType: 'json',
+            headers: headers,
+            xhrFields: {
+                withCredentials: true
+            },
+            contentType: params.contentType !== undefined ? params.contentType : 'application/json',
+            processData: params.processData !== undefined ? params.processData : true,
+            data: data
+        });
+
+        request.done(function (data, _status, xhr) {
+            var csrfToken = xhr.getResponseHeader('X-CSRF-TOKEN');
+            if (csrfToken) { PosnicPro.csrfToken = csrfToken; }
+            callback(data);
+        });
+
+        request.fail(function (xhr, status, error) {
+            $(".loadingSpinner").remove();
+
+            /* The token rides on every credentialed answer, refusals
+               included. A page whose reads all fail, such as the login page
+               under an expired login, still learns the token it needs for
+               its next write instead of being refused for not having it. */
+            var refreshed = xhr && xhr.getResponseHeader && xhr.getResponseHeader('X-CSRF-TOKEN');
+            if (refreshed) { PosnicPro.csrfToken = refreshed; }
+
+            // A non-JSON body (proxy error page, dropped connection, offline)
+            // used to throw here and kill the whole handler, so the user saw
+            // nothing at all. Fall back to null and keep going.
+            let response = xhr.responseJSON || null;
+            if (!response && xhr.responseText) {
+                try {
+                    response = JSON.parse(xhr.responseText);
+                } catch (e) {
+                    response = null;
+                }
+            }
+
+            // login.html / forgotpassword.html have no session by definition.
+            // Redirecting to login from here just reloads the page and wipes
+            // the error message before it can be read.
+            var onAuthPage = /(^|\/)(login|forgotpassword|ssoauth)\.html$/i.test(window.location.pathname) ||
+                    window.location.pathname === '/' || window.location.pathname === '';
+
+            var isThemeSettingsMissing = false;
+            if (url.indexOf('setting/getThemeSettings') !== -1 && response && response.type === 'error' && response.message === 'No theme settings found') {
+                isThemeSettingsMissing = true;
+                if (typeof PosnicPro !== 'undefined' && PosnicPro.themeManager && PosnicPro.themeManager.defaults) {
+                    try {
+                        var defaultSettings = Object.assign({}, PosnicPro.themeManager.defaults);
+                        PosnicPro.themeManager.applyTheme(defaultSettings);
+                        PosnicPro.themeManager.saveToLocal(defaultSettings);
+                    } catch (e) {
+                    }
+                }
+            }
+
+            /*
+             * A SIGN-IN SCREEN HAS NO SESSION. THAT IS NOT AN ERROR.
+             *
+             * Opening the till straight after a cloud download put a red
+             * "You are not logged in!" across the sign-in form. Nothing was
+             * actually wrong: the page fetches its theme and settings before
+             * anybody has typed a password, the server answers 401 because
+             * there is no session yet, and this handler toasted the sentence
+             * that came back with it. The owner read that as the cloud sign-in
+             * having failed, which is exactly what it looks like.
+             *
+             * A 401 from signing in ITSELF stays loud, because a wrong
+             * password has to say so. Every door that takes a password is
+             * named below, not just the one this build happens to use: the
+             * till posts to users/verify, the handsets to users/mobileLogin,
+             * single sign-on to users/ssoClientLogin, and users/login and
+             * auth/login both still answer. Missing one of those would leave
+             * the Sign in button looking dead, which is far worse than the
+             * toast being removed here.
+             *
+             * Every other 401 on this screen is the expected answer to asking
+             * a question before anybody has signed in.
+             */
+            var signInCall = /(users\/(verify|login|ssoClientLogin|mobileLogin|kioskMobileLogin)|auth\/login)/i
+                .test(String(url || ''));
+            var noSessionYet = onAuthPage && xhr && xhr.status === 401 && !signInCall;
+
+            if (noSessionYet) {
+                console.debug('[auth] no session yet on the sign-in screen, which is expected:', url);
+            } else if (!isThemeSettingsMissing && response && response.message) {
+                PosnicPro.alert(response.type || 'error', response.message);
+            }
+
+            /*
+             * Any 401 sends the user back to sign in, carrying the reason.
+             *
+             * This used to match one exact sentence - "Not valid Session" - so
+             * every other way of being unauthenticated left the till showing a
+             * red toast and then just sitting there: signed out, unable to do
+             * anything, with no way back except knowing to reload. The server
+             * has at least four such messages ("Invalid token. Please log in
+             * again!", "Your session has expired.", "You are not logged in!",
+             * and that one), and it grew another the day a secret was rotated.
+             *
+             * The status code is the thing that actually means "not
+             * authenticated", so that is what is checked. The message is passed
+             * to the sign-in page rather than shown and abandoned, because
+             * "your session expired" and "invalid token" send the person to
+             * different places: one waits, the other calls somebody.
+             */
+            var unauthenticated = xhr.status === 401
+                || (response && response.type === "error"
+                    && response.message === "Not valid Session" && response.data === null);
+
+            if (!isThemeSettingsMissing && unauthenticated) {
+                if (navigator.userAgent.indexOf('Electron') !== -1) {
+                    localStorage.removeItem('posnic_jwt_token');
+                    console.log('JWT token cleared on session invalidation');
+                }
+                PosnicPro.users.createCookie('loginuser', '', -1);
+                if (!onAuthPage) {
+                    var reason = (response && response.message)
+                        || PosnicPro.i18n.t('lang_your_session_has_ended_please_sign_in_ag',
+                            'Your session has ended. Please sign in again.');
+                    window.location = 'login.html?msg=' + encodeURIComponent(reason)
+                        + '&type=error';
+                    return false;   // nothing below can help once we are leaving
+                }
+            }
+            if (!isThemeSettingsMissing && !onAuthPage && (typeof (PosnicPro.local.get('username')) === "undefined" || PosnicPro.local.get('username') === null || PosnicPro.local.get('username') === "")) {
+                window.location = 'login.html';
+            }
+            if (failure !== null) {
+                failure(xhr)
+            } else {
+                if (!noSessionYet && !isThemeSettingsMissing && !(response && response.message)) {
+                    /*
+                     * Honest failures only. This branch used to expire the
+                     * login cookie for EVERY status below (a 404 logged the
+                     * cashier out mid-sale), redirect to login on a network
+                     * blip (status 0), and dump the raw HTTP body into a
+                     * toast. Authentication problems are already handled by
+                     * the 401 branch above; everything here just tells the
+                     * person what happened and lets them carry on.
+                     */
+                    if (xhr.status === 0) {
+                        PosnicPro.alert('error', PosnicPro.i18n.t('lang_no_connection_check_the_network_and_try_ag', 'No connection. Check the network and try again - nothing was saved.'));
+                    } else if (xhr.status === 403) {
+                        PosnicPro.alert('error', PosnicPro.i18n.t('lang_you_do_not_have_permission_for_that', 'You do not have permission for that.'));
+                    } else if (xhr.status === 404) {
+                        PosnicPro.alert('error', PosnicPro.i18n.t('lang_that_could_not_be_found_try_refreshing_the', 'That could not be found. Try refreshing the page.'));
+                    } else if (xhr.status >= 500) {
+                        PosnicPro.alert('error', PosnicPro.i18n.t('lang_the_server_hit_a_problem_try_again_in_a_mo', 'The server hit a problem. Try again in a moment.'));
+                    } else if (error === 'timeout') {
+                        PosnicPro.alert('error', PosnicPro.i18n.t('lang_the_server_took_too_long_try_again', 'The server took too long. Try again.'));
+                    } else if (error === 'abort') {
+                        return false; // a cancelled request is not an error to shout about
+                    } else {
+                        console.error('Unhandled request failure:', xhr.status, xhr.responseText);
+                        PosnicPro.alert('error', PosnicPro.i18n.t('lang_something_went_wrong_try_again_and_check_t', 'Something went wrong. Try again, and check the network if it keeps happening.'));
+                    }
+                    return false;
+                }
+            }
+        });
+    }
+};
+
+PosnicPro.get = function (params, callback, failure) {
+    var parameters = {};
+    if (typeof params === 'string') {
+        parameters.url = params;
+        parameters.data = {}
+    } else {
+        parameters = params;
+    }
+    parameters.method = 'GET';
+    PosnicPro.request(parameters, callback, failure);
+};
+
+PosnicPro.post = function (params, callback, failure) {
+    var parameters = {};
+    if (typeof params === 'string') {
+        parameters.url = params;
+        parameters.data = {}
+    } else {
+        parameters = params;
+    }
+    parameters.method = 'POST';
+    PosnicPro.request(parameters, callback, failure);
+};
+
+PosnicPro.delete = function (params, callback, failure) {
+    var parameters = {};
+    if (typeof params === 'string') {
+        parameters.url = params;
+        parameters.data = {}
+    } else {
+        parameters = params;
+    }
+    parameters.method = 'DELETE';
+    PosnicPro.request(parameters, callback, failure);
+};
+
+PosnicPro.put = function (params, callback, failure) {
+    var parameters = {};
+    if (typeof params === 'string') {
+        parameters.url = params;
+        parameters.data = {}
+    } else {
+        parameters = params;
+    }
+    parameters.method = 'PUT';
+    PosnicPro.request(parameters, callback, failure);
+};
+
+PosnicPro.patch = function (params, callback, failure) {
+    var parameters = {};
+    if (typeof params === 'string') {
+        parameters.url = params;
+        parameters.data = {}
+    } else {
+        parameters = params;
+    }
+    parameters.method = 'PATCH';
+    PosnicPro.request(parameters, callback, failure);
+};

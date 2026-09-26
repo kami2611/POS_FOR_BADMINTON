@@ -1,0 +1,3946 @@
+const DB_NAME = "KioskDB";
+const DB_VERSION = 3;
+const STORE_NAME = "products";
+const BRANCH_STORE = "branch";
+const CART_STORE = "cart";
+
+/* The customer's language, from assets/i18n.js. The English fallback keeps
+   the page alive if that file is ever missing from a deploy. */
+if (typeof window.t !== "function") {
+    window.t = function (key, vars) {
+        return String(key).replace(/\{(\w+)\}/g, function (m, name) {
+            return vars && vars[name] != null ? String(vars[name]) : m;
+        });
+    };
+}
+const PHONEPE_STORE = "phonepe";
+const IMAGE_STORE = "images";
+const PAYMENT_STORE = "payment";
+const ORDER_ATTEMPT_KEY = "kiosk_order_attempt_id";
+
+let db;
+let cart = {}; // ✅ Cart stored in IndexedDB
+let products = Object.create(null);
+/* Section key to the shop's own word for it. Built beside `products` and
+   read by the renderer, which draws the heading of every section rather than
+   one chip's label. */
+let categoryNames = new Map();
+const checkoutSingleFlight = KioskCore.createSingleFlight();
+
+function getOrCreateOrderAttemptId() {
+    let attemptId = sessionStorage.getItem(ORDER_ATTEMPT_KEY);
+    if (attemptId) return attemptId;
+
+    attemptId = typeof globalThis.crypto?.randomUUID === "function"
+        ? globalThis.crypto.randomUUID()
+        : `order-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    sessionStorage.setItem(ORDER_ATTEMPT_KEY, attemptId);
+    return attemptId;
+}
+
+function clearOrderAttemptId() {
+    sessionStorage.removeItem(ORDER_ATTEMPT_KEY);
+}
+
+async function readJsonResponse(response, requestName = "API request") {
+    const responseText = await response.text();
+    let responseData = null;
+
+    if (responseText) {
+        try {
+            responseData = JSON.parse(responseText);
+        } catch (error) {
+            const contentType = response.headers.get("content-type") || "unknown content type";
+            const responsePreview = responseText.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
+            const previewSuffix = responsePreview ? `: ${responsePreview}` : "";
+            throw new Error(`${requestName} returned invalid JSON (${response.status}, ${contentType})${previewSuffix}`);
+        }
+    }
+
+    if (!response.ok) {
+        const serverMessage = responseData?.message || responseData?.error || response.statusText || "Request failed";
+        throw new Error(`${requestName} failed (${response.status}): ${String(serverMessage).slice(0, 200)}`);
+    }
+
+    return responseData ?? {};
+}
+
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>'"]/g, character => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "'": "&#39;",
+        '"': "&quot;"
+    })[character]);
+}
+
+function getSafeImageUrl(value, fallback = "images/default-product.png") {
+    const imageUrl = String(value ?? "").trim();
+    if (!imageUrl) return fallback;
+
+    try {
+        const parsedUrl = new URL(imageUrl, window.location.href);
+        if (["http:", "https:", "blob:"].includes(parsedUrl.protocol)) return imageUrl;
+        if (parsedUrl.protocol === "data:" && /^data:image\//i.test(imageUrl)) return imageUrl;
+    } catch (error) {
+        console.warn("Invalid product image URL:", imageUrl, error);
+    }
+
+    return fallback;
+}
+
+let appErrorRetryAction = null;
+let appErrorKind = null;
+let orderProcessingActive = false;
+
+/* ------------------------------------------------------------- the shop
+ *
+ * Who the shop is and what money it takes, as the storefront read said.
+ * Stored with the branch row so every page - the menu, the order, paying -
+ * writes a price the same way without asking the server again.
+ */
+const shop = { name: "", currency: "", currencyCode: "", kind: "restaurant", notes: false, assistant: false, fulfilment: [], payment: {}, charges: {} };
+
+async function rememberShop() {
+    try {
+        const rows = await getData(BRANCH_STORE);
+        const branch = rows && rows[0] ? rows[0] : {};
+        shop.name = String(branch.name || "");
+        shop.currency = String(branch.currency || "");
+        shop.currencyCode = String(branch.currency_code || "");
+        /* What kind of shop, which decides the words and the questions. */
+        shop.kind = branch.kind === "retail" ? "retail" : "restaurant";
+        shop.notes = branch.notes === true;
+        /* Whether a table may call somebody over. See
+           api/src/utils/waiter-call.js for why it needs a table too. */
+        shop.callWaiter = branch.call_waiter === true;
+        /* Whether the shop opened its assistant to customers; the spark. */
+        shop.assistant = branch.assistant === true;
+        shop.assistantGreeting = String(branch.assistant_greeting || "");
+        /* How a customer may talk to it: "live", "turns", or not at all. */
+        shop.voice = String(branch.voice || "");
+        shop.fulfilment = Array.isArray(branch.fulfilment) ? branch.fulfilment : [];
+        shop.payment = branch.kioskPayment && typeof branch.kioskPayment === "object" ? branch.kioskPayment : {};
+        shop.charges = branch.charges && typeof branch.charges === "object" ? branch.charges : {};
+        /* Busy or not, and by how many minutes when the shop's own prep times
+           can support a figure. See api/src/utils/kitchen-load.js. */
+        shop.kitchen = branch.kitchen && typeof branch.kitchen === "object" ? branch.kitchen : null;
+        /* The address bar says which shop this is, from the row that is
+           actually showing. A copied link that names another shop is an
+           arrival there instead (assets/shop-address.js). */
+        const address = storeAddressFromRow(branch);
+        if (address && window.ShopAddress && !window.ShopAddress.follow(address)) window.ShopAddress.keep(address);
+    } catch (error) {
+        /* No branch row yet is not an error; the fetch that stores one will
+           be along in a moment. */
+    }
+    /* Whoever draws from the shop - the header, the spark - hears it changed. */
+    try {
+        document.dispatchEvent(new CustomEvent("posnic:shop", { detail: shop }));
+    } catch (e) {
+        /* no document, no listeners */
+    }
+    return shop;
+}
+
+/*
+ * A price, in the shop's own money.
+ *
+ * A SYMBOL sits against the number - "₹280", the way every bill in the
+ * country writes it - and a CODE or a word keeps its space: "Rs 280". The
+ * rupee is the fallback for a shop that has not said, because this product
+ * grew up in India and a blank beside a price is worse than a guess.
+ */
+function money(amount) {
+    const n = Number(amount) || 0;
+    const text = n % 1 === 0 ? String(n) : n.toFixed(2);
+    const unit = shop.currency || "Rs.";
+    return /^[A-Za-z]/.test(unit) ? unit + " " + text : unit + text;
+}
+
+/*
+ * The words a shop uses.
+ *
+ * A restaurant has dishes on a menu; a shop has items in a catalogue. The
+ * same page serves both, and calling a ball pen a dish is how a page tells
+ * a shopkeeper it was not made for them.
+ */
+function words() {
+    if (shop.kind === "retail") {
+        return { one: "item", many: "items", menu: t("Products"), heading: t("All products"), kitchen: "the shop" };
+    }
+    return { one: "dish", many: "dishes", menu: t("Menu"), heading: t("Our Menu"), kitchen: "the kitchen" };
+}
+
+/* Where the customer is, as the printed code said: "Table 5", or a room. */
+function placeLabel() {
+    try {
+        if (!window.KioskServicePoint) return "";
+        const point = window.KioskServicePoint.read();
+        if (point.venue) {
+            const place = window.KioskServicePoint.describe();
+            if (place && place.name) return place.name + (point.unit ? ", " + (place.unit_label || t("Room")) + " " + point.unit : "");
+            return point.venue + (point.unit ? " " + point.unit : "");
+        }
+        if (point.table) return t("Table {n}", { n: point.table });
+    } catch (e) {
+        /* No service point on this page is not an error. */
+    }
+    return "";
+}
+
+/*
+ * What a way of travelling costs, and whether the order is big enough.
+ *
+ * The SAME arithmetic the server runs when the order lands
+ * (utils/sales-channels.chargesFor): a flat fee, waived above a threshold,
+ * refused below a minimum. Mirrored here so the customer sees "Delivery
+ * ₹30" and "orders start at ₹200" before the button, not a different total
+ * on the token page or a refusal after the tap.
+ */
+function chargeFor(fulfilment, subtotal) {
+    const rule = (shop.charges && shop.charges[fulfilment]) || {};
+    const fee = Math.max(0, Number(rule.fee) || 0);
+    const freeAbove = Math.max(0, Number(rule.free_above) || 0);
+    const minimum = Math.max(0, Number(rule.min_order) || 0);
+    const amount = Number(subtotal) || 0;
+    if (!fulfilment) return { fee: 0, waived: false, allowed: true, minimum: 0, short: 0, toFree: 0 };
+    if (minimum > 0 && amount < minimum) {
+        return { fee, waived: false, allowed: false, minimum, short: minimum - amount, toFree: 0 };
+    }
+    const waived = freeAbove > 0 && amount >= freeAbove;
+    return {
+        fee: waived ? 0 : fee,
+        waived,
+        allowed: true,
+        minimum,
+        short: 0,
+        toFree: !waived && freeAbove > 0 && fee > 0 ? freeAbove - amount : 0
+    };
+}
+
+/* The words behind the veg mark, for a screen reader and for the sheet. */
+const DIET_WORDS = {
+    veg: "Vegetarian",
+    non_veg: "Non-vegetarian",
+    egg: "Contains egg",
+    vegan: "Vegan"
+};
+
+function dietMarkHtml(diet) {
+    const key = String(diet || "");
+    if (!DIET_WORDS[key]) return "";
+    return `<span class="product-diet diet-${escapeHtml(key)}" role="img" aria-label="${DIET_WORDS[key]}"></span>`;
+}
+
+/* The shop's name and logo at the top of the ordering page, in place of
+   "Self-Ordering", which named the software and not the restaurant. */
+async function paintShop() {
+    await rememberShop();
+    const name = document.getElementById("shop-name");
+    if (!name) return;
+
+    const w = words();
+    if (shop.name) {
+        name.textContent = shop.name;
+        document.title = t("{shop} · Order", { shop: shop.name });
+    } else {
+        name.textContent = w.menu;
+    }
+
+    const sub = document.getElementById("shop-sub");
+    if (sub && typeof allProducts === "function") {
+        const count = allProducts().length;
+        sub.textContent = t("{n} " + (count === 1 ? w.one : w.many), { n: count });
+        sub.hidden = count === 0;
+    }
+
+    /* A shop is searched, not a menu; and a veg filter over stationery is a
+       question nobody asked. */
+    const searchWord = shop.kind === "retail" ? t("Search products") : t("Search the menu");
+    const search = document.getElementById("product-search");
+    if (search) search.placeholder = searchWord;
+    const searchLabel = document.querySelector('label[for="product-search"]');
+    if (searchLabel) searchLabel.textContent = searchWord;
+    /* Sorting moved from a select in the section row into the filter sheet,
+       so this reads the radio's own label rather than an <option> that no
+       longer exists - a selector that matches nothing fails silently, and a
+       retail shop would have quietly gone back to being told "Menu order". */
+    const firstSort = document.querySelector('#filters-sort input[value="menu"] + span');
+    if (firstSort) firstSort.textContent = shop.kind === "retail" ? t("Catalogue order") : t("Menu order");
+    /*
+     * A FILTER THAT WOULD RETURN NOTHING IS NOT OFFERED.
+     *
+     * Owner: "whenever you show filter, no item in the list then dont show
+     * that filter in menu. example heart healthy food not in our menu then
+     * dont show the filter itself."
+     *
+     * The sort-and-filter sheet was built that way - every option there is
+     * counted first and only offered if a dish carries it. This chip predates
+     * it and was gated on "does ANY dish have a diet mark", which is not the
+     * same question. A steakhouse marks every dish non_veg, so the mark is
+     * present on all of them, the chip appears, and tapping it empties the
+     * menu and says "Nothing on the menu is marked vegetarian."
+     *
+     * The gate now asks exactly what the filter asks. Unmarked is still not
+     * assumed vegetarian - a shop that never filled the field has promised
+     * nothing - which is why this reads the same two values orderViewList
+     * does rather than a looser test that would be easier to get past.
+     */
+    const veg = document.getElementById("order-filter-veg");
+    if (veg && typeof allProducts === "function") {
+        const list = allProducts();
+        if (list.length) {
+            veg.hidden = !list.some((p) => p && (p.diet === "veg" || p.diet === "vegan"));
+        }
+    }
+
+    /* "Table 5", from the code that was scanned, beside the shop's name -
+       so a customer knows the page knows where they are sitting. */
+    const place = document.getElementById("shop-place");
+    if (place) {
+        const label = placeLabel();
+        place.textContent = label;
+        place.hidden = !label;
+    }
+
+    const heading = document.getElementById("category-heading");
+    if (heading && (heading.textContent === "Our Menu" || heading.textContent === t("Our Menu"))) heading.textContent = w.heading;
+
+    try {
+        const images = await getKioskImages();
+        const logo = document.getElementById("shop-logo");
+        const raw = images && typeof images.logo === "string" ? images.logo.trim() : "";
+        if (logo && raw && raw !== "default-product.png" && raw !== "images/default-product.png") {
+            const apiBaseUrl = String(CONFIG.API_BASE_URL || "").replace(/\/$/, "");
+            const src = /^(https?:|data:|blob:)/i.test(raw)
+                ? raw
+                : raw.startsWith("/") ? `${apiBaseUrl}${raw}` : `${apiBaseUrl}/${raw}`;
+            logo.addEventListener("error", () => { logo.hidden = true; }, { once: true });
+            logo.src = getSafeImageUrl(src, "");
+            logo.hidden = !logo.src;
+        }
+    } catch (error) {
+        /* A logo that will not load is a logo that stays hidden. */
+    }
+}
+
+function ensureAppStateStyles() {
+    if (document.getElementById("app-state-styles")) return;
+    const style = document.createElement("style");
+    style.id = "app-state-styles";
+    /* Ink on paper, like the rest of the page. This carried the orange
+       gradient after every other gradient was gone. */
+    style.textContent = `
+        .app-state-overlay { position: fixed; inset: 0; z-index: 20000; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(255,255,255,.96); font-family: system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; text-align: center; color: #111827; }
+        .app-state-card { width: min(420px, 100%); padding: 28px 24px; border-radius: 16px; background: #fff; border: 1px solid #e5e7eb; box-shadow: 0 8px 24px rgba(17,24,39,.14); }
+        .app-state-icon { font-size: 40px; margin-bottom: 10px; }
+        .app-state-title { margin: 0 0 8px; font-size: 20px; font-weight: 700; }
+        .app-state-message { margin: 0; color: #6b7280; font-size: 15px; line-height: 1.5; white-space: pre-line; }
+        .app-state-button { margin-top: 20px; width: 100%; min-height: 48px; padding: 0 18px; border: 0; border-radius: 12px; background: #111827; color: #fff; font-size: 16px; font-weight: 600; cursor: pointer; }
+        .app-state-button:disabled { opacity: .55; cursor: wait; }
+        .app-state-spinner { width: 40px; height: 40px; margin: 0 auto 16px; border: 4px solid #e5e7eb; border-top-color: #111827; border-radius: 50%; animation: app-state-spin .9s linear infinite; }
+        @keyframes app-state-spin { to { transform: rotate(360deg); } }
+    `;
+    document.head.appendChild(style);
+}
+
+function ensureAppErrorOverlay() {
+    let overlay = document.getElementById("app-error-overlay");
+    if (overlay) return overlay;
+
+    ensureAppStateStyles();
+    overlay = document.createElement("div");
+    overlay.id = "app-error-overlay";
+    overlay.className = "app-state-overlay";
+    overlay.style.display = "none";
+    overlay.innerHTML = `
+        <div class="app-state-card" role="alert">
+            <div class="app-state-icon" aria-hidden="true">⚠️</div>
+            <h1 class="app-state-title"></h1>
+            <p class="app-state-message"></p>
+            <button type="button" class="app-state-button">Retry</button>
+        </div>`;
+    document.body.appendChild(overlay);
+
+    overlay.querySelector("button").addEventListener("click", async event => {
+        const button = event.currentTarget;
+        const message = overlay.querySelector(".app-state-message");
+        if (!appErrorRetryAction) return;
+
+        button.disabled = true;
+        const originalText = button.textContent;
+        button.textContent = "Retrying...";
+        try {
+            await appErrorRetryAction();
+        } catch (error) {
+            message.textContent = error.message || "Retry failed. Check the connection and try again.";
+        } finally {
+            button.disabled = false;
+            button.textContent = originalText;
+        }
+    });
+    return overlay;
+}
+
+function showAppErrorScreen(title, message, retryAction, options = {}) {
+    const overlay = ensureAppErrorOverlay();
+    appErrorRetryAction = retryAction;
+    appErrorKind = options.kind || "error";
+    overlay.querySelector(".app-state-icon").textContent = options.icon || "⚠️";
+    overlay.querySelector(".app-state-title").textContent = title;
+    overlay.querySelector(".app-state-message").textContent = message;
+    const button = overlay.querySelector("button");
+    button.textContent = options.buttonLabel || "Retry";
+    button.style.display = retryAction ? "block" : "none";
+    overlay.style.display = "flex";
+}
+
+function hideAppErrorScreen() {
+    const overlay = document.getElementById("app-error-overlay");
+    if (overlay) overlay.style.display = "none";
+    appErrorRetryAction = null;
+    appErrorKind = null;
+}
+
+function showOrderProcessingScreen(message = "Your order is being submitted. Please do not close this page.") {
+    orderProcessingActive = true;
+    ensureAppStateStyles();
+    let overlay = document.getElementById("order-processing-overlay");
+    if (!overlay) {
+        overlay = document.createElement("div");
+        overlay.id = "order-processing-overlay";
+        overlay.className = "app-state-overlay";
+        overlay.innerHTML = `
+            <div class="app-state-card" role="status" aria-live="polite">
+                <div class="app-state-spinner"></div>
+                <h1 class="app-state-title">Order processing</h1>
+                <p class="app-state-message"></p>
+            </div>`;
+        document.body.appendChild(overlay);
+    }
+    overlay.querySelector(".app-state-message").textContent = message;
+    overlay.style.display = "flex";
+}
+
+function hideOrderProcessingScreen() {
+    orderProcessingActive = false;
+    const overlay = document.getElementById("order-processing-overlay");
+    if (overlay) overlay.style.display = "none";
+}
+
+function showOfflineScreen() {
+    showAppErrorScreen(
+        "You are offline",
+        "Check the internet connection, then tap Retry.",
+        async () => {
+            if (!navigator.onLine) throw new Error("Internet connection is still unavailable.");
+            window.location.reload();
+        },
+        { kind: "offline", icon: "📡", buttonLabel: "Retry" }
+    );
+}
+
+window.addEventListener("offline", showOfflineScreen);
+window.addEventListener("beforeunload", event => {
+    if (!orderProcessingActive) return;
+    event.preventDefault();
+    event.returnValue = "";
+});
+window.addEventListener("online", () => {
+    if (appErrorKind !== "offline") return;
+    const overlay = ensureAppErrorOverlay();
+    overlay.querySelector(".app-state-message").textContent = "Connection restored. Tap Retry to continue.";
+});
+document.addEventListener("DOMContentLoaded", () => {
+    if (!navigator.onLine) showOfflineScreen();
+});
+
+// ✅ Open IndexedDB
+function openDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+        request.onupgradeneeded = (event) => {
+            let db = event.target.result;
+
+            if (!db.objectStoreNames.contains("products")) {
+                let productStore = db.createObjectStore("products", { keyPath: "id" });
+                productStore.createIndex("category_name", "category_name", { unique: false });
+            }
+
+            if (!db.objectStoreNames.contains("branch")) {
+                db.createObjectStore("branch", { keyPath: "id" });
+            }
+
+            if (!db.objectStoreNames.contains("cart")) {
+                db.createObjectStore("cart", { keyPath: "id" });
+            }
+
+            if (!db.objectStoreNames.contains("images")) {
+                db.createObjectStore("images", { keyPath: "id" }); // ✅ this is your missing one
+            }
+
+            if (!db.objectStoreNames.contains("phonepe")) {
+                db.createObjectStore("phonepe", { keyPath: "id" });
+            }
+
+            if (!db.objectStoreNames.contains("payment")) {
+                db.createObjectStore("payment", { keyPath: "id" });
+            }
+
+        };
+
+
+        request.onsuccess = () => {
+            db = request.result;
+            console.log("✅ IndexedDB Opened Successfully");
+            resolve(db);
+        };
+
+        request.onerror = (event) => {
+            console.error("❌ IndexedDB Error:", event.target.error);
+            reject(event.target.error);
+        };
+    });
+}
+
+async function saveKioskPaymentToIndexedDB(paymentData) {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(PAYMENT_STORE, "readwrite");
+        const store = tx.objectStore(PAYMENT_STORE);
+        store.put({ id: "payment_type", ...paymentData });
+
+        tx.oncomplete = () => {
+            console.log("✅ Kiosk payment types saved to IndexedDB");
+            resolve();
+        };
+        tx.onerror = (err) => {
+            console.error("❌ Failed to save payment types:", err);
+            reject(err);
+        };
+    });
+}
+async function getKioskPayment() {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(PAYMENT_STORE, "readonly");
+        const store = tx.objectStore(PAYMENT_STORE);
+        const req = store.get("payment_type");
+
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = (err) => reject(err);
+    });
+}
+
+// ✅ Get IndexedDB instance
+async function getDB() {
+    if (!db) {
+        db = await openDB();
+    }
+    return db;
+}
+
+// ✅ Fetch data from IndexedDB
+async function getData(storeName) {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(storeName, "readonly");
+        const store = transaction.objectStore(storeName);
+        const request = store.getAll();
+
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = (error) => reject(error);
+    });
+}
+
+// ✅ Save Data to IndexedDB (Now Removes Outdated Products)
+async function saveData(storeName, newData) {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(storeName, "readwrite");
+        const store = transaction.objectStore(storeName);
+
+        transaction.oncomplete = () => {
+            console.log(`✅ Updated ${storeName} in IndexedDB`);
+            resolve();
+        };
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error || new Error(`${storeName} update transaction was aborted.`));
+
+        store.clear();
+        newData.forEach(item => store.put(item));
+    });
+}
+
+async function syncChangedProducts(newProducts) {
+    const db = await getDB();
+    const comparableFields = [
+        "id",
+        "name",
+        "available_quantity",
+        "price",
+        "discount_price",
+        "tax_price",
+        "img",
+        "category_name",
+        "available",
+        "description",
+        "diet"
+    ];
+
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_NAME, "readwrite");
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.getAll();
+        let changes = {
+            inserted: 0,
+            updated: 0,
+            deleted: 0,
+            upsertedIds: [],
+            structuralChange: false
+        };
+
+        transaction.oncomplete = () => resolve(changes);
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error || new Error("Product sync transaction was aborted."));
+
+        request.onsuccess = () => {
+            const existingById = new Map(request.result.map(product => [String(product.id), product]));
+            const incomingById = new Map(newProducts.map(product => [String(product.id), product]));
+
+            existingById.forEach((existingProduct, id) => {
+                if (!incomingById.has(id)) {
+                    store.delete(existingProduct.id);
+                    changes.deleted += 1;
+                    changes.structuralChange = true;
+                }
+            });
+
+            incomingById.forEach((incomingProduct, id) => {
+                const existingProduct = existingById.get(id);
+                if (!existingProduct) {
+                    store.put(incomingProduct);
+                    changes.inserted += 1;
+                    changes.upsertedIds.push(id);
+                    changes.structuralChange = true;
+                    return;
+                }
+
+                const hasChanged = comparableFields.some(field => !Object.is(existingProduct[field], incomingProduct[field]));
+                if (hasChanged) {
+                    store.put(incomingProduct);
+                    changes.updated += 1;
+                    changes.upsertedIds.push(id);
+                    if (existingProduct.category_name !== incomingProduct.category_name) {
+                        changes.structuralChange = true;
+                    }
+                }
+            });
+        };
+    });
+}
+
+async function saveKioskImagesToIndexedDB(images, updateUI = true) {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(IMAGE_STORE, "readwrite");
+        const store = tx.objectStore(IMAGE_STORE);
+        store.put({ id: "kiosk", ...images });
+
+        tx.oncomplete = () => {
+            console.log("✅ Kiosk images saved to IndexedDB");
+            if (updateUI) updateKioskImageUI(images);
+            resolve();
+        };
+        tx.onerror = (err) => {
+            console.error("❌ Failed to save kiosk images:", err);
+            reject(err);
+        };
+    });
+}
+
+async function getKioskImages() {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(IMAGE_STORE, "readonly");
+        const store = tx.objectStore(IMAGE_STORE);
+        const req = store.get("kiosk");
+
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = (err) => reject(err);
+    });
+}
+
+function updateKioskImageUI(data = {}) {
+    /* The page's own origin, with no fallback. A hardcoded host here would
+       quietly serve one shop its images from another shop's server. */
+    const apiBaseUrl = String(CONFIG.API_BASE_URL || "").replace(/\/$/, "");
+    const getImagePath = (val, fallback) => {
+        try {
+            if (!val || typeof val !== "string" || val.trim() === "") return `images/${fallback}`;
+            const imageValue = val.trim();
+            if (imageValue === fallback || imageValue === `images/${fallback}`) {
+                return `images/${fallback}`;
+            }
+            let candidateUrl;
+            if (imageValue.startsWith("/uploads/")) {
+                candidateUrl = `${apiBaseUrl}${imageValue}`;
+            } else if (imageValue.startsWith("uploads/")) {
+                candidateUrl = `${apiBaseUrl}/${imageValue}`;
+            } else if (/^(https?:|data:|blob:)/i.test(imageValue)) {
+                candidateUrl = imageValue;
+            } else {
+                candidateUrl = `${apiBaseUrl}/uploads/${imageValue}`;
+            }
+
+            const parsedUrl = new URL(candidateUrl, window.location.href);
+            if (["http:", "https:", "blob:"].includes(parsedUrl.protocol)) return parsedUrl.href;
+            if (parsedUrl.protocol === "data:" && /^data:image\//i.test(candidateUrl)) return candidateUrl;
+            return `images/${fallback}`;
+        } catch (err) {
+            console.warn("⚠️ Error in getImagePath fallback:", err);
+            return `images/${fallback}`;
+        }
+    };
+
+    // ✅ Company Logo
+    const setImageWithFallback = (selector, source, fallback) => {
+        const fallbackPath = `images/${fallback}`;
+        $(selector).each((_, element) => {
+            $(element)
+                .off("error.kioskFallback")
+                .one("error.kioskFallback", () => {
+                    if (element.getAttribute("src") !== fallbackPath) element.setAttribute("src", fallbackPath);
+                })
+                .attr("src", source);
+        });
+    };
+
+    const setBackgroundWithFallback = (applyBackground, source, fallback) => {
+        const fallbackPath = `images/${fallback}`;
+        applyBackground(fallbackPath);
+        if (source === fallbackPath) return;
+
+        const image = new Image();
+        image.onload = () => applyBackground(source);
+        image.onerror = () => applyBackground(fallbackPath);
+        image.src = source;
+    };
+
+    const logoPath = getImagePath(data.logo, "default-product.png");
+    setImageWithFallback('img[alt="Company Logo"]', logoPath, "default-product.png");
+
+    // ✅ Advertisement
+    const adPath = getImagePath(data.advertisement, "home.png");
+    setImageWithFallback('img[alt="Advertisement"]', adPath, "home.png");
+
+    // ✅ Banner background (e.g. top section)
+    const bannerPath = getImagePath(data.banner, "home.png");
+    const $topBanner = $('.top-banner');
+    if ($topBanner.length) {
+        setBackgroundWithFallback(
+            path => $topBanner.css("background-image", `url("${path}")`),
+            bannerPath,
+            "home.png"
+        );
+    }
+
+    // ✅ Homepage background image
+    if (document.body.classList.contains("home-page")) {
+        const homeBanner = getImagePath(data.homebanner, "home.png");
+        setBackgroundWithFallback(path => {
+            document.body.style.background = `url("${path}") no-repeat center center fixed`;
+            document.body.style.backgroundSize = "cover";
+        }, homeBanner, "home.png");
+    }
+
+    console.log("✅ Kiosk UI Images Updated", {
+        logoPath, adPath, bannerPath, homebanner: data.homebanner
+    });
+}
+
+
+
+
+/*
+ * The shop's address, from wherever this browser still has it.
+ *
+ * The branch row is the first place to look. A row written by an older
+ * bundle can lack `id`; the address is also kept in localStorage from every
+ * successful load, and the URL carries it on arrival. A page that reads
+ * the row's `id` directly asks the server for "undefined" the day the
+ * row is stale, and that is a 404 in front of a customer with a full cart.
+ */
+const STORE_ADDRESS_KEY = "posnic_store";
+
+function storeAddressFromRow(row) {
+    if (!row || typeof row !== "object") return "";
+    const raw = row.id || row.store_id || row.branch_id || row.storeId || "";
+    return typeof raw === "string" || typeof raw === "number" ? String(raw).trim() : "";
+}
+
+function rememberStoreAddress(address) {
+    try {
+        if (address) localStorage.setItem(STORE_ADDRESS_KEY, String(address));
+    } catch (e) {
+        /* A browser that keeps nothing still gets this visit. */
+    }
+}
+
+async function knownBranchId() {
+    const branches = await getData(BRANCH_STORE).catch(() => []);
+    const fromRow = storeAddressFromRow(branches && branches[0]);
+    if (fromRow) return fromRow;
+    try {
+        const kept = localStorage.getItem(STORE_ADDRESS_KEY);
+        if (kept) return String(kept).trim();
+    } catch (e) {
+        /* fall through to the URL */
+    }
+    const parts = String(window.location.pathname || "").split("/").filter(Boolean);
+    if (parts[0] === "order" || parts[0] === "menu") parts.shift();
+    const first = parts[0] || "";
+    if (/^[A-Za-z0-9]{3,6}$/.test(first) && !/\./.test(first)) return first;
+    return "";
+}
+
+/* ------------------------------------------------- what this phone ordered
+ *
+ * There is no account behind a QR code and no address to write to, so the
+ * only place a customer's own order history can live is the browser that
+ * placed it. Twenty is plenty: this is "what did I order", not an archive,
+ * and the shop keeps the real record.
+ */
+const ORDER_HISTORY_KEY = "posnic_orders";
+const ORDER_HISTORY_KEEP = 20;
+
+function rememberedOrders() {
+    try {
+        const raw = localStorage.getItem(ORDER_HISTORY_KEY);
+        const list = raw ? JSON.parse(raw) : [];
+        return Array.isArray(list) ? list : [];
+    } catch (e) {
+        /* Private mode, cleared storage, or something that is not JSON. */
+        return [];
+    }
+}
+
+function rememberOrder(entry) {
+    if (!entry || !entry.orderId || !entry.token) return;
+    try {
+        const list = rememberedOrders().filter((row) => row && row.orderId !== entry.orderId);
+        list.unshift(entry);
+        localStorage.setItem(ORDER_HISTORY_KEY, JSON.stringify(list.slice(0, ORDER_HISTORY_KEEP)));
+    } catch (e) {
+        /* A browser that keeps nothing still placed the order. */
+    }
+}
+
+/*
+ * THE ORDER THIS PHONE ALREADY HAS OPEN AT THIS TABLE, AND HOW TO ADD TO IT.
+ *
+ * A shop allows one open order per table, and is right to: two tickets on one
+ * table is usually somebody picking the wrong table, and the cost of finding
+ * out is a bill split in two at the end of the meal. The refusal even says
+ * what to do instead - "Add to it, or settle it first."
+ *
+ * THE VOICE LINE COULD DO THAT AND A THUMB COULD NOT. Ordering by talking
+ * added to the open order; ordering by tapping hit the refusal, and the only
+ * button on that screen was Retry - which posts the same order to the same
+ * table and fails the same way, forever. Found by walking the journey on a
+ * phone and photographing it: "Checkout failed (404): Table 34 already has an
+ * open order", one dead button, no way out.
+ *
+ * So the door lives HERE, where every path to the kitchen passes, rather than
+ * in the voice line where only one of them does.
+ *
+ * THE PROOF IS THE TOKEN. This adds to an order THIS phone placed and still
+ * holds the token for. Another diner's order at the same table is not ours to
+ * touch, and for them the honest answer is the shop's own refusal - said in
+ * words, with a way back to the menu instead of a button that cannot work.
+ */
+async function myOpenOrderHere() {
+    try {
+        const point = window.KioskServicePoint ? window.KioskServicePoint.read() : null;
+        const table = String((point && point.table) || localStorage.getItem("order_table") || "").trim();
+        if (!table) return null;
+        const shop = await knownBranchId();
+        if (!shop) return null;
+        const mine = typeof rememberedOrders === "function" ? rememberedOrders() : [];
+        for (const row of mine) {
+            if (!row || !row.orderId || !row.token) continue;
+            if (String(row.table || "").trim() !== table) continue;
+            if (String(row.shop || "") !== String(shop)) continue;
+            return row;
+        }
+        return null;
+    } catch (e) {
+        return null;
+    }
+}
+
+/**
+ * Put what is in the basket onto an order already open at this table.
+ *
+ * @returns {Promise<null|{token: string, requested: boolean}>} null when there
+ *          is nothing of ours to add to, and the caller should carry on.
+ */
+async function addToMyOpenOrder(lines) {
+    const row = await myOpenOrderHere();
+    if (!row) return null;
+    const shop = await knownBranchId();
+    const base = `${CONFIG.API_BASE_URL}/online-ordering/${encodeURIComponent(shop)}/orders/${encodeURIComponent(row.orderId)}`;
+
+    /* What the shop says is on it NOW. The change endpoint takes absolute
+       quantities, so two more of something already there is what is there
+       plus two - and only the shop knows what is there. */
+    let said = null;
+    try {
+        const read = await fetch(`${base}?token=${encodeURIComponent(row.token)}`, {
+            method: "GET",
+            headers: { Accept: "application/json" }
+        });
+        if (!read.ok) return null;
+        const body = await read.json();
+        said = body && body.type === "success" ? body.data : null;
+    } catch (e) {
+        return null;
+    }
+    /* Settled, called off, or refused: that sitting is over and the next
+       order is a new one. */
+    if (!said || said.cancelled || said.paid) return null;
+    if (said.why_not && said.why_not !== "too_late") return null;
+
+    const already = {};
+    (said.items || []).forEach((line) => {
+        already[String(line.item_id || "")] = Number(line.quantity) || 0;
+    });
+    const wanted = (lines || []).map((line) => {
+        const id = String(line.item_id || line.id || "");
+        return { item_id: id, quantity: (already[id] || 0) + (Number(line.item_quantity || line.quantity) || 0) };
+    }).filter((w) => w.item_id);
+    if (!wanted.length) return null;
+
+    try {
+        const sent = await fetch(`${base}/items`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({ token: row.token, items: wanted })
+        });
+        const answer = await sent.json().catch(() => null);
+        if (!sent.ok || !answer || answer.type !== "success") return null;
+        return { token: String(row.token), requested: (answer.data || {}).requested === true };
+    } catch (e) {
+        return null;
+    }
+}
+
+function forgetOrder(orderId) {
+    try {
+        const list = rememberedOrders().filter((row) => row && row.orderId !== String(orderId));
+        localStorage.setItem(ORDER_HISTORY_KEY, JSON.stringify(list));
+    } catch (e) {
+        /* nothing kept, nothing to forget */
+    }
+}
+
+/*
+ * WHAT THIS DEVICE IS, sent with an order.
+ *
+ * Not for the customer and not shown anywhere: it rides with the sale so a
+ * shop looking at fifteen prank orders one evening has something to act on.
+ * The address and the user agent are the server's to read; this is what only
+ * the browser knows. A random id kept in this browser makes the same device
+ * recognisable across orders without knowing who is holding it.
+ */
+const DEVICE_KEY = "posnic_device";
+
+function deviceId() {
+    try {
+        let id = localStorage.getItem(DEVICE_KEY);
+        if (!id) {
+            id = "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+            localStorage.setItem(DEVICE_KEY, id);
+        }
+        return id;
+    } catch (e) {
+        return "";
+    }
+}
+
+function clientFacts() {
+    const facts = { device_id: deviceId() };
+    try {
+        facts.language = String(navigator.language || "");
+        facts.platform = String(navigator.userAgentData?.platform || navigator.platform || "");
+        if (window.screen) facts.screen = String(window.screen.width) + "x" + String(window.screen.height);
+        facts.time_zone = String(Intl.DateTimeFormat().resolvedOptions().timeZone || "");
+    } catch (e) {
+        /* A browser that will not say is a browser we do not describe. */
+    }
+    return facts;
+}
+
+/*
+ * The origin's default store, when a remembered address is dead.
+ *
+ * The same question index.html asks for a plain /order: the server knows
+ * whether this shop set a default, whether there is only one to pick, or
+ * whether it is a real question. Only an answer different from the dead
+ * address is a way forward.
+ */
+async function recoverDefaultStore(deadId) {
+    try {
+        const response = await fetch(`${CONFIG.API_BASE_URL}/online-ordering`, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
+        });
+        if (!response.ok) return "";
+        const body = await response.json();
+        const id = body && body.data && body.data.store && body.data.store.id;
+        return id && String(id) !== String(deadId) ? String(id) : "";
+    } catch (error) {
+        return "";
+    }
+}
+
+/* Everything this browser kept about a shop that is gone: its row, its
+   products, an order made of products that no longer exist. The customer's
+   own words (the note, the language) stay. */
+async function forgetShop() {
+    try {
+        localStorage.removeItem(STORE_ADDRESS_KEY);
+    } catch (e) {
+        /* nothing kept, nothing to forget */
+    }
+    const db = await getDB();
+    const wanted = window.KioskCore && Array.isArray(window.KioskCore.BRANCH_STORES)
+        ? window.KioskCore.BRANCH_STORES
+        : [BRANCH_STORE, STORE_NAME, CART_STORE];
+    const names = wanted.filter((name) => db.objectStoreNames.contains(name));
+    if (!names.length) return;
+    await new Promise((resolve, reject) => {
+        const tx = db.transaction(names, "readwrite");
+        names.forEach((name) => tx.objectStore(name).clear());
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+    });
+}
+
+// ✅ Fetch and Store Branch Data
+async function fetchAndStoreBranch(branchId, redirect = true, options = {}) {
+    try {
+        const silent = options?.silent === true;
+        /* Nothing to ask for is not a server error. Asking for "undefined"
+           was: a 404 dressed as "Unable to reach the server", with a Retry
+           that could never succeed. */
+        if (!branchId) {
+            console.warn("No shop address on this browser; the menu cannot be refreshed.");
+            if (!silent && typeof showAppErrorScreen === "function") {
+                showAppErrorScreen(
+                    "Menu not loaded",
+                    "Scan the code on the table again, or ask at the counter.",
+                    () => { window.location.href = "index.html"; }
+                );
+            }
+            return false;
+        }
+        const db = await getDB();
+        const existingBranches = await getData(BRANCH_STORE);
+
+        if (existingBranches.some(b => b.id === branchId)) {
+            console.log("🔹 Branch exists. Checking for product updates...");
+            if (redirect) {
+                window.location.href = "products.html"; // first time in: the menu, not a question
+            }
+        }
+
+        /*
+         * The shop's storefront: who it is, whether it is taking orders, and
+         * the menu.
+         *
+         * A GET on the store's own address, so a customer's menu is a URL that
+         * can be linked, cached and opened. It used to be a POST carrying the
+         * store address in a JSON body, sent to a verb named after the code
+         * that happened to scan it.
+         */
+        /*
+         * Where the customer is sitting travels with the read.
+         *
+         * A hotel room is quoted the marked-up price it will actually be
+         * charged, so the menu has to be fetched FOR that room. Showing house
+         * prices and adding the markup at checkout is how a guest finds out
+         * about it at the worst possible moment.
+         */
+        const servicePoint = window.KioskServicePoint
+            ? window.KioskServicePoint.query()
+            : '';
+
+        const response = await fetch(
+            `${CONFIG.API_BASE_URL}/online-ordering/${encodeURIComponent(branchId)}${servicePoint}`,
+            { method: "GET", headers: { "Accept": "application/json" } }
+        );
+
+        /* The address is dead: the shop was re-seeded or the code retired.
+           Ask the origin for its default store once, and start over there. */
+        if (response.status === 404 && !options?.recovered) {
+            const next = await recoverDefaultStore(branchId);
+            if (next) {
+                console.warn(`Shop ${branchId} is no longer at this address; using ${next}.`);
+                /* The bar moves to the live shop first, or the fresh row reads
+                   the dead address in the URL as a link to follow. */
+                if (window.ShopAddress) window.ShopAddress.keep(next);
+                await forgetShop();
+                return fetchAndStoreBranch(next, redirect, { ...options, recovered: true });
+            }
+        }
+
+        const result = await readJsonResponse(response, "Product sync");
+        console.log("🔄 API Response:", result);
+
+        if (result.type === "success" && result.data) {
+            let products = [];
+
+            /*
+             * The shop's verdict on whether it is taking orders, applied
+             * before anything is drawn.
+             *
+             * If the block is missing the page carries on as though ordering
+             * is on, and the order endpoint refuses if it is not. See
+             * assets/channel-state.js for why it fails open here.
+             */
+            if (result.data.channel && window.KioskChannel) {
+                window.KioskChannel.save(result.data.channel);
+            }
+
+            /* And the shop's description of where this customer is sitting -
+               the venue's real name, what it calls a room, whether it needs a
+               floor. The checkout screen shows it back and lets it be
+               corrected. */
+            if (window.KioskServicePoint) {
+                window.KioskServicePoint.remember(result.data);
+            }
+
+            const categories = (result.data.menu && result.data.menu.categories) || [];
+            const kioskImages = result.data.store;
+
+            if (kioskImages) {
+                const normalizeKioskImage = (url, fallback) => {
+                    try {
+                        if (url && typeof url === 'string' && url.trim() !== '') {
+                            return url.trim();
+                        }
+                    } catch (e) {
+                        console.warn("❌ Invalid URL for kiosk image:", url);
+                    }
+                    return fallback;
+                };
+
+                await saveKioskImagesToIndexedDB({
+                    homebanner: normalizeKioskImage(kioskImages.homebanner, "home.png"),
+                    logo: normalizeKioskImage(kioskImages.logo, "default-product.png"),
+                    banner: normalizeKioskImage(kioskImages.banner, "home.png"),
+                    advertisement: normalizeKioskImage(kioskImages.advertisement, "home.png")
+                }, !silent);
+            }
+
+            /* The shop, as the page shows it: the name at the top and the
+               money beside every price. */
+            const storeInfo = result.data.store || {};
+
+            categories.forEach(category => {
+                category.items.forEach(item => {
+                    products.push(catalogueItem(item, category.category_name));
+                });
+            });
+
+            // ✅ Save branch & products in IndexedDB
+            let productChanges = null;
+            rememberStoreAddress(branchId);
+            await saveData(BRANCH_STORE, [{
+                id: branchId,
+                kioskPayment: result.data.payment,
+                name: storeInfo.name || "",
+                currency: storeInfo.currency || "",
+                currency_code: storeInfo.currency_code || "",
+                /* A restaurant or a shop, whether the kitchen takes a note,
+                   and how the food may travel. */
+                kind: storeInfo.kind === "retail" ? "retail" : "restaurant",
+                notes: !!(result.data.features && result.data.features.notes),
+                /* Whether a table may call somebody over. */
+                call_waiter: !!(result.data.features && result.data.features.call_waiter),
+                assistant: !!(result.data.features && result.data.features.assistant),
+                assistant_greeting: String((result.data.features && result.data.features.assistant_greeting) || ""),
+                voice: String((result.data.features && result.data.features.voice) || ""),
+                fulfilment: Array.isArray(result.data.channel && result.data.channel.fulfilment)
+                    ? result.data.channel.fulfilment
+                    : [],
+                /* What each way of travelling costs, and its minimum, so the
+                   page can say so before the button rather than after. */
+                charges: result.data.charges && typeof result.data.charges === "object" ? result.data.charges : {},
+                /* How busy the kitchen was when this menu was fetched. Kept on
+                   the row because every page reads the shop from there, and
+                   refreshed on each load - a warning an hour old is no use. */
+                kitchen: result.data.kitchen && typeof result.data.kitchen === "object" ? result.data.kitchen : null
+            }]);
+            await rememberShop();
+            /* A browser that already had the menu draws the header from the
+               branch row it stored last time, which on an older row has no
+               name - so the page said "Menu" until the next visit. The name
+               is painted the moment the fresh row is in. */
+            if (typeof paintShop === "function" && document.getElementById("shop-name")) {
+                await paintShop();
+            }
+            if (silent) {
+                productChanges = await syncChangedProducts(products);
+                const totalChanges = productChanges.inserted + productChanges.updated + productChanges.deleted;
+                if (totalChanges > 0) {
+                    console.log("Product changes synced:", {
+                        inserted: productChanges.inserted,
+                        updated: productChanges.updated,
+                        deleted: productChanges.deleted
+                    });
+                }
+            } else {
+                await saveData(STORE_NAME, products);
+            }
+
+            console.log("✅ Product data updated successfully!");
+
+            const kioskPayment = result.data.payment;
+            if (kioskPayment) {
+                await saveKioskPaymentToIndexedDB(kioskPayment);
+            }
+
+            // ✅ Validate cart
+            window.POSNIC_SILENT_REFRESH = silent;
+            await validateCartWithProducts(products, !silent);
+            window.POSNIC_SILENT_REFRESH = false;
+            if (silent && productChanges?.structuralChange) {
+                await loadProducts();
+            } else if (silent) {
+                await patchVisibleProductsFromData(products, productChanges?.upsertedIds || []);
+            }
+
+            // ✅ Reload products on UI
+            if (!silent) await loadProducts();
+
+            if (redirect) {
+                /*
+                 * THE MENU FIRST.
+                 *
+                 * This went to home.html - Dine In or Take Away, before a
+                 * single dish had been seen. Owner: "take away or here no
+                 * need to ask first itself." The question moved to the
+                 * payment page, where it is answered once and at the point it
+                 * matters; home.html stays for a screen that wants an attract
+                 * page, but nothing routes a scanned code through it.
+                 */
+                window.location.href = "products.html";
+                hideLoader(); // ✅ Hide loader after redirect
+            }
+            if (!silent) hideAppErrorScreen();
+            return true;
+        } else {
+            console.warn("❌ No data received from API.");
+            if (!silent) {
+                showAppErrorScreen(
+                    "Unable to load the menu",
+                    result.message || "The server returned an invalid response.",
+                    async () => {
+                        const success = await fetchAndStoreBranch(branchId, redirect, options);
+                        if (!success) throw new Error("Menu retry failed.");
+                    }
+                );
+            }
+            return false;
+        }
+    } catch (error) {
+        window.POSNIC_SILENT_REFRESH = false;
+        console.error("❌ Error updating product data:", error);
+        if (!options?.silent) {
+            showAppErrorScreen(
+                navigator.onLine ? "Unable to reach the server" : "You are offline",
+                navigator.onLine ? error.message : "Check the internet connection, then tap Retry.",
+                async () => {
+                    if (!navigator.onLine) throw new Error("Internet connection is still unavailable.");
+                    const success = await fetchAndStoreBranch(branchId, redirect, options);
+                    if (!success) throw new Error("Menu retry failed.");
+                },
+                { kind: navigator.onLine ? "error" : "offline", icon: navigator.onLine ? "⚠️" : "📡" }
+            );
+        }
+        return false;
+    }
+}
+
+
+async function validateCartWithProducts(updatedProducts, renderUI = true) {
+    const cartData = await getCartData();
+    const productMap = new Map(updatedProducts.map(p => [p.id, p])); // 🔁 Map for quick access
+
+    // 🔄 Update cart items with latest product info
+    const syncedCart = cartData
+        .map(item => {
+            const updatedProduct = productMap.get(item.id);
+            if (updatedProduct) {
+                return {
+                    ...item,
+                    name: updatedProduct.name,
+                    img: updatedProduct.img,
+                    icon: updatedProduct.icon || "",
+                    diet: updatedProduct.diet || "",
+                    price: updatedProduct.price,
+                    tax_price: updatedProduct.tax_price,
+                    /*
+                     * Whether the dish still OFFERS a spice level comes from
+                     * the catalogue, because the shop may have turned it off
+                     * since this basket was filled. What the customer CHOSE is
+                     * theirs and is not touched here, exactly as their note is
+                     * not: the spread above carries both forward.
+                     */
+                    spice_choice: updatedProduct.spice_choice === true,
+                };
+            }
+            return null; // Item no longer exists in product list
+        })
+        .filter(Boolean); // Remove nulls (outdated items)
+
+    if (syncedCart.length !== cartData.length) {
+        console.log("🗑️ Removed outdated cart items.");
+    } else {
+        console.log("🔄 Synced cart items with latest product data.");
+    }
+
+    await saveCartData(syncedCart);     // 💾 Save updated cart
+    renderCart(syncedCart);             // 🔄 Re-render cart UI with synced data
+}
+
+/*
+ * The order, drawn: one row per dish, the sums under them, the bar at the
+ * foot. Also keeps the counts on the ordering page in step, because the same
+ * data feeds both and this is the one place that reads it.
+ */
+/*
+ * Set while checkout is clearing a basket it has just SENT.
+ *
+ * renderCart cannot tell an emptied basket from a sent one by looking at it -
+ * both are zero lines - and the difference decides whether the customer is
+ * taken back to the menu or left exactly where they are, watching their order
+ * reach the kitchen.
+ */
+let orderJustPlaced = false;
+
+async function renderCart(cartData = null) {
+    if (window.POSNIC_SILENT_REFRESH) return;
+
+    try {
+        if (!cartData) {
+            cartData = await getCartData();
+        }
+        await rememberShop();
+
+        let totalPrice = 0;
+        let totalTax = 0;
+        let totalQty = 0;
+        let html = "";
+
+        if (cartData.length === 0) {
+            $("#next-btn").prop("disabled", true);
+            $("#cart-summary").html(
+                '<div class="empty-order"><strong>Your order is empty</strong>Taking you back to the menu.</div>'
+            );
+            $("#bill").prop("hidden", true);
+            $("#cart-total").text(money(0));
+            $("#cart-qty,#mobile-cart-count").text("0");
+            $("#summary-display").text(`0 items · ${money(0)}`);
+            /*
+             * ONLY THE BASKET PAGE GOES BACK TO THE MENU, and only when the
+             * basket was emptied rather than SENT.
+             *
+             * This used to fire wherever renderCart was called from. checkout()
+             * clears the basket and calls renderCart([]) on completion, so two
+             * seconds after an order went to the kitchen the page reloaded:
+             * on products.html that closed the assistant sheet, which stops
+             * the voice line, and killed the kitchen animation before its last
+             * beat. From the customer's side the call was cut mid-sentence.
+             *
+             * #cart-summary is the card this branch just wrote into and only
+             * cart.html has one; anywhere else there is nothing to take them
+             * back FROM. And a basket emptied BY the checkout is not an empty
+             * basket, it is a placed order.
+             */
+            const onBasketPage = !!document.getElementById("cart-summary");
+            if (onBasketPage && !orderJustPlaced) {
+                setTimeout(() => {
+                    window.location.href = "products.html";
+                }, 2000);
+            }
+            return;
+        }
+
+        cartData.forEach(item => {
+            const itemId = String(item.id ?? "");
+            const quantity = Number(item.quantity) || 0;
+            const price = Number(item.price) || 0;
+            const lineTotal = quantity * price;
+            totalPrice += lineTotal;
+            totalTax += (Number(item.tax_price) || 0) * quantity;
+            totalQty += quantity;
+
+            const safeItemId = escapeHtml(itemId);
+            const safeItemName = escapeHtml(String(item.name ?? "Unknown"));
+            const picture = item.img
+                ? `<img src="${escapeHtml(getSafeImageUrl(item.img))}" alt="" class="item-image">`
+                : `<span class="item-icon" aria-hidden="true">${escapeHtml(item.icon || "")}</span>`;
+
+            /*
+             * A note for the kitchen, on the line it is about.
+             *
+             * "Less spicy", "no onion", "cut in half" - the customisation a
+             * table asks for out loud and this page had no way to take. Only
+             * where there is a kitchen to read it; a stationer gets an order
+             * note at the foot instead.
+             */
+            /*
+             * How hot, on the line it is about. Read-only here; the picker
+             * that changes it is one tap away behind the request button, and
+             * a basket is for checking rather than for fiddling.
+             */
+            const spiceHtml = window.PosnicSpice ? window.PosnicSpice.chip(item.spice) : "";
+
+            const note = String(item.note || "").trim();
+            const noteHtml = shop.notes
+                ? (note ? `<div class="item-note">${escapeHtml(note)}</div>` : "") +
+                  `<button type="button" class="line-note-btn" data-item-id="${safeItemId}">${note ? t("Edit request") : t("Add a request: less spicy, no onion...")}</button>`
+                : "";
+
+            html += `
+                <div class="cart-item" data-item-id="${safeItemId}">
+                    ${picture}
+                    <div class="item-content">
+                        <div class="item-details">
+                            <div class="item-name">${dietMarkHtml(item.diet)}<span>${safeItemName}</span></div>
+                            <div class="item-prices">
+                                <span class="unit-price">${escapeHtml(money(price))} each</span>
+                                <span class="total-price">${escapeHtml(money(lineTotal))}</span>
+                            </div>
+                            ${spiceHtml}
+                            ${noteHtml}
+                        </div>
+                        <div class="quantity-control" aria-label="Quantity">
+                            <button type="button" class="qty-btn cart-quantity-btn" data-item-id="${safeItemId}" data-change="-1" aria-label="One fewer">&minus;</button>
+                            <span class="qty-value">${quantity}</span>
+                            <button type="button" class="qty-btn cart-quantity-btn" data-item-id="${safeItemId}" data-change="1" aria-label="One more">+</button>
+                        </div>
+                    </div>
+                </div>`;
+        });
+
+        if (!document.getElementById("cart-summary")) {
+            return;
+        }
+
+        $("#cart-summary").html(html);
+
+        /*
+         * The sums. The line prices already carry any tax that is added on
+         * top, so "Items" is the food and "Taxes" is the part of the total
+         * that is tax - shown only when there is any, because a row reading
+         * "Taxes ₹0" is a row that makes people wonder.
+         */
+        const itemsWord = totalQty === 1 ? "item" : "items";
+        $("#bill-items").text(money(totalPrice - totalTax));
+        $("#bill-tax").text(money(totalTax));
+        $("#bill-tax-row").prop("hidden", totalTax <= 0);
+        $("#bill-items-row").prop("hidden", totalTax <= 0);
+        $("#bill").toggleClass("bill-plain", totalTax <= 0);
+        $("#bill-total").text(money(totalPrice));
+        /*
+         * THE SUMS ONLY WHERE THERE ARE SUMS.
+         *
+         * With no tax to show this card was one row - "Total 90" - sitting
+         * above a bar that already said "2 items - 90". The same number
+         * twice, in two shapes, on a screen that was otherwise half empty.
+         * It earns its place the moment there is a breakdown to break down.
+         */
+        $("#bill").prop("hidden", totalTax <= 0);
+
+        /*
+         * WHERE IT IS GOING, at the moment of committing to it.
+         *
+         * The table was on the menu screen and nowhere near the button that
+         * sends the order, so the last thing a customer saw before paying
+         * never told them which table the food was for. On a printed code
+         * that is the one fact they cannot check any other way.
+         */
+        const goingTo = document.getElementById("going-to");
+        if (goingTo) {
+            const where = typeof placeLabel === "function" ? placeLabel() : "";
+            goingTo.hidden = !where;
+            if (where) {
+                goingTo.innerHTML =
+                    escapeHtml(t("Going to")) + " <b>" + escapeHtml(where) + "</b>";
+            }
+        }
+
+        $("#summary-display").text(t("{n} " + itemsWord, { n: totalQty }) + " · " + money(totalPrice));
+        $("#cart-qty,#mobile-cart-count").text(totalQty);
+        $("#cart-total").text(money(totalPrice));
+        $("#next-btn").prop("disabled", false);
+
+        /* The note for the whole order: for the kitchen where there is one,
+           for the shop where there is not. */
+        const noteBox = document.getElementById("order-note-box");
+        if (noteBox) {
+            noteBox.hidden = false;
+            const label = document.getElementById("order-note-label");
+            if (label) label.textContent = shop.kind === "retail" ? "A note for the shop" : "A note for the kitchen";
+            const field = document.getElementById("order-note");
+            if (field && !field.value) {
+                const kept = localStorage.getItem("note");
+                /* "null" and "undefined" are what setItem(null) left behind
+                   in older browsers; shown back, they read as a note. */
+                if (kept === "null" || kept === "undefined") localStorage.removeItem("note");
+                field.value = kept && kept !== "null" && kept !== "undefined" ? kept : "";
+            }
+        }
+
+        /*
+         * How busy the kitchen is, said again where somebody commits.
+         *
+         * LAST, deliberately. Everything in this function runs inside one try
+         * and the catch only logs, so anything that throws silently abandons
+         * the rest of the render - the lines, the sums, the note label. A
+         * decorative notice must never be able to do that, so it goes after
+         * everything a customer actually needs.
+         */
+        paintKitchenNotice();
+
+        const loader = document.getElementById('page-loader');
+        if (loader) loader.style.display = 'none';
+
+    } catch (error) {
+        console.error("❌ Error rendering cart:", error);
+    }
+}
+
+/**
+ * How hot one line is to be cooked, kept with the line.
+ *
+ * Stored as the number of chillies the customer tapped; 0 is nobody asked,
+ * and 0 is what an unrecognised value becomes. Written the way a note is
+ * written - straight onto the line and saved - so the two cannot get out of
+ * step over which one survives a reload.
+ */
+async function setCartItemSpice(id, level) {
+    const cartData = await getCartData();
+    const line = cartData.find(item => String(item.id) === String(id));
+    if (!line) return;
+    line.spice = window.PosnicSpice ? window.PosnicSpice.levelOf(level) : 0;
+    await saveCartData(cartData);
+    renderCart(cartData);
+}
+
+/*
+ * THE SAME ORDER AGAIN.
+ *
+ * A regular orders the same thing. Reading their own history, finding five
+ * dishes and tapping each one back in is work the phone can do, and every
+ * ordering app in the world does it.
+ *
+ * AT TODAY'S PRICES, NEVER THE REMEMBERED ONE. The line a customer kept says
+ * what they paid last time. Putting that number back in the basket would quote
+ * a price the shop is not offering today - so the CATALOGUE product is what
+ * goes in the cart, and the remembered line is used only for what it is: which
+ * dish, how many, and how they asked for it.
+ *
+ * AND IT SAYS WHAT IT COULD NOT ADD. A basket that quietly comes back with
+ * three of the five dishes is worse than one that refuses: the customer
+ * checks out believing they ordered what they ordered last week. Anything
+ * missing, sold out, or waiting on a price the shop has not set today is
+ * named back to the caller.
+ *
+ * IT ADDS, IT DOES NOT REPLACE. Whatever is already in the basket was put
+ * there deliberately, a moment ago, by the person tapping this.
+ */
+async function orderAgain(lines) {
+    const catalogue = await getData("products").catch(() => []);
+    const byId = new Map((catalogue || []).map((one) => [String(one.id), one]));
+
+    let cart = await getCartData();
+    const added = [];
+    const gone = [];
+
+    for (const line of Array.isArray(lines) ? lines : []) {
+        const id = String((line && line.item_id) || "");
+        const name = String((line && line.name) || "");
+        const quantity = Math.max(0, Math.round(Number(line && line.quantity) || 0));
+        const product = id ? byId.get(id) : null;
+
+        /*
+         * Four ways a dish does not come back, and all four read the same to
+         * the customer: it is not available now. The reasons differ to us -
+         * taken off the menu, sold out today, or a daily-priced dish the shop
+         * has not priced yet - and none of them may become a silent skip.
+         */
+        if (!id || !quantity || !product || product.available === false || waitingForTodaysPrice(product)) {
+            if (name) gone.push(name);
+            continue;
+        }
+
+        const result = KioskCore.changeCartQuantity(cart, product, id, quantity);
+        cart = result.cart;
+
+        /*
+         * How they asked for it last time, carried back. A note the kitchen
+         * acted on and a spice level somebody chose are part of "the same
+         * again" - leaving them behind makes this a different order that
+         * looks identical on the screen.
+         *
+         * The spice level only where the dish still OFFERS one: a shop that
+         * turned the picker off for a dish has changed its mind, and a level
+         * riding in on an old order would print on a ticket for a choice the
+         * menu no longer makes.
+         */
+        const put = cart.find((one) => String(one.id) === id);
+        if (put) {
+            const note = String((line && line.note) || "").trim();
+            if (note) put.note = note.slice(0, 200);
+            const spice = Number((line && line.spice) || 0);
+            if (product.spice_choice === true && spice > 0) {
+                put.spice = window.PosnicSpice ? window.PosnicSpice.levelOf(spice) : spice;
+            }
+        }
+
+        added.push(name || String(product.name || ""));
+    }
+
+    if (added.length) await saveCartData(cart);
+    return { added, gone, cart };
+}
+
+/** A note on one line of the order, kept with the line. */
+async function setCartItemNote(id, text) {
+    const cartData = await getCartData();
+    const line = cartData.find(item => String(item.id) === String(id));
+    if (!line) return;
+    line.note = String(text || "").trim().slice(0, 200);
+    await saveCartData(cartData);
+    renderCart(cartData);
+}
+
+$(document).on("click", ".cart-quantity-btn", async function () {
+    const itemId = String($(this).attr("data-item-id") ?? "");
+    const change = Number($(this).attr("data-change"));
+    if (!itemId || ![-1, 1].includes(change)) return;
+    await updateCartQuantity(itemId, change);
+});
+
+// ✅ Optimized remove function: No redundant IndexedDB calls
+async function removeCartItem(id) {
+    clearOrderAttemptId();
+    let cartData = await getCartData();
+    cartData = cartData.filter(i => i.id !== id); // 🔥 Remove from IndexedDB cart
+
+    await saveCartData(cartData);
+
+    // 🔥 Immediately remove from UI
+    $(".cart-item").filter((_, element) => String($(element).attr("data-item-id")) === String(id)).remove();
+
+    // ✅ Pass updated cartData directly to renderCart
+    renderCart(cartData);
+}
+
+// ✅ Optimized update function: Prevents multiple IndexedDB calls
+async function updateCartQuantity(id, change) {
+    clearOrderAttemptId();
+    const storedProducts = await getData("products");
+    /* `id` here is the LINE key, which for a dish with extras is not the
+       dish's id. The line says which dish it is; see optionKey. */
+    const currentLines = await getCartData();
+    const forLine = currentLines.find((one) => String(one.id) === String(id));
+    const dishId = forLine ? dishIdOf(forLine) : String(id);
+    const storedProduct = storedProducts.find(item => String(item.id) === dishId);
+    const currentCart = await getCartData();
+    const result = KioskCore.changeCartQuantity(currentCart, storedProduct, id, change);
+    const cartData = result.cart;
+    const totalQty = cartData.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+
+    $("#checkout-btn").prop("disabled", false); // ✅ Enable checkout button if cart is not empty
+
+    if (totalQty <= 0) {
+        $("#checkout-btn").prop("disabled", true); // ✅ Disable checkout button if cart is empty
+    }
+
+    if (result.quantity <= 0) {
+        $(".cart-item").filter((_, element) => String($(element).attr("data-item-id")) === String(id)).remove(); // ✅ Remove from UI immediately
+    }
+
+    await saveCartData(cartData);
+    renderCart(cartData); // ✅ Pass updated cart data directly
+}
+
+async function patchVisibleProductsFromData(updatedProducts = [], changedProductIds = []) {
+    if (!document.getElementById("product-list")) {
+        return;
+    }
+
+    products = Object.create(null);
+    updatedProducts.forEach(product => {
+        const categoryKey = (product.category_name || "").toLowerCase().replace(/\s/g, "_");
+        if (!products[categoryKey]) products[categoryKey] = [];
+        products[categoryKey].push(product);
+    });
+
+    const changedIds = new Set(changedProductIds.map(String));
+    updatedProducts.forEach(product => {
+        if (!changedIds.has(String(product.id))) return;
+        const $card = $(".product-card").filter((_, card) => String($(card).attr("data-id")) === String(product.id));
+        if (!$card.length) return;
+
+        $card.find(".product-price").text(money(product.price));
+        $card.find(".product-name").text(String(product.name || "Unknown"));
+        $card.attr("data-available", product.available === false ? "false" : "true");
+        const $image = $card.find(".product-media img").first();
+        if (product.img && $image.length) {
+            const safeImageUrl = getSafeImageUrl(product.img);
+            if ($image.attr("src") !== safeImageUrl) $image.attr("src", safeImageUrl);
+        }
+    });
+
+    await updateCart();
+}
+
+async function loadProducts() {
+    if (!document.getElementById("category-list") || !document.getElementById("product-list")) {
+        return;
+    }
+
+    console.log("🔄 Loading products from IndexedDB...");
+    const storedProducts = await getData("products");
+
+    if (storedProducts.length === 0) {
+        /*
+         * NOTHING STORED YET IS A REASON TO FETCH, NOT TO STOP.
+         *
+         * This logged an error and returned - and the spinner it returned
+         * behind stayed up for ever, because the only thing that hides it is
+         * the cart render at the end of this function. That is what every
+         * first-time visitor to products.html saw: a wheel, and the console
+         * line "No products found in IndexedDB!" that nobody reads.
+         *
+         * The branch is known (it was stored on arrival), so ask the server
+         * for its menu once; the fetch calls back into here when the rows
+         * are saved. If there is no branch either, say so on screen with a
+         * way back to the start, and take the wheel down.
+         */
+        console.warn("No products stored yet; fetching the menu.");
+        const loader = document.getElementById("page-loader");
+        const branchId = await knownBranchId();
+        if (branchId && !loadProducts._fetching) {
+            loadProducts._fetching = true;
+            try {
+                await fetchAndStoreBranch(branchId, false);
+            } finally {
+                loadProducts._fetching = false;
+            }
+            return;
+        }
+        if (loader) loader.style.display = "none";
+        if (typeof showAppErrorScreen === "function") {
+            showAppErrorScreen(
+                "Menu not loaded",
+                "Scan the code on the table again, or ask at the counter.",
+                () => { window.location.href = "index.html"; }
+            );
+        }
+        return;
+    }
+
+    products = Object.create(null);
+    const categories = new Map();
+
+    storedProducts.forEach(product => {
+        const categoryName = String(product.category_name || "Uncategorized");
+        const categoryKey = categoryName.toLowerCase().replace(/\s/g, "_");
+        if (!products[categoryKey]) products[categoryKey] = [];
+        products[categoryKey].push(product);
+        categories.set(categoryKey, categoryName);
+    });
+    categoryNames = categories;
+
+    /* The chip strip on a phone and the rail on a wide screen carry the
+       same sections; one delegated handler answers both. Buttons, so a
+       keyboard and a screen reader get them too. */
+    const $categoryList = $("#category-list").empty();
+    const $categoryRail = $("#category-rail").empty();
+    categories.forEach((categoryName, categoryKey) => {
+        const chip = $("<button>")
+            .attr("type", "button")
+            .addClass("category-item")
+            .attr("data-category", categoryKey)
+            .text(categoryName);
+        chip.appendTo($categoryList);
+        if ($categoryRail.length) chip.clone().appendTo($categoryRail);
+    });
+
+    /*
+     * Every section is drawn, so there is no category to "open" and nothing
+     * here decides what a customer sees. The only job left is which chip
+     * starts out lit, and that is the first one: the page opens at the top
+     * of the menu, which is where the first section is.
+     *
+     * lastActiveCategory is deliberately NOT restored. It made sense when a
+     * chip chose the whole page and somebody coming back wanted their place;
+     * now it would mean opening scrolled into the middle of the menu with no
+     * explanation, and the scroll watcher rewrites it on the first scroll
+     * anyway.
+     */
+    $(".category-item").first().addClass("active");
+
+    await refreshProductView();
+}
+
+$(document).on("click", ".category-item", function () {
+    const category = String($(this).attr("data-category") ?? "");
+    if (category) showCategory(category, this);
+});
+
+/*
+ * Go to a section. It is already on the page.
+ *
+ * This used to REPLACE the page with one category, which is what made the
+ * ordering page a set of fourteen small pages instead of a menu. Now every
+ * section is drawn and a chip scrolls to one, so nothing is redrawn, nothing
+ * is fetched, and the scroll position of everywhere else survives.
+ */
+async function showCategory(category, element) {
+    if (!document.getElementById("product-list")) {
+        return;
+    }
+
+    lightChip(String(category));
+
+    var heading = document.getElementById("sec-" + String(category));
+    if (heading && typeof heading.scrollIntoView === "function") {
+        heading.scrollIntoView({ behavior: "smooth", block: "start" });
+        /* Moved for the eye; moved for a screen reader too, or the page has
+           silently changed subject for one reader and not the other. */
+        if (typeof heading.focus === "function") heading.focus({ preventScroll: true });
+    }
+}
+
+/*
+ * IS THIS DISH WAITING FOR TODAY'S PRICE?
+ *
+ * Whole fish, crab, lobster: the rate comes from the morning's market, so the
+ * shop enters it when it opens and the catalogue holds nothing until then.
+ * Owner: "for menu and order say its just market price... dont let customer
+ * add or menu see the price."
+ *
+ * THE FLAG CONTRACT: daily_price + price_set_on. `daily_price` says the rate
+ * comes from the market; `price_set_on` says when somebody last entered it.
+ * Priced TODAY it is an ordinary dish and this page says nothing special
+ * about it. Priced YESTERDAY it is not - yesterday's rate for a pomfret is
+ * not today's, and a card that prints it has misled a guest before anybody
+ * notices.
+ *
+ * An item with neither field - every shop until the flag ships - falls
+ * through to "has it got a price at all", which is what this did before.
+ *
+ * `open_price` is deliberately NOT read here. It means the price is settled
+ * at the counter, and a guest ordering from this page has no counter to
+ * settle it at; those dishes carry a card price today and are ordered with
+ * it, and taking that away is not this change's business.
+ *
+ * The day is this phone's. The server decides in the SHOP's timezone and
+ * refuses a stale price outright, so the worst a travelling guest meets is a
+ * question they did not need - never a wrong number on a bill.
+ *
+ * Lives at the top level because the card and the dish sheet are two files
+ * drawing the same dish: one rule, or they will eventually disagree and the
+ * sheet will sell what the card refused.
+ */
+/*
+ * ONE DISH, AS THE ORDERING PAGES KEEP IT.
+ *
+ * This is a WHITELIST, and that is the whole reason it has a name. A field it
+ * does not mention is dropped in silence however correctly the server sent it:
+ * no error, no log, and no failing test, because tests on a feature read the
+ * source of the feature and not the source of this.
+ *
+ * It has cost two features already. nutrition, tags, marks and claims were
+ * sent for three releases and stopped here, so /order drew no numbers, no
+ * badges and no marks while /menu - which reads the same endpoint without a
+ * local store - drew all of them. daily_price and price_set_on were read by
+ * waitingForTodaysPrice() and never once delivered to it, so a whole fish
+ * priced from the morning's market and last priced YESTERDAY was offered at
+ * yesterday's rate with an ordinary Add button.
+ *
+ * Lifted out of the fetch loop so it can be RUN rather than read: see
+ * tests/the-ordering-catalogue-keeps-what-it-reads.test.js, which drives this
+ * over a real payload and separately refuses any storefront field the bundle
+ * reads and this does not keep.
+ */
+function catalogueItem(item, categoryName) {
+    /* Empty when there is no photograph, so the card can draw
+       the dish's icon instead of a grey placeholder. */
+    const imageSrc = (!item.img || String(item.img).trim() === "" || item.img === "item.svg") ? "" : String(item.img).trim();
+    const itemId = typeof item.id === "string"
+        ? item.id
+        : (item.id?.$oid || item._id?.$oid || item._id || `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    return {
+        id: String(itemId),
+        name: item.name || "Unknown",
+        available_quantity: item.available_quantity || 0,
+        price: parseFloat(item.final_price) || 0,
+        discount_price: parseFloat(item.discount_price) || 0,
+        tax_price: parseFloat(item.tax_price) || 0,
+        img: imageSrc,
+        /* Kept so the page can filter by diet, sort by what
+           sells, and search a description - none of which
+           reached this bundle before, which is why /order had
+           no search while /menu had one. */
+        diet: item.diet || "",
+        description: item.description || "",
+        prep_minutes: Number(item.prep_minutes) || 0,
+        ordered_count: Number(item.ordered_count) || 0,
+        /* Every photo, the drawn icon for a dish with none,
+           and whether it is on right now - the same three
+           things the menu shows, so the two pages agree. */
+        photos: Array.isArray(item.photos) ? item.photos.filter(Boolean) : [],
+        icon: item.icon || "",
+        available: item.available !== false,
+        served_in: Array.isArray(item.served_in) ? item.served_in.filter(Boolean) : [],
+        /*
+         * WHAT IS ON THE PLATE, AND IT WAS BEING THROWN AWAY.
+         *
+         * This loop is the ordering bundle's whole catalogue:
+         * a field it does not NAME here never reaches the page,
+         * however correctly the server sent it. The server has
+         * been sending nutrition, the shop's own marks, the
+         * "made without" tags and the earned health claims
+         * since the dish-facts release, and all four stopped
+         * at this object literal.
+         *
+         * So on /order the dish sheet drew no numbers, no
+         * badges and no marks, and the "Good for" filter group
+         * had nothing to offer and hid itself - while /menu,
+         * which reads the same endpoint straight without a
+         * local store, showed all of it. Nothing failed and
+         * nothing was logged; the fields simply were not there.
+         *
+         * `claims` is computed on the server from the shop's
+         * own numbers and is never stored on a dish, so
+         * carrying it here cannot invent a badge - it can only
+         * deliver one the numbers already earned.
+         */
+        nutrition: item.nutrition && typeof item.nutrition === "object" ? item.nutrition : {},
+        /* Whether a person confirmed those numbers or a machine guessed them
+           from the dish name. The sheet says so beside them; without this
+           field it could not, and a guess would read as a measurement. The
+           fifth thing this literal has had to be taught to keep. */
+        nutrition_estimated: item.nutrition_estimated === true,
+        tags: Array.isArray(item.tags) ? item.tags : [],
+        marks: Array.isArray(item.marks) ? item.marks : [],
+        claims: Array.isArray(item.claims) ? item.claims : [],
+        /*
+         * WHAT THE SHOP OFFERS ON TOP, and the fourth field this
+         * literal has had to be taught about.
+         *
+         * The till has priced extras from the shop's own option
+         * documents since the handset got them, and the storefront
+         * sends them to every client. This page named none of them,
+         * so a customer ordering online could not ask for extra
+         * cheese the waiter standing next to them could ring up.
+         *
+         * Sent whole - name, min, max and the options with their
+         * deltas - so the sheet can draw a picker without a second
+         * request. The DELTAS ARE FOR DISPLAY ONLY: what goes back
+         * to the shop is which options were chosen, never what they
+         * cost. A page that could name the price of cheese could
+         * name a discount nobody agreed to.
+         */
+        modifier_groups: Array.isArray(item.modifier_groups) ? item.modifier_groups : [],
+        /* Whether the kitchen said it can cook this one to
+           order. See api/src/utils/spice-level.js. */
+        spice_choice: item.spice_choice === true,
+        /*
+         * PRICED FROM THE MORNING'S MARKET, and the day it was
+         * last done. Both, or neither is any use: the flag says
+         * the rate comes from the market and the date says
+         * whether anybody has entered today's.
+         *
+         * waitingForTodaysPrice() has read these since the
+         * daily-price release and never once received them,
+         * because this literal did not name them. So on /order
+         * a whole fish flagged daily and priced YESTERDAY was
+         * offered at yesterday's rate with an ordinary Add
+         * button, while /menu said "Market price" - the same
+         * asymmetry that hid the dish facts, and this one is
+         * about money.
+         */
+        daily_price: item.daily_price === true,
+        price_set_on: item.price_set_on || "",
+        category_name: categoryName
+    };
+}
+
+/*
+ * "THE KITCHEN IS BUSY", SAID BEFORE THE ORDER IS PLACED.
+ *
+ * Owner: "when kitchen have many order have so many order we might notify
+ * online order customer deley might expecteed... shop having total 10 tables.
+ * 10 order in the process. then kitchen is full."
+ *
+ * A customer who waits forty minutes without being told blames the restaurant;
+ * one who was told chose to wait. So this is shown where the choice is still
+ * open - on the menu, and again above the order button - and it never blocks
+ * anything. It is a sentence, not a gate.
+ *
+ * THE NUMBER IS THE POINT. "Delay expected" with no figure is either ignored
+ * or read as "do not order", because the reader has to imagine the wait and
+ * people imagine the worst. The server sends minutes wherever the shop's own
+ * prep times can support them, and this says the weaker true thing when they
+ * cannot - the same rule the health badges follow.
+ */
+/*
+ * "USUALLY READY BY ABOUT QUARTER PAST EIGHT."
+ *
+ * A customer places an order, gets a token number and then hears nothing. On
+ * every food app they have ever used the next thing they see is a time; here
+ * the list said "With the kitchen" and left them to guess, which is when
+ * somebody walks up to the counter to ask - the one interruption an ordering
+ * channel exists to remove.
+ *
+ * SAID AS AN ESTIMATE, BECAUSE THAT IS WHAT IT IS. Nothing in this product
+ * knows when food is actually finished - no cook marks a ticket done - so the
+ * server works it out from the slowest dish on the order and the queue that
+ * was ahead of it, and says nothing at all when the shop has stated no prep
+ * times. "Usually" is doing real work in that sentence and is not padding.
+ *
+ * The clock is the CUSTOMER'S, from an instant the server sent: a guest
+ * ordering from a hotel in another timezone reads their own watch, not the
+ * shop's.
+ */
+function readyByWords(order) {
+    if (!order || order.cancelled === true) return "";
+    var at = order.ready_by ? new Date(order.ready_by) : null;
+    if (!at || isNaN(at.getTime())) return "";
+    /* Past already, and still nothing served: a time that has been and gone
+       is worse than no time, so it stops being shown rather than counting
+       backwards at somebody waiting. */
+    if (at.getTime() < Date.now()) return "";
+    var clock = at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    /* A shop that has not accepted the order yet has not started cooking, so
+       the clock would be a fiction. Say the length instead. */
+    if (order.state === "pending") {
+        return t("About {n} minutes once the shop accepts it", { n: Number(order.ready_minutes) || 0 });
+    }
+    return t("Usually ready by about {when}", { when: clock });
+}
+
+/*
+ * "COME TO TABLE SEVEN."
+ *
+ * Owner: "i want option for customers call... he should simple button to make
+ * it... coz everytime its annoying people see waiters to turn back."
+ *
+ * The most common failure of table service, and not a staffing problem: a
+ * table needs something, nobody is looking, and the customer spends two
+ * minutes trying to catch an eye. The restaurant never learns it happened.
+ *
+ * ONE TAP, AND ONLY WHERE IT MEANS SOMETHING. The shop has to run tables and
+ * the printed code has to have named one - a call that cannot say WHERE is
+ * worse than no call. No reasons to pick from either: the waiter is walking
+ * over anyway and will find out faster than anybody can choose from a list.
+ *
+ * THE SECOND TAP IS NOT A SECOND CALL. Somebody who taps again has not asked
+ * twice, they have doubted the button - so the server answers with the call
+ * that is already standing, and the page says so rather than pretending to
+ * have sent another.
+ */
+function whichTable() {
+    var point = window.KioskServicePoint ? window.KioskServicePoint.orderFields() : {};
+    return String(point.table || localStorage.getItem("order_table") || "").trim();
+}
+
+function paintCallButton() {
+    var button = document.getElementById("call-waiter");
+    if (!button) return;
+    button.hidden = !(shop.callWaiter === true && whichTable() !== "");
+}
+
+async function callTheWaiter() {
+    var button = document.getElementById("call-waiter");
+    var table = whichTable();
+    if (!button || !table) return;
+    if (button.dataset.sent === "yes") return;
+
+    button.disabled = true;
+    try {
+        const branchId = (await knownBranchId()) || "";
+        const response = await fetch(
+            CONFIG.API_BASE_URL + "/online-ordering/" + encodeURIComponent(branchId) + "/call",
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Accept: "application/json" },
+                body: JSON.stringify({ table: table })
+            }
+        );
+        const result = await readJsonResponse(response, "Call");
+        if (result.type !== "success") throw new Error(result.message || "");
+        /*
+         * Said in the past tense and left that way for a minute. A button that
+         * springs back to "Call waiter" the instant it is pressed reads as
+         * nothing having happened, which is the one thing that would make
+         * somebody stand up and go looking anyway.
+         */
+        button.dataset.sent = "yes";
+        button.textContent = t("Somebody is coming");
+        setTimeout(function () {
+            button.dataset.sent = "";
+            button.textContent = t("Call waiter");
+            button.disabled = false;
+        }, 60000);
+    } catch (error) {
+        button.disabled = false;
+        console.warn("could not call the waiter:", error && error.message);
+    }
+}
+
+function kitchenNoticeHtml(kitchen) {
+    if (!kitchen || kitchen.busy !== true) return "";
+    var minutes = Number(kitchen.extra_minutes) || 0;
+    var words = kitchen.over
+        ? t("The kitchen is very busy. Expect over an hour longer than usual.")
+        : minutes
+            ? t("The kitchen is busy. Expect about {n} minutes longer than usual.", { n: minutes })
+            : t("The kitchen is busy right now, so your order may take longer than usual.");
+    return '<p class="kitchen-notice" role="status">' + escapeHtml(words) + "</p>";
+}
+
+/* Draw it wherever the page has left room for it. Both pages that order food
+   carry the container; a page without one simply shows nothing. */
+function paintKitchenNotice() {
+    var box = document.getElementById("kitchen-notice");
+    if (!box) return;
+    var html = kitchenNoticeHtml(shop.kitchen);
+    box.innerHTML = html;
+    box.hidden = !html;
+}
+
+function waitingForTodaysPrice(product) {
+    if (!product) return true;
+    if (product.daily_price === true && !pricedToday(product.price_set_on)) return true;
+    return !(Number(product.price) > 0);
+}
+
+/** Was price_set_on today, on this phone's calendar? Unreadable is "no". */
+/*
+   * THE TRADING DAY STARTS AT SEVEN IN THE MORNING, NOT AT MIDNIGHT.
+   *
+   * Owner: "daily price starts in the morning only. means 7am. not midnight
+   * coz up to 1am restaurant might open."
+   *
+   * A restaurant sets its prices when it opens and serves until one. On a
+   * calendar day those prices expire in the middle of service. Shifting the
+   * clock back seven hours before the date is read moves the boundary into the
+   * dead hour: a price entered at 11am is still current at half past midnight,
+   * and goes stale at 7am when the shop is opening anyway.
+   *
+   * The same seven as the till and the other screens. All four ask this
+   * question separately and must answer it the same way.
+ */
+const DAY_STARTS_AT_HOUR = 7;
+
+function tradingDay(d) {
+    const shifted = new Date(d.getTime() - DAY_STARTS_AT_HOUR * 60 * 60 * 1000);
+    return `${shifted.getFullYear()}-${shifted.getMonth() + 1}-${shifted.getDate()}`;
+}
+
+function pricedToday(setOn) {
+    if (!setOn) return false;
+    const when = new Date(setOn);
+    if (Number.isNaN(when.getTime())) return false;
+    return tradingDay(when) === tradingDay(new Date());
+}
+
+/**
+ * Draw a list of products into the grid.
+ *
+ * LIFTED OUT OF showCategory so search can reuse it. A search spans every
+ * category, so the thing being drawn is no longer "the open category" - and
+ * two copies of the card markup would mean the search results quietly losing
+ * a button the category view still had.
+ */
+/*
+ * THE BADGES ON A DISH CARD.
+ *
+ * Owner asked for "signature dishes, chef pick, nutritions, veg or non veg,
+ * calories, health benefits, ready in 10 minutes, something like how top
+ * international food brands are having options", and then: "not too annoying
+ * make it very very professional and neat."
+ *
+ * Those two pull against each other, and the second one wins here. A dish
+ * that is a chef's pick, high protein, low carb, keto friendly, under 300
+ * kcal, gluten free and ready in ten minutes has SEVEN things to say, and a
+ * card carrying all seven is not a menu, it is a nutrition label with a price
+ * on it. Somebody choosing lunch reads the name and the price.
+ *
+ * So: at most two badges on a card, taken in the order below, and the rest
+ * live in the dish sheet where a person who wants them has asked for them.
+ *
+ * The order is deliberate. What the SHOP says about a dish - signature,
+ * chef's pick - comes first, because it is the shop recommending its own food
+ * and that is the thing a menu is for. The health claims follow, and only
+ * ever the ones the numbers earned; they are computed server-side by
+ * utils/dish-facts.js and this page cannot invent one.
+ */
+const MARK_WORDS = {
+    signature: "Signature",
+    chefs_pick: "Chef's pick",
+    house_special: "House special",
+    new: "New"
+};
+
+/* Only the claims worth a card. The finer ones - source of protein, low fat,
+   under 500 kcal - are true and quiet, and belong in the sheet rather than
+   competing with a dish name for the same two lines. */
+const CLAIM_WORDS = {
+    high_protein: "High protein",
+    keto_friendly: "Keto friendly",
+    diabetic_friendly: "Diabetic friendly",
+    heart_healthy: "Heart healthy",
+    high_fibre: "High fibre",
+    under_300: "Under 300 kcal",
+    no_added_sugar: "No added sugar"
+};
+
+function badgesFor(product) {
+    var out = [];
+
+    (product.marks || []).forEach(function (key) {
+        if (MARK_WORDS[key]) out.push({ kind: "mark", word: t(MARK_WORDS[key]) });
+    });
+
+    (product.claims || []).forEach(function (key) {
+        if (CLAIM_WORDS[key]) out.push({ kind: "claim", word: t(CLAIM_WORDS[key]) });
+    });
+
+    return out.slice(0, 2);
+}
+
+function cardHtml(product, quantity) {
+    {
+        const productId = String(product.id ?? "");
+        const activeClass = quantity > 0 ? "active" : "";
+
+        const safeProductId = escapeHtml(productId);
+        const safeProductName = escapeHtml(String(product.name ?? "Unknown"));
+        const description = String(product.description || "");
+        const price = Number(product.price) || 0;
+        const marketPriced = waitingForTodaysPrice(product);
+
+        /*
+         * Off its hours: shown, greyed, and told why. Hiding it makes a
+         * restaurant look like it does not serve breakfast at all.
+         */
+        const available = product.available !== false;
+        const served = Array.isArray(product.served_in) ? product.served_in.filter(Boolean) : [];
+        const meta = [];
+        if (!available) {
+            meta.push(served.length ? t("{when} only", { when: served.join(t(" and ")) }) : t("Not available right now"));
+        } else if (Number(product.prep_minutes) > 0) {
+            meta.push(t("~{n} min", { n: Number(product.prep_minutes) }));
+        }
+
+        /*
+         * Calories sit with the preparation time rather than among the
+         * badges: it is a fact of the same kind - a small number somebody
+         * either wants or ignores - and putting it in a coloured pill makes
+         * a plain figure look like a claim.
+         *
+         * Only shown when the kitchen entered it. Nothing here estimates.
+         */
+        const kcal = product.nutrition && Number(product.nutrition.kcal);
+        if (kcal > 0) meta.push(t("{n} kcal", { n: Math.round(kcal) }));
+
+        /* A photograph if the shop uploaded one, the drawn icon if not, and
+           the old placeholder only when there is neither. */
+        const media = product.img
+            ? `<img src="${escapeHtml(getSafeImageUrl(product.img))}" alt="" loading="lazy" decoding="async">`
+            : product.icon
+                ? `<span class="product-icon" aria-hidden="true">${escapeHtml(product.icon)}</span>`
+                : `<img src="images/default-product.png" alt="" loading="lazy">`;
+
+        return `
+        <div class="product-card ${activeClass}" data-id="${safeProductId}" data-qty="${quantity}" data-available="${available ? "true" : "false"}" role="button" tabindex="0">
+            <div class="product-body">
+                <p class="product-title">${dietMarkHtml(product.diet)}<span class="product-name">${safeProductName}</span></p>
+                ${description ? `<p class="product-desc">${escapeHtml(description)}</p>` : ""}
+                ${(() => {
+                    const badges = badgesFor(product);
+                    return badges.length
+                        ? `<p class="product-badges">${badges.map(b => `<span class="dish-badge dish-badge-${b.kind}">${escapeHtml(b.word)}</span>`).join("")}</p>`
+                        : "";
+                })()}
+                <p class="product-price">${escapeHtml(marketPriced ? t("Market price") : money(price))}</p>
+                ${meta.length ? `<div class="product-meta">${meta.map(m => `<span>${escapeHtml(m)}</span>`).join("")}</div>` : ""}
+            </div>
+            <div class="product-media">
+                ${media}
+                ${marketPriced ? `
+                <p class="product-ask">${escapeHtml(t("Ask staff for today's price"))}</p>
+                ` : `
+                <div class="cart-controls" aria-label="Quantity">
+                    <button type="button" class="btn-decrease" data-id="${safeProductId}" aria-label="One fewer" ${quantity <= 0 ? 'disabled' : ''}>&minus;</button>
+                    <span class="product-qty" data-id="${safeProductId}" aria-live="polite">${quantity}</span>
+                    <button type="button" class="btn-increase" data-id="${safeProductId}" aria-label="Add one"><span class="add-word">Add</span><span class="add-plus" aria-hidden="true">+</span></button>
+                </div>
+                `}
+            </div>
+        </div>`;
+    }
+}
+
+/*
+ * Draw a flat list of cards. What a SEARCH answers with.
+ *
+ * A search spans the whole menu, so what comes back is not a section and must
+ * not be dressed as one - somebody who typed "biryani" is asking the
+ * restaurant a question, not browsing Rice & Biryani.
+ */
+async function renderProductCards(list) {
+    if (!document.getElementById("product-list")) return;
+
+    const storedCart = await getCartData();
+    const cartByProductId = new Map(storedCart.map(item => [String(item.id), item]));
+
+    /* Wrapped in its own grid: the container is a plain block so that a
+       section and a search result are laid out by the same rule, one level
+       down, rather than one of them inheriting a grid from its parent. */
+    $("#product-list").html('<div class="product-grid">' + (list || []).map(function (product) {
+        const cartItem = cartByProductId.get(String(product.id ?? ""));
+        return cardHtml(product, cartItem ? Number(cartItem.quantity) || 0 : 0);
+    }).join("") + '</div>');
+
+    await updateCart(storedCart);
+    const loader = document.getElementById('page-loader');
+    if (loader) loader.style.display = 'none';
+}
+
+/*
+ * Draw the WHOLE MENU, grouped under its section headings.
+ *
+ * Owner: "/menu/ is not same as /order/table/123 coz inside there is not menu
+ * button. thats actually good. its grouping the menu and easy to navigate.
+ * add it here too."
+ *
+ * He is right, and driving both pages showed it is worse than a missing
+ * button. The ordering page drew ONE category at a time and opened on
+ * whichever sorted first - so a customer at table 34 of a restaurant opened
+ * the page and saw a single A5 ruled notebook, with 85% of the screen blank
+ * and the words "32 dishes" above it. Every dish in the place was two taps
+ * away behind a chip strip whose second chip was already cut off by the edge
+ * of the screen.
+ *
+ * The public menu had none of that: fourteen sections, everything under a
+ * heading, scroll and you have read the menu. That is what a menu is, and the
+ * page people actually order from is the one that needed it most.
+ *
+ * So the chips stop SWITCHING and start JUMPING, which is what a chip strip
+ * over a grouped page means everywhere else in the world.
+ */
+async function renderWholeMenu(bySection) {
+    if (!document.getElementById("product-list")) return;
+
+    const storedCart = await getCartData();
+    const cartByProductId = new Map(storedCart.map(item => [String(item.id), item]));
+
+    const sections = (bySection || []).filter(s => (s.items || []).length);
+
+    $("#product-list").html(sections.map(function (section) {
+        const cards = section.items.map(function (product) {
+            const cartItem = cartByProductId.get(String(product.id ?? ""));
+            return cardHtml(product, cartItem ? Number(cartItem.quantity) || 0 : 0);
+        }).join("");
+
+        /* The count under each heading is not decoration: it is what tells
+           somebody whether a section is worth scrolling into before they
+           have scrolled into it. */
+        const many = section.items.length !== 1;
+        return `
+        <section class="menu-section" data-section="${escapeHtml(String(section.key))}">
+            <h3 class="menu-section-name" id="sec-${escapeHtml(String(section.key))}" tabindex="-1">${escapeHtml(String(section.name))}</h3>
+            <p class="menu-section-count">${escapeHtml(t(many ? "{n} items" : "{n} item", { n: section.items.length }))}</p>
+            <div class="product-grid">${cards}</div>
+        </section>`;
+    }).join(""));
+
+    watchSections();
+    fillMenuIndex(sections);
+    fillFilters();
+
+    await updateCart(storedCart);
+    const loader = document.getElementById('page-loader');
+    if (loader) loader.style.display = 'none';
+}
+
+/*
+ * Light the chip for the section being read.
+ *
+ * Without this the strip is a set of links that never answer back, and after
+ * one scroll it is lying about where you are. The rail on a wide screen shows
+ * the same state from the same observer, so the two cannot disagree.
+ *
+ * rootMargin pulls the trigger line down near the top of the viewport: the
+ * section people are READING is the one under the header, not whichever
+ * happens to be crossing the middle of the screen.
+ */
+var sectionWatcher = null;
+function watchSections() {
+    if (sectionWatcher) sectionWatcher.disconnect();
+    if (typeof IntersectionObserver !== "function") return;
+
+    sectionWatcher = new IntersectionObserver(function (entries) {
+        if (atTheBottom()) return lightLastSection();
+        var top = entries
+            .filter(e => e.isIntersecting)
+            .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+        if (!top) return;
+        lightChip(String(top.target.getAttribute("data-section") || ""));
+    }, { rootMargin: "-88px 0px -70% 0px", threshold: 0 });
+
+    document.querySelectorAll(".menu-section").forEach(s => sectionWatcher.observe(s));
+
+    /*
+     * THE LAST SECTION CAN NEVER WIN THE BAND.
+     *
+     * The trigger line sits just under the header, and the page runs out of
+     * scroll before the last heading can reach it. So tapping "Desserts" in
+     * the menu sheet scrolled correctly to the desserts, which filled the
+     * screen - and left "Drinks" lit, because Drinks was the last heading
+     * that got under the line. A guest who asked for desserts, got desserts,
+     * and is told they are in Drinks concludes the button is broken.
+     *
+     * Every scrolling menu meets this and the answer is the same everywhere:
+     * at the bottom of the page you are in the last section, whatever the
+     * observer thinks. Bound once here rather than inside the observer so it
+     * also fires on an ordinary scroll to the end, not only on a jump.
+     */
+    window.removeEventListener("scroll", onScrollEnd);
+    window.addEventListener("scroll", onScrollEnd, { passive: true });
+}
+
+/* Within a few pixels: a phone's momentum scroll rarely lands exactly on
+   the last pixel, and a rule that needs it to would almost never fire. */
+function atTheBottom() {
+    var doc = document.documentElement;
+    var y = window.scrollY || doc.scrollTop || 0;
+    return y + window.innerHeight >= (doc.scrollHeight || 0) - 4;
+}
+
+function lightLastSection() {
+    var all = document.querySelectorAll(".menu-section");
+    if (!all.length) return;
+    lightChip(String(all[all.length - 1].getAttribute("data-section") || ""));
+}
+
+function onScrollEnd() {
+    if (atTheBottom()) lightLastSection();
+}
+
+/*
+ * FILTERS THAT ONLY OFFER WHAT THIS MENU CAN ANSWER.
+ *
+ * Owner: "very user friend ux and advanced options to choose" and, in the
+ * same breath, "filter options. not too annoying make it very very
+ * professional and neat."
+ *
+ * Those two are usually a trade and here they are not, because the honest
+ * version is also the smaller one: a filter is offered only when at least one
+ * dish on THIS menu carries it, with the count beside it. A shop that has
+ * entered no nutrition sees no health filters and no button at all - not an
+ * empty sheet, and never a filter that can only ever return nothing.
+ *
+ * That also makes the list self-explaining. "Gluten free 4" says both what
+ * the filter does and what it is worth, and a guest who ticks it cannot be
+ * surprised by the result.
+ */
+const FILTER_TAG_WORDS = {
+    plant_based: "Plant based",
+    eggetarian: "Eggetarian",
+    jain: "Jain",
+    satvik: "Satvik",
+    gluten_free: "Gluten free",
+    dairy_free: "Dairy free",
+    lactose_free: "Lactose free",
+    nut_free: "Nut free",
+    organic: "Organic",
+    no_added_sugar: "No added sugar"
+};
+
+const FILTER_CLAIM_WORDS = {
+    high_protein: "High protein",
+    protein_source: "Source of protein",
+    low_fat: "Low fat",
+    high_fibre: "High fibre",
+    keto_friendly: "Keto friendly",
+    low_carb: "Low carb",
+    diabetic_friendly: "Diabetic friendly",
+    heart_healthy: "Heart healthy",
+    under_300: "Under 300 kcal",
+    under_500: "Under 500 kcal",
+    no_added_sugar: "No added sugar"
+};
+
+/** How many dishes on the whole menu carry each key of one field. */
+function countBy(field, allowed) {
+    var counts = Object.create(null);
+    allProducts().forEach(function (p) {
+        var keys = Array.isArray(p[field]) ? p[field] : [];
+        keys.forEach(function (k) {
+            if (allowed[k]) counts[k] = (counts[k] || 0) + 1;
+        });
+    });
+    return counts;
+}
+
+function filterGroupHtml(title, field, allowed, chosen) {
+    var counts = countBy(field, allowed);
+    var keys = Object.keys(allowed).filter(function (k) { return counts[k]; });
+    if (!keys.length) return "";
+
+    return '<section class="filters-group">'
+        + '<h3 class="filters-group-name">' + escapeHtml(t(title)) + '</h3>'
+        + '<div class="filters-pills">'
+        + keys.map(function (k) {
+            var on = chosen.indexOf(k) !== -1;
+            return '<label class="filters-pill"' + (on ? ' data-on="true"' : '') + '>'
+                + '<input type="checkbox" data-field="' + escapeHtml(field) + '" value="' + escapeHtml(k) + '"' + (on ? ' checked' : '') + '>'
+                + '<span>' + escapeHtml(t(allowed[k])) + '</span>'
+                + '<b>' + counts[k] + '</b>'
+                + '</label>';
+        }).join("")
+        + '</div></section>';
+}
+
+function fillFilters() {
+    var groups = document.getElementById("filters-groups");
+    var button = document.getElementById("order-filter-more");
+    if (!groups || !button) return;
+
+    var html = filterGroupHtml("What you can eat", "tags", FILTER_TAG_WORDS, orderView.tags)
+        + filterGroupHtml("Good for", "claims", FILTER_CLAIM_WORDS, orderView.claims);
+
+    /* The button always stands now, because sorting is always worth
+       offering; the filter GROUPS are what appear only when this menu can
+       answer them. A shop that has entered no nutrition gets a sheet with
+       sorting in it and nothing else, which is honest and still useful. */
+    button.hidden = false;
+    groups.innerHTML = html;
+
+    var chosen = orderView.tags.length + orderView.claims.length;
+    var badge = document.getElementById("order-filter-count");
+    if (badge) {
+        badge.hidden = chosen === 0;
+        badge.textContent = String(chosen);
+    }
+    button.setAttribute("aria-pressed", chosen ? "true" : "false");
+}
+
+/* How many dishes the sheet's current ticks would leave, so the button at the
+   bottom says what pressing it does rather than just "Apply". */
+function paintFilterCount() {
+    var apply = document.getElementById("filters-apply");
+    if (!apply) return;
+    var n = orderViewList(allProducts()).length;
+    apply.textContent = n === 1 ? t("Show 1 dish") : t("Show {n} dishes", { n: n });
+    apply.disabled = n === 0;
+}
+
+$(document).on("click", "#order-filter-more", function (e) {
+    e.preventDefault();
+    fillFilters();
+    paintFilterCount();
+    var sheet = document.getElementById("filters");
+    if (!sheet) return;
+    if (typeof sheet.showModal === "function") sheet.showModal();
+    else sheet.setAttribute("open", "open");
+});
+
+function closeFilters() {
+    var sheet = document.getElementById("filters");
+    if (!sheet) return;
+    if (typeof sheet.close === "function") sheet.close();
+    else sheet.removeAttribute("open");
+}
+
+$(document).on("click", "#filters-close, #filters-apply", function (e) {
+    e.preventDefault();
+    closeFilters();
+});
+
+$(document).on("click", "#filters-clear", async function (e) {
+    e.preventDefault();
+    orderView.tags = [];
+    orderView.claims = [];
+    fillFilters();
+    paintFilterCount();
+    await refreshProductView();
+});
+
+/*
+ * A tick narrows the menu straight away, behind the sheet.
+ *
+ * Deliberately not on Apply. The count on the button is the answer to "what
+ * will this do", and the page behind is already that answer - so closing the
+ * sheet is confirmation of something already seen, not a commit step that can
+ * surprise somebody.
+ */
+$(document).on("change", "#filters-groups input[type=checkbox]", async function () {
+    var field = String($(this).data("field") || "");
+    var value = String(this.value || "");
+    if (field !== "tags" && field !== "claims") return;
+
+    var list = orderView[field];
+    var at = list.indexOf(value);
+    if (this.checked && at === -1) list.push(value);
+    if (!this.checked && at !== -1) list.splice(at, 1);
+
+    $(this).closest(".filters-pill").attr("data-on", this.checked ? "true" : null);
+
+    await refreshProductView();
+    paintFilterCount();
+
+    var badge = document.getElementById("order-filter-count");
+    var chosen = orderView.tags.length + orderView.claims.length;
+    if (badge) {
+        badge.hidden = chosen === 0;
+        badge.textContent = String(chosen);
+    }
+});
+
+/*
+ * THE MENU BUTTON: the contents page of the menu.
+ *
+ * Filled from the sections that are actually drawn, so a section filtered
+ * away by "Veg only" is not offered here either - an index that lists a
+ * section and then jumps to nothing is worse than no index.
+ *
+ * Hidden entirely below four sections. A contents page for three headings
+ * that are all on the screen already is a button that exists to be ignored,
+ * and the one thing this page cannot afford is another control.
+ */
+var INDEX_WORTH_IT = 4;
+
+/*
+ * A PICTURE FOR A SECTION, WITHOUT A FIELD FOR ONE.
+ *
+ * Owner: "if possible have category image ( menu ). show some image as
+ * ccategory. how many items inside."
+ *
+ * A category has no image of its own anywhere in the product, and adding one
+ * would mean a new field, a new upload, and a shop photographing fourteen
+ * categories before this button is worth pressing - which means it stays
+ * empty everywhere, like every other optional image.
+ *
+ * So the section borrows from the food. The first dish with a photograph
+ * stands for the section, which is what a person would have chosen anyway;
+ * failing that the first emoji, which utils/dish-icons.js puts on almost
+ * every dish from its name alone; and failing both, a letter. Every section
+ * therefore has something to look at on the day this ships, with nobody
+ * uploading anything.
+ */
+function sectionPicture(section) {
+    var items = section.items || [];
+
+    for (var i = 0; i < items.length; i++) {
+        if (items[i] && items[i].img) {
+            /* Eager, unlike every other image on this page. The sheet is
+               short, the tiles are small, and most of these URLs are already
+               cached from the menu underneath - and a contents page that
+               opens half blank and fills in as you scroll is the thing that
+               made it look unfinished. */
+            return '<img src="' + escapeHtml(getSafeImageUrl(items[i].img)) + '" alt="" decoding="async">';
+        }
+    }
+
+    for (var j = 0; j < items.length; j++) {
+        if (items[j] && items[j].icon) {
+            return '<span class="menu-index-emoji" aria-hidden="true">' + escapeHtml(items[j].icon) + '</span>';
+        }
+    }
+
+    /* The section's own initial. Never empty, never a broken image. */
+    var letter = String(section.name || "?").trim().charAt(0).toUpperCase();
+    return '<span class="menu-index-letter" aria-hidden="true">' + escapeHtml(letter) + '</span>';
+}
+
+function fillMenuIndex(sections) {
+    var list = document.getElementById("menu-index-list");
+    var button = document.getElementById("menu-index-btn");
+    if (!list || !button) return;
+
+    var worth = (sections || []).filter(function (s) { return (s.items || []).length; });
+    button.hidden = worth.length < INDEX_WORTH_IT;
+    if (button.hidden) return;
+
+    list.innerHTML = worth.map(function (s) {
+        var many = s.items.length !== 1;
+        return '<button type="button" class="menu-index-row" data-go="' + escapeHtml(String(s.key)) + '">'
+            + '<span class="menu-index-pic">' + sectionPicture(s) + '</span>'
+            + '<span class="menu-index-words">'
+            + '<span class="menu-index-name">' + escapeHtml(String(s.name)) + '</span>'
+            + '<span class="menu-index-count">' + escapeHtml(t(many ? "{n} items" : "{n} item", { n: s.items.length })) + '</span>'
+            + '</span>'
+            + '</button>';
+    }).join("");
+}
+
+function openMenuIndex() {
+    var sheet = document.getElementById("menu-index");
+    if (!sheet) return;
+    if (typeof sheet.showModal === "function") sheet.showModal();
+    else sheet.setAttribute("open", "open");
+}
+
+function closeMenuIndex() {
+    var sheet = document.getElementById("menu-index");
+    if (!sheet) return;
+    if (typeof sheet.close === "function") sheet.close();
+    else sheet.removeAttribute("open");
+}
+
+$(document).on("click", "#menu-index-btn", function (e) {
+    e.preventDefault();
+    openMenuIndex();
+});
+
+$(document).on("click", "#menu-index-close", function (e) {
+    e.preventDefault();
+    closeMenuIndex();
+});
+
+/* Close FIRST, then jump. A dialog still open while the page scrolls under
+   it means the guest watches nothing happen and taps again. */
+$(document).on("click", ".menu-index-row", function (e) {
+    e.preventDefault();
+    var key = String($(this).attr("data-go") || "");
+    closeMenuIndex();
+    if (key) showCategory(key, this);
+});
+
+/** One chosen chip, in both lists, and dragged into view in the strip. */
+function lightChip(key) {
+    if (!key) return;
+    localStorage.setItem("lastActiveCategory", key);
+
+    $(".category-item").removeClass("active");
+    var chosen = $(".category-item").filter((_, chip) => String($(chip).attr("data-category")) === key);
+    chosen.addClass("active");
+
+    /* A lit chip off the end of a scrolling strip is the same as no lit chip.
+       Only the horizontal strip is scrolled; the rail is a column and moving
+       it under somebody's reading finger would be worse than leaving it. */
+    var chip = chosen.filter((_, el) => !!el.closest(".category-scroll-container"))[0];
+    if (chip && typeof chip.scrollIntoView === "function") {
+        chip.scrollIntoView({ block: "nearest", inline: "center", behavior: "smooth" });
+    }
+}
+
+// ✅ Event Binding for `.product-card` Clicks
+// $(document).on("click", ".product-card", async function () {
+//     let productId = $(this).data("id");
+//     await updateQuantity(productId, 1);
+// });
+// ✅ Update Quantity and Save to IndexedDB
+/*
+ * A BASKET LINE IS A DISH AND A CHOICE, NOT A DISH.
+ *
+ * Two dosas, one with extra cheese, are two lines. The basket has always been
+ * keyed by the dish's id, so a second dosa found the first line and added to
+ * it - which is right until the two are not the same thing. Picking cheese on
+ * the second would have silently changed the first, and the kitchen would
+ * have made two cheesy dosas for somebody who asked for one.
+ *
+ * So the KEY becomes the dish plus what was chosen, and the dish's real id
+ * rides alongside as `item_id`. Everything that looks a dish up from a line
+ * reads `item_id` first and falls back to `id`, which is what a line written
+ * before this change still carries.
+ *
+ * Sorted before it is joined, so the same two options picked in either order
+ * are one line rather than two.
+ */
+function optionKey(itemId, chosen) {
+    const picked = (Array.isArray(chosen) ? chosen : [])
+        .filter((one) => one && one.group && one.name)
+        .map((one) => String(one.group) + "\u001f" + String(one.name))
+        .sort();
+    return picked.length ? String(itemId) + "\u001e" + picked.join("\u001d") : String(itemId);
+}
+
+/** The dish a basket line is for. `id` alone is a line written before options. */
+function dishIdOf(line) {
+    return String((line && (line.item_id || line.id)) || "");
+}
+
+/** What the chosen extras add to one unit, for the price shown on the page. */
+function extrasFor(chosen) {
+    return (Array.isArray(chosen) ? chosen : []).reduce(
+        (sum, one) => sum + (Number(one && one.price_delta) || 0),
+        0
+    );
+}
+
+/*
+ * Put a dish in the basket with the extras that were chosen for it.
+ *
+ * Goes through KioskCore.changeCartQuantity like every other add, so there is
+ * one rule about what a line looks like - then stamps the three fields that
+ * rule knows nothing about.
+ */
+async function addWithOptions(itemId, chosen, change) {
+    const storedProducts = await getData("products");
+    const product = storedProducts.find((one) => String(one.id) === String(itemId));
+    if (!product) return null;
+
+    const key = optionKey(itemId, chosen);
+    const cart = await getCartData();
+    /* The product under a line key, so a new line carries the dish's name and
+       price while being keyed by the choice. */
+    const result = KioskCore.changeCartQuantity(cart, { ...product, id: key }, key, change);
+    const line = result.cart.find((one) => String(one.id) === key);
+    if (line) {
+        line.item_id = String(itemId);
+        line.chosen = (Array.isArray(chosen) ? chosen : []).filter((one) => one && one.group && one.name);
+        /* The shop prices the extras itself; this is what the page shows. */
+        line.price = (Number(product.price) || 0) + extrasFor(line.chosen);
+    }
+    await saveCartData(result.cart);
+    await updateCart();
+    return line;
+}
+
+async function updateQuantity(id, change) {
+    clearOrderAttemptId();
+    const storedProducts = await getData("products");
+    const storedProduct = storedProducts.find(item => String(item.id) === String(id));
+    const currentCart = await getCartData();
+    const result = KioskCore.changeCartQuantity(currentCart, storedProduct, id, change);
+    const item = result.item;
+    const cartData = result.cart;
+    if (!item) return;
+
+    // if (storedProduct.available_quantity < item.quantity && change === 1) {
+    //     showPopup();  
+    //     return;
+    // }
+
+    await saveCartData(cartData);
+    updateCart();
+
+    // ✅ Update UI quantity text
+    const $qty = $(".product-qty").filter((_, element) => String($(element).attr("data-id")) === String(id));
+    $qty.text(item.quantity);
+    pop($qty);
+    pop($("#mobile-cart-count"));
+
+    /* The card's state: the pill reads "Add" at zero and "- n +" above it. */
+    const $decreaseBtn = $(".btn-decrease").filter((_, element) => String($(element).attr("data-id")) === String(id));
+    const $productCard = $(".product-card").filter((_, element) => String($(element).attr("data-id")) === String(id));
+    $productCard.attr("data-qty", String(item.quantity));
+    if (item.quantity === 0) {
+        $decreaseBtn.prop("disabled", true);
+        $productCard.removeClass("active");
+    } else {
+        $decreaseBtn.prop("disabled", false);
+        $productCard.addClass("active");
+    }
+
+    /* Said out loud, so the open sheet can follow without reaching in. */
+    document.dispatchEvent(new CustomEvent("posnic:order-changed", {
+        detail: { id: String(id), quantity: item.quantity }
+    }));
+}
+
+/* A number that changed pops once, so the eye is told which one. */
+function pop($el) {
+    if (!$el || !$el.length) return;
+    $el.removeClass("pop");
+    void $el[0].offsetWidth;
+    $el.addClass("pop");
+}
+
+/*
+ * The order so far, on a wide screen, where the bottom bar would be on a
+ * phone: one line per dish, the total, and the way on.
+ */
+function renderOrderPanel(cartData) {
+    const lines = document.getElementById("order-panel-lines");
+    if (!lines) return;
+
+    const rows = (cartData || []).filter(item => (Number(item.quantity) || 0) > 0);
+    if (!rows.length) {
+        lines.innerHTML = '<p class="order-panel-empty">Nothing yet. Add a dish to start.</p>';
+    } else {
+        lines.innerHTML = rows.map(item => {
+            const quantity = Number(item.quantity) || 0;
+            const lineTotal = quantity * (Number(item.price) || 0);
+            return `<div class="panel-line" data-item-id="${escapeHtml(String(item.id ?? ""))}">
+                <span class="panel-line-qty">${quantity}&times;</span>
+                <span class="panel-line-name">${escapeHtml(String(item.name ?? "Unknown"))}</span>
+                <span class="panel-line-total">${escapeHtml(money(lineTotal))}</span>
+            </div>`;
+        }).join("");
+    }
+
+    const total = rows.reduce((sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.price) || 0), 0);
+    $("#order-panel-total").text(money(total));
+    $("#order-panel-next").prop("disabled", rows.length === 0);
+}
+
+/*
+ * Which sections have something in the order, and how much.
+ *
+ * A small count on the chip - in the strip and in the rail - so a customer
+ * three sections away can see at a glance that two things from Starters are
+ * already on the bill. Owner: "keep that category with little highlight that
+ * some items we added from that category."
+ */
+/*
+ * WHETHER THE HEADING IS SAYING ANYTHING THE CHIPS HAVE NOT.
+ *
+ * With one category chosen it repeated the selected chip word for word, two
+ * rows below it, and cost 60px at the top of the busiest screen in the
+ * product. The stylesheet stands it down on `body.one-section`; this is the
+ * one place that decides. It stays for the whole menu and for search results,
+ * where it is naming something no chip is.
+ */
+function sayWhetherOneSection(on) {
+    try {
+        document.body.classList.toggle("one-section", !!on);
+    } catch (e) {
+        /* no body yet; the next paint sets it */
+    }
+}
+
+function markCategories(cartData) {
+    if (typeof products !== "object" || !products) return;
+    const byId = new Map((cartData || []).map(line => [String(line.id), Number(line.quantity) || 0]));
+    Object.keys(products).forEach(key => {
+        const count = (products[key] || []).reduce((sum, p) => sum + (byId.get(String(p.id)) || 0), 0);
+        $(".category-item").filter((_, chip) => String($(chip).attr("data-category")) === key)
+            .attr("data-count", String(count))
+            .toggleClass("has-items", count > 0);
+    });
+}
+
+async function updateCart(cartData = null) {
+    let totalQty = 0;
+    let totalPrice = 0;
+
+    try {
+        const storedCart = cartData ?? await getCartData();
+
+        storedCart.forEach(item => {
+            totalQty += item.quantity;
+            totalPrice += item.quantity * item.price;
+
+            // ✅ Update UI for each item
+            $(".product-qty").filter((_, element) => (
+                String($(element).attr("data-id")) === String(item.id)
+            )).text(item.quantity);
+        });
+
+        /*
+         * The bar: gone while there is nothing in it, back the moment there
+         * is. The click that opens the order is bound once, by the page
+         * script, and only answers while the class is off - this used to
+         * bind a fresh handler on every change and never let go of the old
+         * ones.
+         */
+        const itemsWord = totalQty === 1 ? "item" : "items";
+        $(".next-page").toggleClass("disabled", totalQty === 0);
+        $("#bill-bar").toggleClass("is-empty", totalQty === 0);
+        $("#mobile-cart-count").attr("data-zero", totalQty === 0 ? "true" : "false");
+
+        $("#cart-qty,#mobile-cart-count").text(totalQty);
+        $("#cart-qty-word").text(itemsWord);
+        $("#cart-total").text(money(totalPrice));
+        $("#summary-display").text(t("{n} " + itemsWord, { n: totalQty }) + " · " + money(totalPrice));
+        $("#next-btn").prop("disabled", totalQty === 0);
+        renderOrderPanel(storedCart);
+        markCategories(storedCart);
+    } catch (error) {
+        console.error("❌ Error updating cart:", error);
+    }
+}
+
+// ✅ Check if IndexedDB has a branch and redirect
+async function checkBranchAndRedirect() {
+    const branches = await getData(BRANCH_STORE);
+    if (branches.length > 0) {
+        console.log("✅ Branch already exists, skipping redirect.");
+        return;
+    } else {
+        const db = await getDB();
+        const tx = db.transaction([BRANCH_STORE, STORE_NAME, CART_STORE, PHONEPE_STORE, IMAGE_STORE, PAYMENT_STORE], "readwrite");
+
+        tx.objectStore(BRANCH_STORE).clear();
+        tx.objectStore(STORE_NAME).clear();
+        tx.objectStore(CART_STORE).clear();
+        tx.objectStore(PHONEPE_STORE).clear();
+        tx.objectStore(IMAGE_STORE).clear();
+        tx.objectStore(PAYMENT_STORE).clear();
+        console.log("🚀 First-time branch entry required.");
+
+    }
+}
+
+// ✅ Refresh IndexedDB every 1 minute without redirect
+(async () => {
+    await loadEnvConfig();
+
+    // ✅ Now safe to call functions that depend on CONFIG
+    await checkBranchAndRedirect();
+
+    let isBackgroundRefreshRunning = false;
+    setInterval(async () => {
+        if (isBackgroundRefreshRunning) return;
+        isBackgroundRefreshRunning = true;
+        console.log("🔄 Checking for product updates...");
+        try {
+            const branchId = await knownBranchId();
+            if (branchId) {
+                await fetchAndStoreBranch(branchId, false, { silent: true });
+            }
+        } finally {
+            isBackgroundRefreshRunning = false;
+        }
+    }, 10000);
+})();
+
+// ✅ Run branch check on page load
+checkBranchAndRedirect();
+
+
+async function getCartData() {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction("cart", "readonly");
+        const store = transaction.objectStore("cart");
+        const request = store.getAll();
+
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = (error) => reject(error);
+    });
+}
+
+async function getProductById(id) {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction("products", "readonly");
+        const store = transaction.objectStore("products");
+        const request = store.get(id);
+
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = (error) => reject(error);
+    });
+}
+
+async function saveCartData(cart) {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction("cart", "readwrite");
+        const store = transaction.objectStore("cart");
+
+        store.clear();
+        cart.forEach(item => store.put(item));
+
+        transaction.oncomplete = () => {
+            console.log("✅ Cart Updated in IndexedDB");
+            resolve();
+        };
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error || new Error("Cart update transaction was aborted."));
+    });
+}
+
+function onCancelClick() {
+    const cancelModal = document.getElementById("cancelModal");
+    if (cancelModal) cancelModal.style.display = "flex";
+}
+
+async function confirmCancelOrder() {
+    // Clear the cart
+    await saveCartData([]); // Clear IndexedDB cart
+    clearOrderAttemptId();
+    sessionStorage.removeItem("kiosk_mobile_number");
+    sessionStorage.removeItem("kioskReceipt");
+    sessionStorage.removeItem("qr_id");
+    localStorage.removeItem("kiosk_mobile_number"); // Remove data left by older versions.
+    localStorage.removeItem("kioskReceipt");
+    localStorage.removeItem("qr_id");
+    const cartSummary = document.getElementById("cart-summary");
+    if (cartSummary) cartSummary.innerHTML = ""; // Clear cart UI
+    const summaryDisplay = document.getElementById("summary-display");
+    if (summaryDisplay) summaryDisplay.textContent = `0 items · ${money(0)}`;
+    closeCancelModal(); // Close the modal
+
+    // Optional redirect to products page
+    window.location.href = "products.html";
+}
+
+function closeCancelModal() {
+    const cancelModal = document.getElementById("cancelModal");
+    if (cancelModal) cancelModal.style.display = "none";
+}
+
+// ✅ Load cart from IndexedDB on page load
+async function loadCart() {
+    const cartItems = await getCartData();
+    let cart = cartItems.reduce((acc, item) => {
+        acc[item.id] = item;
+        return acc;
+    }, {});
+
+    console.log("🛒 Loaded Cart from IndexedDB:", cart);
+    return cart; // ✅ Return cart data
+}
+
+async function checkout(transactionId, paymentStatus = "Upi", options = {}) {
+    if (checkoutSingleFlight.isRunning()) {
+        console.warn("Checkout already in progress; reusing the active request.");
+    }
+
+    return checkoutSingleFlight.run(async () => {
+        hideAppErrorScreen();
+        showOrderProcessingScreen("Payment is being confirmed and your order is being created. Please do not close or refresh this page.");
+        try {
+            const completed = await performCheckout(transactionId, paymentStatus, options);
+            if (!completed) hideOrderProcessingScreen();
+            return completed;
+        } catch (error) {
+            hideOrderProcessingScreen();
+            throw error;
+        }
+    });
+}
+
+/**
+ * A stored string that actually says something.
+ *
+ * Browser storage keeps strings and nothing else, so `setItem(k, null)` comes
+ * back as "null" and `setItem(k, undefined)` as "undefined" - both truthy,
+ * both useless, and both have shipped as "+91null" on a real order.
+ */
+function notAWord(value) {
+    const text = String(value == null ? "" : value).trim();
+    if (!text || text === "null" || text === "undefined" || text === "NaN") return "";
+    return text;
+}
+
+async function performCheckout(transactionId, paymentStatus = "Upi", options = {}) {
+    try {
+        // 🔄 Get cart data from IndexedDB
+        const cartItems = await getCartData();
+        console.log('cartItems:', cartItems);
+
+        if (!cartItems || cartItems.length === 0) {
+            console.log("Cart is empty.");
+            return false;
+        }
+
+        /*
+         * The discount code this basket is carrying, if any.
+         *
+         * The CODE and nothing else. What it is worth is decided by the shop
+         * from its own coupon document, and an order carrying one the shop
+         * will not honour is refused rather than charged at full price - so
+         * nobody can be charged more than the number they agreed to.
+         */
+        let couponCode = "";
+        try {
+            couponCode = String(localStorage.getItem("posnic.promo-code") || "").trim();
+        } catch (e) {
+            /* A browser that keeps nothing orders without a code. */
+        }
+
+        // 🧾 Prepare payload: [{ id, quantity }]
+        const payload = cartItems.map(item => {
+            return {
+                /*
+                 * The DISH, not the line. A line for a dish with extras is
+                 * keyed by the choice, and sending that key would be sending
+                 * the shop an id it has never heard of.
+                 */
+                item_id: dishIdOf(item) || item.id,
+                item_quantity: item.quantity,
+                /*
+                 * What was chosen, by NAME, and never what it costs. The shop
+                 * prices its own extras from its own option documents - see
+                 * _priceModifiers in sale.repository.js - so a page that sent
+                 * a delta would either be ignored or believed, and both are
+                 * worse than not sending one.
+                 */
+                modifiers: (Array.isArray(item.chosen) ? item.chosen : []).map((one) => ({
+                    group: String(one.group || ""),
+                    name: String(one.name || "")
+                })),
+                gst: item.tax_price * item.quantity,
+                /* What the customer asked for on this line; printed on the
+                   kitchen ticket under the dish. */
+                item_note: String(item.note || "").trim().slice(0, 200),
+                /*
+                 * How hot, as a number rather than as a sentence in the note.
+                 * A level prints the same on every ticket whatever language
+                 * the order was placed in, and can be counted afterwards. The
+                 * server refuses anything that is not 1, 2 or 3.
+                 */
+                spice_level: window.PosnicSpice ? window.PosnicSpice.levelOf(item.spice) : 0
+            };
+        });
+
+        // 🏪 Get branch ID
+        const branchId = (await knownBranchId()) || null;
+        const orderType = localStorage.getItem("orderType");
+        /* "null" is what setItem(null) stores, and it was reaching tickets. */
+        const rawNote = localStorage.getItem('note');
+        const note = rawNote && rawNote !== "null" && rawNote !== "undefined" ? String(rawNote).trim().slice(0, 300) : "";
+        /* How the food travels and, for a delivery, to whom. Chosen on the
+           payment page; the table comes from the printed code first and a
+           typed table number second. */
+        const fulfilment = localStorage.getItem("order_fulfilment") || "";
+        const point = window.KioskServicePoint ? window.KioskServicePoint.orderFields() : {};
+        const table = String(point.table || localStorage.getItem("order_table") || "").trim();
+        const customerName = String(localStorage.getItem("order_customer_name") || "").trim().slice(0, 80);
+        const customerAddress = String(localStorage.getItem("order_customer_address") || "").trim().slice(0, 300);
+
+        const productsRefreshed = await fetchAndStoreBranch(branchId, false);
+        if (!productsRefreshed) return false;
+
+        if (!branchId) {
+            console.log("Branch not found.");
+            return false;
+        }
+        /*
+         * "null" IS A STRING, AND IT IS TRUTHY.
+         *
+         * Owner's screenshot of the order queue: a customer row reading
+         * "+91null". sessionStorage only stores strings, so anything that
+         * writes an absent value writes the WORD - and `saved ? '+91' + saved
+         * : ''` then happily builds a phone number out of it. The guard on
+         * that line was already there and could not help.
+         *
+         * Fixed at the READ rather than at each writer: the voice line, the
+         * payment page and whatever comes next all land here, and a reader
+         * that cannot be fooled is one place instead of three.
+         */
+        const savedNumber = notAWord(sessionStorage.getItem("kiosk_mobile_number"));
+        const generatedTokenId = generateUniqueToken();
+        const orderAttemptId = getOrCreateOrderAttemptId();
+
+        // 🚀 Send checkout request
+        const response = await fetch(
+            `${CONFIG.API_BASE_URL}/online-ordering/${encodeURIComponent(branchId)}/orders`,
+            {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+            body: JSON.stringify({
+                items: payload,
+                /* What this device is, for the shop's own records. */
+                client: typeof clientFacts === "function" ? clientFacts() : undefined,
+                /*
+                 * A NUMBER, OR NOTHING - NEVER "+91null".
+                 *
+                 * The shop asks for a phone number only where it is switched
+                 * on, so most orders have none; string-concatenating an
+                 * absent one put the literal text "+91null" on the approval
+                 * card, where staff read it as a real number and could not
+                 * ring it. Seen on a real queue: "S-GG69-000017 - Token S570
+                 * - +91null".
+                 *
+                 * The country code belongs to a number that exists. No number
+                 * means no field, which every reader of this payload already
+                 * handles - it is how a takeaway with no phone has always
+                 * arrived.
+                 */
+                customerMobile: savedNumber ? '+91' + savedNumber : '',
+                transactionId: transactionId,
+                idempotencyKey: orderAttemptId,
+                tokenId: generatedTokenId,
+                payment_status: paymentStatus,
+                sale_method: 'Self-Order',
+                order: orderType,
+                fulfilment: fulfilment,
+                table: table,
+                /* The code, never a discount. See the comment where it is read. */
+                coupon_code: couponCode,
+                customer_name: customerName,
+                customer_address: customerAddress,
+                note: note,
+                /*
+                 * Which venue and room the printed code named, and what the
+                 * customer confirmed at checkout if they corrected it. Only
+                 * the identity travels: the server looks up what that venue's
+                 * markup and commission are, so nothing here can change what
+                 * anybody is charged or owed.
+                 */
+                ...(window.KioskServicePoint
+                    ? window.KioskServicePoint.orderFields()
+                    : {}),
+            })
+        }
+        );
+
+        const result = await readJsonResponse(response, "Checkout");
+
+        if (result.type === "success") {
+            result.data = result.data || {};
+            const tokenId = result.data.tokenId; // 🔐 3-digit non-repeating token
+            const normalizedTokenId = String(tokenId ?? result.data.token_id ?? result.data.token ?? generatedTokenId);
+            result.data.tokenId = normalizedTokenId;
+            result.data.payment_status = result.data.payment_status || paymentStatus;
+            sessionStorage.setItem("kioskReceipt", JSON.stringify(result.data));
+            /* This phone's own list of what it has ordered: see
+               rememberedOrders above. The shop is asked for the state of
+               each one when the list is drawn. */
+            rememberOrder({
+                orderId: String(result.data.sale_id || ""),
+                token: normalizedTokenId,
+                shop: String(branchId || ""),
+                shopName: String(result.data.branch_name || (typeof shop === "object" && shop ? shop.name : "") || ""),
+                /* WHERE it was placed, so a second order at the same table can
+                   find the first one instead of being refused by the shop's
+                   one-order-per-table rule. */
+                table: String(result.data.table_number || ""),
+                at: new Date().toISOString(),
+                items: (result.data.items || []).map((line) => ({
+                    name: String(line.item_name || line.name || ""),
+                    quantity: Number(line.item_quantity != null ? line.item_quantity : line.quantity || 0)
+                })),
+                total: Number(result.data.total || 0)
+            });
+            localStorage.removeItem("kioskReceipt"); // Remove data left by older versions.
+            console.log(result.data);
+            console.log("✅ Checkout successful! Token:", tokenId);
+            // 🧹 Clear cart in IndexedDB
+            /* Emptied because it was SENT: renderCart must not read this as a
+               customer who changed their mind and walk them back to the menu.
+               See orderJustPlaced above. */
+            orderJustPlaced = true;
+            await saveCartData([]);
+            await renderCart([]);
+            orderJustPlaced = false;
+            sessionStorage.removeItem("kiosk_mobile_number");
+            sessionStorage.removeItem("qr_id");
+            localStorage.removeItem("kiosk_mobile_number"); // Remove data left by older versions.
+            localStorage.removeItem("qr_id");
+            clearOrderAttemptId();
+            hideOrderProcessingScreen();
+            /* A caller with something to say first - the voice, which reads
+               the token out - stays on this page and is handed the token; it
+               moves to the receipt when it is done. */
+            if (options && options.stay) {
+                return {
+                    placed: true,
+                    token: normalizedTokenId,
+                    /* Changing this order later needs its id as well as its
+                       token; the id is what proves the caller placed it. */
+                    saleId: String(result.data.sale_id || result.data.order_id || "")
+                };
+            }
+            window.location.href = `thankyou.html?token=${encodeURIComponent(normalizedTokenId)}`;
+            return true;
+        } else {
+            const errorMessage = String(result.message || "Checkout request was rejected.");
+            console.error("Checkout failed:", errorMessage);
+
+            /*
+             * ONE OPEN ORDER PER TABLE, AND A DOOR RATHER THAN A WALL.
+             *
+             * The shop refuses a second ticket on a table that already has
+             * one, and says "Add to it, or settle it first" - but the only
+             * button here was Retry, which posts the same order to the same
+             * table and fails the same way for ever. A customer wanting one
+             * more naan met a loop.
+             *
+             * If this phone holds that order, this IS adding to it, which is
+             * what the refusal asked for. If it does not, the order belongs
+             * to somebody else at the table and is not ours to touch: say so
+             * plainly and offer the menu, because Retry would still be a
+             * button that cannot work.
+             */
+            const clash = /already has an open order|already has \d+ open orders/i.test(errorMessage);
+            if (clash) {
+                const joined = await addToMyOpenOrder(payload);
+                if (joined) {
+                    orderJustPlaced = true;
+                    await saveCartData([]);
+                    await renderCart([]);
+                    orderJustPlaced = false;
+                    clearOrderAttemptId();
+                    hideOrderProcessingScreen();
+                    window.location.href = `thankyou.html?token=${encodeURIComponent(joined.token)}`;
+                    return true;
+                }
+                showAppErrorScreen(
+                    "This table already has an order",
+                    "Someone at this table has already ordered. Ask them to add to it, or speak to the counter.",
+                    async () => {
+                        hideAppErrorScreen();
+                        window.location.href = "products.html";
+                    },
+                    { buttonLabel: "Back to the menu" }
+                );
+                return false;
+            }
+
+            showAppErrorScreen(
+                "Order could not be completed",
+                errorMessage,
+                async () => {
+                    hideAppErrorScreen();
+                    const completed = await checkout(transactionId, paymentStatus);
+                    if (!completed) throw new Error("Order retry failed.");
+                },
+                { buttonLabel: "Retry order" }
+            );
+            return false;
+        }
+
+    } catch (error) {
+        console.error("Error during checkout:", error);
+        showAppErrorScreen(
+            "Order could not be completed",
+            error.message || "Checkout failed. Please try again.",
+            async () => {
+                hideAppErrorScreen();
+                const completed = await checkout(transactionId, paymentStatus);
+                if (!completed) throw new Error("Order retry failed.");
+            },
+            { buttonLabel: "Retry order" }
+        );
+        return false;
+    }
+}
+
+function getTodayKey() {
+    const today = new Date();
+    return `kiosk_tokens_${today.getFullYear()}-${today.getMonth() + 1}-${today.getDate()}`;
+}
+
+function getStoredTokens() {
+    const key = getTodayKey();
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : [];
+}
+
+function saveToken(token) {
+    const key = getTodayKey();
+    const tokens = getStoredTokens();
+    tokens.push(token);
+    localStorage.setItem(key, JSON.stringify(tokens));
+}
+
+function getAllPossibleTokens() {
+    const tokens = [];
+    for (let i = 65; i <= 90; i++) { // a to z
+        const prefix = String.fromCharCode(i);
+        for (let j = 1; j <= 999; j++) {
+            tokens.push(`${prefix}${j.toString().padStart(3, '0')}`);
+        }
+    }
+    return tokens;
+}
+
+function generateUniqueToken() {
+    const usedTokens = getStoredTokens();
+    const allTokens = getAllPossibleTokens();
+    const remaining = allTokens.filter(t => !usedTokens.includes(t));
+
+    if (remaining.length === 0) {
+        console.warn("🔁 All tokens used. Resetting for the next cycle.");
+        localStorage.removeItem(getTodayKey());
+        return generateUniqueToken(); // Retry after reset
+    }
+
+    const token = remaining[Math.floor(Math.random() * remaining.length)];
+    saveToken(token);
+    return token;
+}
+
+async function storePhonePeData(id) {
+    try {
+        await saveData(PHONEPE_STORE, [{ id: id }]);
+    } catch (error) {
+        console.error("❌ Error updating PhonePe data:", error);
+    }
+}
+
+async function getFirstPhonePeId() {
+    const phonepeData = await getData(PHONEPE_STORE);
+    if (phonepeData.length > 0) {
+        return phonepeData[0].id;
+    }
+    return null;
+}
+
+function showPopup() {
+    const popup = document.getElementById('popup');
+
+    // Reset the state
+    popup.classList.remove('show');
+    popup.style.display = 'block';
+    void popup.offsetWidth; // force reflow
+
+    // Show with animation
+    popup.classList.add('show');
+
+    // Auto-hide after 3 seconds
+    setTimeout(() => {
+        hidePopup();
+    }, 3000);
+}
+
+function hidePopup() {
+    const popup = document.getElementById('popup');
+    popup.classList.remove('show');
+    setTimeout(() => {
+        popup.style.display = 'none';
+    }, 300); // match transition
+}
+
+// Close on Escape key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        hidePopup();
+    }
+});
+
+
+
+/* ==========================================================================
+ * SEARCH, FILTERS AND SORT on the ordering page.
+ *
+ * This page had none of it. The digital menu at /menu could find a dish and
+ * the page people actually order from could not - category scrolling and
+ * nothing else - so a customer looking for one line in a catalogue of four
+ * hundred scrolled until they gave up.
+ *
+ * SEARCH SPANS EVERY CATEGORY. Somebody typing "biryani" is asking the
+ * restaurant a question, not the Mains tab. So a live search leaves the
+ * category strip behind and shows one flat list of answers, best first, and
+ * the strip comes back the moment the box is cleared.
+ *
+ * The matching arithmetic below is COPIED from menu/menu.js, which itself
+ * carries a port of api/src/utils/menu-search.js. Neither bundle has a build
+ * step; tests/menu-search-parity.test.js pins the copies to the same answers.
+ * ======================================================================== */
+
+function normalize(value) {
+  return String(value == null ? "" : value)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/* Damerau-Levenshtein. The transposition is what makes "biriyani" one
+   mistake rather than two. */
+function editDistance(a, b, budget) {
+  if (a === b) return 0;
+  if (Math.abs(a.length - b.length) > budget) return budget + 1;
+
+  var prev2 = null;
+  var prev = [];
+  for (var k = 0; k <= b.length; k++) prev.push(k);
+
+  for (var i = 1; i <= a.length; i++) {
+    var row = new Array(b.length + 1);
+    row[0] = i;
+    var best = row[0];
+
+    for (var j = 1; j <= b.length; j++) {
+      var cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      var value = Math.min(row[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        value = Math.min(value, prev2[j - 2] + cost);
+      }
+      row[j] = value;
+      if (value < best) best = value;
+    }
+
+    if (best > budget) return budget + 1;
+    prev2 = prev;
+    prev = row;
+  }
+  return prev[b.length];
+}
+
+/* Short words get no slack: with a budget of two, "dal" matches "dosa" and
+   a three-letter search returns the menu. */
+function budgetFor(length) {
+  if (length < 5) return 0;
+  if (length < 8) return 1;
+  return 2;
+}
+
+function scoreWord(query, target) {
+  if (!query || !target) return 0;
+  if (query === target) return 100;
+  if (target.indexOf(query) === 0) return 80;
+  if (target.indexOf(query) !== -1) return 55;
+
+  var budget = budgetFor(query.length);
+  if (!budget) return 0;
+  var distance = editDistance(query, target, budget);
+  if (distance > budget) return 0;
+  return 40 - (distance - 1) * 12;
+}
+
+/* Every query word must find something: somebody who typed two words meant
+   both of them. */
+function scoreItem(query, fields) {
+  var words = normalize(query).split(" ").filter(Boolean);
+  if (!words.length) return { match: true, score: 0 };
+
+  var haystacks = [
+    { text: normalize(fields.name), weight: 1 },
+    { text: normalize(fields.category), weight: 0.5 },
+    { text: normalize(fields.description), weight: 0.35 },
+  ].filter(function (h) {
+    return h.text;
+  });
+
+  var total = 0;
+  for (var w = 0; w < words.length; w++) {
+    var word = words[w];
+    var bestForWord = 0;
+
+    for (var h = 0; h < haystacks.length; h++) {
+      var hay = haystacks[h];
+      if (hay.text.indexOf(word) !== -1) {
+        bestForWord = Math.max(bestForWord, 70 * hay.weight);
+      }
+      var parts = hay.text.split(" ");
+      for (var p = 0; p < parts.length; p++) {
+        var s = scoreWord(word, parts[p]);
+        if (s) bestForWord = Math.max(bestForWord, s * hay.weight);
+      }
+    }
+
+    if (!bestForWord) return { match: false, score: 0 };
+    total += bestForWord;
+  }
+
+  return { match: true, score: Math.round(total / words.length) };
+}
+
+/* What the customer has narrowed the catalogue to. */
+var orderView = { query: "", vegOnly: false, sort: "menu", tags: [], claims: [] };
+
+/*
+ * A few things that go with what somebody has already ordered.
+ *
+ * From categories they have NOT ordered from, so a customer who asked for
+ * biryani is offered a drink rather than more biryani; never anything already
+ * on the order; never a dish the shop has switched off. Cheapest first,
+ * because something to add on is a small yes and not a second meal. Three -
+ * a fourth is a catalogue, and the owner asked for "short cross selling".
+ *
+ * Here, rather than in either page, because the confirmation screen and the
+ * order history both offer it and two copies of a rule like this drift.
+ *
+ * @param {Array} on        the lines already on the order
+ * @param {Array} catalogue every product, as allProducts() gives them
+ */
+/*
+ * WHAT THE SHOP SAYS GOES WITH IT, and a drink when it has not said.
+ *
+ * Owner: "for checken briyani its suggessting french fries. not good
+ * combination. ask would like to add cock. only related prducts good."
+ *
+ * He is right and the old rule earned it: anything from a category they had
+ * not ordered from, cheapest first. That is not a pairing, it is a leftover -
+ * it offered chips with biryani because chips were cheap and in another
+ * category, and it would have offered soup with ice cream just as happily.
+ *
+ * TWO RULES NOW, in order.
+ *
+ * First, whatever the shop itself has said goes with a dish - item.goes_with,
+ * a list of item ids on the product. Nothing guesses better than the person
+ * who wrote the menu, and a shop that fills this in gets exactly the pairings
+ * it wants. That field is the proper answer and the shop owns it.
+ *
+ * Second, where nothing has been said: a DRINK. It is the one pairing that is
+ * safe with every dish on every menu in the world, it is what he asked for by
+ * name, and it is the offer a waiter actually makes. Categories are named by
+ * each shop, so they are recognised by the words shops use, and a menu with
+ * no drinks on it simply gets no suggestion - which is better than a wrong
+ * one. Cheapest first within that, because something alongside is a small yes
+ * and not a second meal.
+ */
+function goesWithOrder(on, catalogue) {
+    /* Kept INSIDE, so the function carries everything it needs. Lifted out of
+       this file to be tested on its own, a helper that reaches for a
+       module-level const finds nothing and dies on the first call - which is
+       exactly what happened here. */
+    const DRINKS = /drink|beverage|juice|soda|shake|smoothie|tea|coffee|water|cold|mocktail|lassi|refresh/i;
+    const SWEETS = /dessert|sweet|ice.?cream|pudding|cake|halwa|payasam/i;
+    const all = Array.isArray(catalogue) ? catalogue : [];
+    const have = new Set();
+    const theirs = new Set();
+    const named = [];
+    (on || []).forEach((line) => {
+        const id = String(line.item_id != null ? line.item_id : line.id || "");
+        have.add(id);
+        all.forEach((p) => {
+            if (String(p.id) !== id) return;
+            if (p.category_name) theirs.add(p.category_name);
+            /* What this dish itself says goes with it. */
+            (Array.isArray(p.goes_with) ? p.goes_with : []).forEach((w) => named.push(String(w)));
+        });
+    });
+
+    const sellable = (p) => p && p.id && !have.has(String(p.id)) && p.available !== false;
+    const cheapest = (x, y) => (Number(x.price) || 0) - (Number(y.price) || 0);
+
+    /* What the shop named, in the order the shop named it. */
+    const asked = [];
+    named.forEach((id) => {
+        if (asked.some((p) => String(p.id) === id)) return;
+        const found = all.find((p) => String(p.id) === id && sellable(p));
+        if (found) asked.push(found);
+    });
+    if (asked.length >= 3) return asked.slice(0, 3);
+
+    /* Then a drink, then something sweet, and nothing else - an unrelated
+       dish from an unrelated category is what this is here to stop. */
+    const room = 3 - asked.length;
+    const chosen = asked.slice();
+    [DRINKS, SWEETS].forEach((kind) => {
+        all
+            .filter(
+                (p) =>
+                    sellable(p) &&
+                    !theirs.has(p.category_name) &&
+                    /* The CATEGORY or the NAME. Plenty of shops file
+                       everything under one category, or none at all, and
+                       "Fresh Lime Soda" says what it is perfectly well
+                       without help. Reading only the category left those
+                       menus with no suggestion at all. */
+                    (kind.test(String(p.category_name || "")) || kind.test(String(p.name || ""))) &&
+                    !chosen.some((c) => String(c.id) === String(p.id))
+            )
+            .sort(cheapest)
+            .slice(0, room)
+            .forEach((p) => {
+                if (chosen.length < 3) chosen.push(p);
+            });
+    });
+    return chosen.slice(0, 3);
+}
+
+/** Every product across every category, flattened once. */
+function allProducts() {
+    var out = [];
+    Object.keys(products || {}).forEach(function (key) {
+        (products[key] || []).forEach(function (p) { out.push(p); });
+    });
+    return out;
+}
+
+/**
+ * The list to draw right now.
+ *
+ * A live search ALWAYS orders by how well each product answered, whatever the
+ * sort box says: somebody who just typed "dosa" is asking a question, and
+ * answering it in price order buries the dosa. The box takes over again once
+ * the search is cleared.
+ */
+function orderViewList(source) {
+    var q = orderView.query.trim();
+    var list = (source || []).slice();
+
+    if (orderView.vegOnly) {
+        /* Veg only means veg. An unmarked product is NOT assumed vegetarian:
+           a shop that never filled the field has promised nothing, and
+           guessing on its behalf is the one mistake this filter must never
+           make. */
+        list = list.filter(function (p) {
+            return p.diet === "veg" || p.diet === "vegan";
+        });
+    }
+
+    /*
+     * WITHIN A GROUP, ANY. ACROSS GROUPS, ALL.
+     *
+     * Somebody who ticks "Gluten free" and "Nut free" needs BOTH to be true
+     * of the same dish - those are things they cannot eat, and a dish that
+     * satisfies one of them is not an answer. The same rule reads correctly
+     * for the health claims, so both groups use it and there is one
+     * behaviour on the sheet rather than two.
+     *
+     * The claims were decided on the server from the shop's own numbers.
+     * Nothing here recomputes one, so a filter cannot disagree with the badge
+     * on the card it just hid.
+     */
+    if (orderView.tags.length) {
+        list = list.filter(function (p) {
+            var has = Array.isArray(p.tags) ? p.tags : [];
+            return orderView.tags.every(function (want) { return has.indexOf(want) !== -1; });
+        });
+    }
+
+    if (orderView.claims.length) {
+        list = list.filter(function (p) {
+            var has = Array.isArray(p.claims) ? p.claims : [];
+            return orderView.claims.every(function (want) { return has.indexOf(want) !== -1; });
+        });
+    }
+
+    if (q) {
+        list = list
+            .map(function (p, i) {
+                var hit = scoreItem(q, {
+                    name: p.name,
+                    description: p.description,
+                    category: p.category_name
+                });
+                return { p: p, i: i, match: hit.match, score: hit.score };
+            })
+            .filter(function (row) { return row.match; })
+            .sort(function (a, b) { return b.score - a.score || a.i - b.i; })
+            .map(function (row) { return row.p; });
+        return list;
+    }
+
+    if (orderView.sort === "popular") {
+        list.sort(function (a, b) {
+            return (Number(b.ordered_count) || 0) - (Number(a.ordered_count) || 0);
+        });
+    } else if (orderView.sort === "price_asc") {
+        list.sort(function (a, b) { return (Number(a.price) || 0) - (Number(b.price) || 0); });
+    } else if (orderView.sort === "price_desc") {
+        list.sort(function (a, b) { return (Number(b.price) || 0) - (Number(a.price) || 0); });
+    }
+
+    return list;
+}
+
+/** Redraw whatever the current narrowing produces. */
+async function refreshProductView() {
+    if (!document.getElementById("product-list")) return;
+
+    var searching = !!orderView.query.trim();
+
+    /* Searching leaves the sections behind: the answer is a flat list across
+       the whole menu, and a section strip beside it would be navigating
+       something that is no longer there. */
+    $(".fixed-categories").toggle(!searching);
+
+    /*
+     * TWO SHAPES, AND ONLY TWO.
+     *
+     * Searching answers with a flat list, because a question about the menu
+     * is not a place in it. Not searching draws the WHOLE menu grouped under
+     * its headings - every section, every time - so the page is a menu rather
+     * than fourteen small pages behind a chip strip.
+     *
+     * The filters run per section rather than over one list, so "Veg only" on
+     * a menu with no vegetarian starters simply has no Starters heading,
+     * instead of a heading with nothing under it.
+     */
+    var list = [];
+    if (searching) {
+        list = orderViewList(allProducts());
+        await renderProductCards(list);
+        /* No sections are drawn, so there is nothing to index and nowhere
+           for a row in it to jump to. */
+        var indexBtn = document.getElementById("menu-index-btn");
+        if (indexBtn) indexBtn.hidden = true;
+    } else {
+        var sections = Object.keys(products).map(function (key) {
+            var items = orderViewList(products[key] || []);
+            list = list.concat(items);
+            return { key: key, name: categoryNames.get(key) || key, items: items };
+        });
+        await renderWholeMenu(sections);
+
+        /* A section that filtered down to nothing has no chip to jump to. */
+        var alive = new Set(sections.filter(s => s.items.length).map(s => s.key));
+        $(".category-item").each(function () {
+            $(this).toggle(alive.has(String($(this).attr("data-category"))));
+        });
+    }
+
+    $("#category-heading").text(searching ? "Results" : "Our Menu");
+    /* Every section now carries its own heading, so the one at the top of the
+       page would be a second word for the same thing. It stays only for a
+       search, where no section heading is drawn at all. */
+    sayWhetherOneSection(!searching);
+
+    var counter = document.getElementById("order-result-count");
+    if (!counter) {
+        counter = document.createElement("p");
+        counter.id = "order-result-count";
+        counter.className = "order-result-count";
+        counter.setAttribute("role", "status");
+        var host = document.querySelector(".order-search");
+        if (host) host.appendChild(counter);
+    }
+
+    var narrowed = searching || orderView.vegOnly || orderView.tags.length > 0 || orderView.claims.length > 0;
+    counter.hidden = !narrowed;
+    if (narrowed) {
+        counter.textContent = list.length === 0
+            ? (searching
+                ? t('Nothing matches "{q}". Try a different word.', { q: orderView.query })
+                : t("Nothing on the menu is marked vegetarian."))
+            : t(list.length === 1 ? "{n} item" : "{n} items", { n: list.length });
+    }
+
+    document.getElementById("product-search-clear").hidden = !searching;
+    /* The mic and the clear button share one corner of the field. */
+    var mic = document.getElementById("product-search-mic");
+    if (mic && mic.getAttribute("data-supported") === "true") mic.hidden = searching;
+}
+
+$(document).on("input", "#product-search", function () {
+    orderView.query = String($(this).val() || "");
+    refreshProductView();
+});
+
+$(document).on("click", "#product-search-clear", function () {
+    $("#product-search").val("");
+    orderView.query = "";
+    refreshProductView();
+    $("#product-search").trigger("focus");
+});
+
+$(document).on("click", "#order-filter-veg", function () {
+    orderView.vegOnly = !orderView.vegOnly;
+    $(this).attr("aria-pressed", orderView.vegOnly ? "true" : "false");
+    refreshProductView();
+});
+
+$(document).on("change", "#filters-sort input[type=radio]", async function () {
+    orderView.sort = String(this.value || "menu");
+    $("#filters-sort .filters-pill").attr("data-on", null);
+    $(this).closest(".filters-pill").attr("data-on", "true");
+    await refreshProductView();
+    paintFilterCount();
+});

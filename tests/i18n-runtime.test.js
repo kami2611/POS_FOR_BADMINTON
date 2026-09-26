@@ -1,0 +1,437 @@
+'use strict';
+
+/*
+ * The runtime half of L3: pages ship once, in English, and the words are
+ * swapped in.
+ *
+ * These run against a real DOM rather than string matching, because the whole
+ * change is about what the page LOOKS LIKE after load. The three shapes that
+ * matter are all here:
+ *
+ *   <lang class="key">English</lang>      ordinary content, tag stays
+ *   <title data-t="key">English</title>   the parser builds no element inside
+ *   <option data-t="key">English</option> a select shows text, not markup
+ *
+ * See Intranet docs/MULTI_LANGUAGE_ARCHITECTURE.md.
+ */
+
+const test = require('node:test');
+const assert = require('node:assert');
+const fs = require('fs');
+const path = require('path');
+const { JSDOM } = require('jsdom');
+
+const CORE = path.join(__dirname, '..', 'frontend', 'static', 'script', 'js', 'core', 'PosnicPro.js');
+
+/*
+ * The i18n object, lifted out of PosnicPro.js and evaluated on its own.
+ *
+ * Loading the whole 200KB file would drag in jQuery, the router and a dozen
+ * globals that have nothing to do with translation. Slicing keeps the test
+ * about i18n while still running the SHIPPING source rather than a copy.
+ */
+function loadI18n(dom, dict, stored) {
+  const core = fs.readFileSync(CORE, 'utf8');
+  const start = core.indexOf('PosnicPro.i18n = {');
+  const end = core.indexOf('\nPosnicPro.i18n.load()', start);
+  assert.ok(start > 0 && end > start, 'PosnicPro.i18n could not be found');
+
+  const store = Object.assign({}, stored);
+  const PosnicPro = {
+    local: {
+      get: (k) => (k in store ? store[k] : null),
+      set: (k, v) => { store[k] = String(v); },
+      remove: (k) => { delete store[k]; },
+    },
+  };
+  // eslint-disable-next-line no-new-func
+  new Function('PosnicPro', 'document', 'fetch', core.slice(start, end))(
+    PosnicPro, dom.window.document,
+    () => Promise.resolve({ ok: true, json: () => Promise.resolve(dict) }),
+  );
+  PosnicPro.i18n._dict = dict;
+  return { PosnicPro, store };
+}
+
+const page = (body) => new JSDOM(
+  '<!doctype html><html><head><title data-t="lang_title">Posnic</title></head>'
+  + '<body>' + body + '</body></html>');
+
+const TA = {
+  lang_title: 'பொஸ்னிக்',
+  lang_item_name: 'பொருளின் பெயர்',
+  lang_new_search: 'புதியது',
+  lang_blank: '   ',
+};
+
+/* --------------------------------------------------------------- applying --- */
+
+test('a <lang> tag is translated in place', () => {
+  const dom = page('<h5><lang class="lang_item_name">Item name</lang></h5>');
+  const { PosnicPro } = loadI18n(dom, TA);
+  PosnicPro.i18n.apply();
+  assert.equal(dom.window.document.querySelector('lang').textContent, 'பொருளின் பெயர்');
+});
+
+test('a <title> carries its key as data-t and is translated', () => {
+  /* Inside <title> the parser treats markup as text, so a tag left there
+     would print angle brackets in the browser tab. */
+  const dom = page('');
+  const { PosnicPro } = loadI18n(dom, TA);
+  PosnicPro.i18n.apply();
+  assert.equal(dom.window.document.title, 'பொஸ்னிக்');
+});
+
+test('an <option> shows the translation, not markup', () => {
+  const dom = page('<select><option value="new" data-t="lang_new_search">Newest</option></select>');
+  const { PosnicPro } = loadI18n(dom, TA);
+  PosnicPro.i18n.apply();
+  const opt = dom.window.document.querySelector('option');
+  assert.equal(opt.textContent, 'புதியது');
+  assert.equal(opt.value, 'new', 'the value must not be disturbed');
+});
+
+/* -------------------------------------------------- English is never lost --- */
+
+test('a key the language does not have keeps its English', () => {
+  const dom = page('<span><lang class="lang_not_translated">Untranslated</lang></span>');
+  const { PosnicPro } = loadI18n(dom, TA);
+  PosnicPro.i18n.apply();
+  assert.equal(dom.window.document.querySelector('lang').textContent, 'Untranslated');
+});
+
+test('a blank translation keeps its English', () => {
+  /* A generated skeleton full of empty strings must not blank the interface. */
+  const dom = page('<span><lang class="lang_blank">Something</lang></span>');
+  const { PosnicPro } = loadI18n(dom, TA);
+  PosnicPro.i18n.apply();
+  assert.equal(dom.window.document.querySelector('lang').textContent, 'Something');
+});
+
+test('with no dictionary at all the page is untouched English', () => {
+  /* First run, offline, or a pack that 404s. */
+  const dom = page('<span><lang class="lang_item_name">Item name</lang></span>');
+  const { PosnicPro } = loadI18n(dom, null);
+  PosnicPro.i18n._dict = null;
+  PosnicPro.i18n.apply();
+  assert.equal(dom.window.document.querySelector('lang').textContent, 'Item name');
+});
+
+test('applying twice changes nothing the second time', () => {
+  /* apply() runs on load and again on DOMContentLoaded, and translates fresh
+     markup on demand. It reads the key, never the current text, so it cannot
+     translate its own output. */
+  const dom = page('<span><lang class="lang_item_name">Item name</lang></span>');
+  const { PosnicPro } = loadI18n(dom, TA);
+  PosnicPro.i18n.apply();
+  const once = dom.window.document.body.innerHTML;
+  PosnicPro.i18n.apply();
+  assert.equal(dom.window.document.body.innerHTML, once);
+});
+
+test('a root can be given, so markup rendered later is translated too', () => {
+  const dom = page('<div id="a"><lang class="lang_item_name">Item name</lang></div>'
+    + '<div id="b"><lang class="lang_item_name">Item name</lang></div>');
+  const { PosnicPro } = loadI18n(dom, TA);
+  PosnicPro.i18n.apply(dom.window.document.getElementById('a'));
+  assert.equal(dom.window.document.querySelector('#a lang').textContent, 'பொருளின் பெயர்');
+  assert.equal(dom.window.document.querySelector('#b lang').textContent, 'Item name',
+    'only the given root should have been touched');
+});
+
+/* ---------------------------------------------------------- the language --- */
+
+test('an existing Tamil install is migrated from the old filename', () => {
+  const dom = page('');
+  const { PosnicPro, store } = loadI18n(dom, TA, { language_herf: 'ta_dashboard.html' });
+  assert.equal(PosnicPro.i18n.code(), 'ta');
+  assert.equal(store.language_code, 'ta', 'the code should be written back');
+});
+
+test('an install that never chose a language is English', () => {
+  const dom = page('');
+  const { PosnicPro } = loadI18n(dom, TA, {});
+  assert.equal(PosnicPro.i18n.code(), 'en');
+});
+
+test('changing language does not navigate', () => {
+  /* Switching used to load a different HTML file and lose the screen. */
+  const core = fs.readFileSync(CORE, 'utf8');
+  const start = core.indexOf('change: function');
+  const changeFn = core.slice(start, core.indexOf('\n    }', start));
+  assert.ok(!/location\s*\./.test(changeFn), 'change() still navigates');
+  assert.match(changeFn, /apply\(\)/, 'change() does not redraw');
+});
+
+/* ------------------------------------------------- markup in the words --- */
+
+test('a text-only translation keeps the icon the page carries', () => {
+  /*
+   * "Download" sits after a feather icon inside its <lang>. Tamil translated
+   * the word alone, and textContent threw the icon away with the English.
+   */
+  const dom = page('<button><lang class="lang_download_title"><i class="feather icon-download mr-2"></i>Download </lang></button>');
+  const { PosnicPro } = loadI18n(dom, { lang_download_title: 'பதிவிறக்க' });
+  PosnicPro.i18n.apply();
+  const el = dom.window.document.querySelector('lang');
+  assert.ok(el.querySelector('i.feather'), 'the icon was lost');
+  assert.equal(el.textContent, 'பதிவிறக்க');
+});
+
+test('a translation that carries the same markup is used as markup', () => {
+  /* The code later rewrites #resetHeading to "Sale" or "Receiving"; the span
+     has to survive translation or that write lands nowhere. */
+  const dom = page('<p><lang class="lang_reset_want">Do you want to reset cart and proceed to New <span id="resetHeading">Sale</span> ?</lang></p>');
+  const { PosnicPro } = loadI18n(dom, {
+    lang_reset_want: 'Réinitialiser le panier et passer à une nouvelle <span id="resetHeading">Vente</span> ?',
+  });
+  PosnicPro.i18n.apply();
+  const span = dom.window.document.getElementById('resetHeading');
+  assert.ok(span, 'the span the code rewrites later is gone');
+  assert.equal(span.textContent, 'Vente');
+});
+
+test('switching back to English restores what the page shipped with', () => {
+  const dom = page('<h5><lang class="lang_item_name">Item name</lang></h5>');
+  const { PosnicPro } = loadI18n(dom, TA, { language_code: 'ta' });
+  PosnicPro.i18n.apply();
+  assert.equal(dom.window.document.querySelector('lang').textContent, 'பொருளின் பெயர்');
+  return PosnicPro.i18n.change('en').then(() => {
+    assert.equal(dom.window.document.querySelector('lang').textContent, 'Item name');
+    assert.equal(dom.window.document.documentElement.getAttribute('lang'), 'en');
+    assert.equal(dom.window.document.documentElement.getAttribute('dir'), 'ltr');
+  });
+});
+
+test('switching back to English ignores mutable DOM attributes', () => {
+  const dom = page('<h5><lang class="lang_item_name">Item name</lang></h5>');
+  const { PosnicPro } = loadI18n(dom, TA, { language_code: 'ta' });
+  PosnicPro.i18n.apply();
+  const label = dom.window.document.querySelector('lang');
+  label.setAttribute('data-en', '<img src=x onerror=alert(1)>');
+  return PosnicPro.i18n.change('en').then(() => {
+    assert.equal(label.textContent, 'Item name');
+    assert.equal(label.querySelector('img'), null);
+  });
+});
+
+/* ---------------------------------------------- the document's language --- */
+
+test('the document takes the language and its direction', () => {
+  const dom = page('');
+  const { PosnicPro } = loadI18n(dom, {}, { language_code: 'ar' });
+  PosnicPro.i18n.mark();
+  assert.equal(dom.window.document.documentElement.getAttribute('lang'), 'ar');
+  assert.equal(dom.window.document.documentElement.getAttribute('dir'), 'rtl');
+  return PosnicPro.i18n.change('ta').then(() => {
+    assert.equal(dom.window.document.documentElement.getAttribute('lang'), 'ta');
+    assert.equal(dom.window.document.documentElement.getAttribute('dir'), 'ltr');
+  });
+});
+
+test('a first run starts in the browser language the build ships', () => {
+  const dom = page('');
+  const { PosnicPro } = loadI18n(dom, {});
+  const offered = [{ code: 'en' }, { code: 'ta' }, { code: 'pt' }, { code: 'pt-BR' }];
+  assert.equal(PosnicPro.i18n.detect(offered, ['pt-BR', 'en-US']), 'pt-BR', 'an exact tag should win');
+  assert.equal(PosnicPro.i18n.detect(offered, ['pt-PT', 'en-US']), 'pt', 'the primary subtag is tried next');
+  assert.equal(PosnicPro.i18n.detect(offered, ['ta-IN']), 'ta');
+  assert.equal(PosnicPro.i18n.detect(offered, ['de-DE', 'fr']), 'en', 'nothing shipped means English');
+  assert.equal(PosnicPro.i18n.chosen(), false, 'a fresh machine has chosen nothing');
+  assert.equal(PosnicPro.i18n.code(), 'en');
+  assert.equal(PosnicPro.i18n.chosen(), false, 'asking for the code must not count as choosing');
+});
+
+/* ------------------------------------------------- a pack is somebody else's --- */
+
+/*
+ * WHY THESE EXIST.
+ *
+ * apply() used to do `el.innerHTML = value` for any translation containing a
+ * tag, justified by a comment saying the packs were "this repository's own
+ * files... not user input". That was true when it was written, and it stopped
+ * being true the same week: translations were opened to outside contributors,
+ * twelve packs were seeded for strangers to correct, and develop.posnic.io was
+ * built to serve their work.
+ *
+ * A pack is now a pull request from somebody we do not know, reviewed by
+ * somebody who by definition cannot read the language - `<img src=x
+ * onerror=...>` inside a Malayalam string looks exactly like Malayalam to the
+ * reviewer. Signing the asset channel proves where a pack came from, never
+ * that it is safe to run.
+ *
+ * These are written against the running DOM rather than the source, because
+ * what matters is what reaches the page, not how the code is spelled.
+ */
+
+test('a script tag in a translation never becomes a script', () => {
+  const dom = page('<h5><lang class="lang_item_name">Item name</lang></h5>');
+  const { PosnicPro } = loadI18n(dom, {
+    lang_item_name: 'Item <script>window.__pwned = true;<\/script> name',
+  });
+  PosnicPro.i18n.apply();
+  const el = dom.window.document.querySelector('lang');
+  assert.equal(el.querySelector('script'), null, 'a <script> element reached the page');
+  assert.equal(dom.window.__pwned, undefined, 'the script ran');
+  /* The words survive: unwrapping keeps what the translator wrote. */
+  assert.match(el.textContent, /Item/);
+});
+
+test('an image with an onerror handler never reaches the page', () => {
+  /* The realistic payload: no <script> needed, and it fires on its own. */
+  const dom = page('<h5><lang class="lang_item_name">Item name</lang></h5>');
+  const { PosnicPro } = loadI18n(dom, {
+    lang_item_name: '<img src=x onerror="window.__pwned = true">Nombre',
+  });
+  PosnicPro.i18n.apply();
+  const el = dom.window.document.querySelector('lang');
+  assert.equal(el.querySelector('img'), null, 'an <img> reached the page');
+  assert.equal(dom.window.__pwned, undefined, 'the handler ran');
+  assert.equal(el.textContent.trim(), 'Nombre');
+});
+
+test('an event handler is stripped from a tag that is otherwise allowed', () => {
+  /* <span> is on the allowlist; onclick is not, and the two arrive together. */
+  const dom = page('<p><lang class="lang_item_name">Item name</lang></p>');
+  const { PosnicPro } = loadI18n(dom, {
+    lang_item_name: '<span id="keep" class="x" onclick="window.__pwned = true">Article</span>',
+  });
+  PosnicPro.i18n.apply();
+  const span = dom.window.document.getElementById('keep');
+  assert.ok(span, 'an allowed tag was removed');
+  assert.equal(span.getAttribute('onclick'), null, 'the handler survived');
+  assert.equal(span.getAttribute('class'), 'x', 'class should be kept');
+  assert.equal(span.textContent, 'Article');
+});
+
+test('an anchor cannot be smuggled in to send somebody elsewhere', () => {
+  const dom = page('<p><lang class="lang_item_name">Item name</lang></p>');
+  const { PosnicPro } = loadI18n(dom, {
+    lang_item_name: 'See <a href="https://evil.example">our offer</a>',
+  });
+  PosnicPro.i18n.apply();
+  const el = dom.window.document.querySelector('lang');
+  assert.equal(el.querySelector('a'), null, 'a link reached the page');
+  assert.match(el.textContent, /our offer/, 'the words should survive the unwrap');
+});
+
+/* ------------------------------------------------ the words in attributes --- */
+
+test('placeholder, title and aria-label are translated and restored', () => {
+  const dom = page('<input placeholder="Enter the store name" data-t-placeholder="lang_store_ph">'
+    + '<button title="Sort the list" data-t-title="lang_sort_t">x</button>');
+  const { PosnicPro } = loadI18n(dom, { lang_store_ph: 'கடையின் பெயர்', lang_sort_t: 'வரிசைப்படுத்து' }, { language_code: 'ta' });
+  PosnicPro.i18n.apply();
+  const input = dom.window.document.querySelector('input');
+  const button = dom.window.document.querySelector('button');
+  assert.equal(input.getAttribute('placeholder'), 'கடையின் பெயர்');
+  assert.equal(button.getAttribute('title'), 'வரிசைப்படுத்து');
+  return PosnicPro.i18n.change('en').then(() => {
+    assert.equal(input.getAttribute('placeholder'), 'Enter the store name', 'the English placeholder did not come back');
+    assert.equal(button.getAttribute('title'), 'Sort the list', 'the English title did not come back');
+  });
+});
+
+test('a Bootstrap tooltip is translated where a Bootstrap tooltip actually reads', () => {
+  /*
+   * A TRANSLATION THAT SILENTLY DID NOTHING.
+   *
+   * Bootstrap does not show `title`. On init it moves the title into
+   * `data-original-title` and empties the real attribute, and markup that
+   * sets data-original-title itself wins outright. So `data-t-title` on one
+   * of these changed an attribute nothing displays, and the tooltip went on
+   * saying the English in every language - rendering perfectly, which is why
+   * it survived. Same shape as the requests dock, where a local t() helper
+   * hid fourteen words from the coverage scanner.
+   *
+   * Two elements in the interface were in that state: the item form's "Write
+   * it for me" hint and the sale screen's walk-in customer hint.
+   */
+  const dom = page(
+    '<a data-toggle="tooltip" data-original-title="Draft a description from the item\'s own details"'
+      + ' data-t-title="lang_ai_describe_hint">?</a>'
+  );
+  const { PosnicPro } = loadI18n(
+    dom,
+    { lang_ai_describe_hint: 'விளக்கத்தை உருவாக்கவும்' },
+    { language_code: 'ta' }
+  );
+  PosnicPro.i18n.apply();
+
+  const tip = dom.window.document.querySelector('a');
+  assert.equal(
+    tip.getAttribute('data-original-title'),
+    'விளக்கத்தை உருவாக்கவும்',
+    'the attribute the tooltip reads was left in English'
+  );
+  /* `title` is set as well: an element can be hovered before Bootstrap has
+     initialised it, and the browser's own tooltip reads that one. */
+  assert.equal(tip.getAttribute('title'), 'விளக்கத்தை உருவாக்கவும்');
+
+  return PosnicPro.i18n.change('en').then(() => {
+    assert.equal(
+      tip.getAttribute('data-original-title'),
+      "Draft a description from the item's own details",
+      'the English tooltip did not come back'
+    );
+  });
+});
+
+test('the words behind those tooltips are in every pack', () => {
+  /*
+   * The runtime fix is half of it. The coverage tool read the English out of
+   * `title`, which these elements do not carry, so their keys were counted as
+   * used and never given any English to translate - and a pack cannot answer
+   * a key nobody wrote down.
+   */
+  const dir = path.join(__dirname, '..', 'languages');
+  const english = JSON.parse(fs.readFileSync(path.join(dir, '_english.json'), 'utf8'));
+  for (const key of ['lang_ai_describe_hint', 'lang_walk_in_customer_click_to_choose_or_add']) {
+    assert.ok(english[key], key + ' has no English, so no pack can be asked for it');
+    for (const file of fs.readdirSync(dir).filter((f) => /^[a-z]{2}\.json$/.test(f))) {
+      const pack = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+      assert.ok(typeof pack[key] === 'string' && pack[key].trim() !== '', file + ' has no ' + key);
+    }
+  }
+});
+
+/* ------------------------------------------- markup that arrives later --- */
+
+test('markup JavaScript draws after load is translated as it lands', async () => {
+  /*
+   * Table headers, pills, the receipt panel: none of it passes through
+   * apply() by itself. A module writes <lang class="key"> into its string
+   * and the observer does the rest.
+   */
+  const dom = page('<div id="list"></div>');
+  const { PosnicPro } = loadI18n(dom, TA, { language_code: 'ta' });
+  const observer = PosnicPro.i18n.watch(dom.window.document.documentElement);
+  assert.ok(observer, 'watch() returned nothing');
+  dom.window.document.getElementById('list').innerHTML =
+    '<table><tr><th><lang class="lang_item_name">Item name</lang></th></tr></table>'
+    + '<input placeholder="Newest" data-t-placeholder="lang_new_search">';
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(dom.window.document.querySelector('th lang').textContent, 'பொருளின் பெயர்');
+  assert.equal(dom.window.document.querySelector('input').getAttribute('placeholder'), 'புதியது');
+  observer.disconnect();
+});
+
+test('a <lang> handed to apply() directly is translated, not only its children', () => {
+  const dom = page('<span id="s"><lang class="lang_item_name">Item name</lang></span>');
+  const { PosnicPro } = loadI18n(dom, TA, { language_code: 'ta' });
+  const el = dom.window.document.querySelector('lang');
+  PosnicPro.i18n.apply(el);
+  assert.equal(el.textContent, 'பொருளின் பெயர்');
+});
+
+test('the observer does nothing for a shop in English', async () => {
+  const dom = page('<div id="list"></div>');
+  const { PosnicPro } = loadI18n(dom, null);
+  PosnicPro.i18n._dict = null;
+  const observer = PosnicPro.i18n.watch(dom.window.document.documentElement);
+  dom.window.document.getElementById('list').innerHTML = '<th><lang class="lang_item_name">Item name</lang></th>';
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(dom.window.document.querySelector('lang').textContent, 'Item name');
+  assert.equal(dom.window.document.querySelector('lang').hasAttribute('data-en'), false, 'nothing should have been touched');
+  observer.disconnect();
+});

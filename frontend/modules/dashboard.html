@@ -1,0 +1,220 @@
+<div class="vertical-layout page_loader" id="dashboard" style="display: none">
+    <div id="containerbar" class="blur-dashboard">
+        <div class="breadcrumbbar">
+          <div class="col-md-12 loader-login spin">
+            <!-- Setup checklist (Lightspeed study LS1): what this shop has not
+                 done yet, from live state. Hides itself when done or dismissed. -->
+            <!--
+                SAMPLE DATA, ON THE SCREEN THAT COUNTS.
+
+                Owner: "some customer ping ask how to remove data. so remove
+                data one dashboard or all pages might be helpful."
+
+                The figures on this page include the samples, so this is the
+                one screen where not knowing costs something. It says how many
+                of each kind are still here and removes them from here; it is
+                drawn only when there is something to say, and "Keep them"
+                quiets it for a month rather than for ever - a shop that meant
+                to clear them and got interrupted should be asked again.
+            -->
+            <div class="row" id="demo_data_card" style="display:none;">
+                <div class="col-lg-12">
+                    <div class="card m-b-30 demo-data-card">
+                        <div class="card-body py-2">
+                            <div class="d-flex align-items-center justify-content-between flex-wrap mb-1" style="gap:8px;">
+                                <span class="demo-data-card-title">
+                                    <i class="feather icon-package mr-1"></i><lang class="lang_demo_card_title">Your shop still has its sample records</lang>
+                                </span>
+                                <span class="demo-data-card-actions">
+                                    <button type="button" class="btn btn-sm btn-outline-danger" id="demo_card_remove"><lang class="lang_demoremove_button">Remove the sample data</lang></button>
+                                    <button type="button" class="btn btn-sm btn-link text-muted" id="demo_card_keep"><lang class="lang_demo_card_keep">Keep them for now</lang></button>
+                                </span>
+                            </div>
+                            <div class="demo-data-card-counts" id="demo_data_card_counts"></div>
+                            <small class="text-muted d-block mt-1">
+                                <lang class="lang_demo_card_help">These came with the demo so you could try the till, and the figures on this page include them.
+                                    Removing them takes nothing you created yourself.</lang>
+                            </small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="row" id="setup_checklist_strip" style="display:none;">
+                <div class="col-lg-12">
+                    <div class="card m-b-30">
+                        <div class="card-body py-2">
+                            <div class="d-flex align-items-center justify-content-between flex-wrap mb-1">
+                                <span style="font-weight:600;"><lang class="lang_setup_title">Let's finish setting up your store</lang></span>
+                                <a href="javascript:void(0)" class="text-muted" onclick="PosnicPro.dashboard.dismissSetupChecklist();" style="font-size:.8rem;"><lang class="lang_setup_dismiss">Dismiss</lang></a>
+                            </div>
+                            <div class="d-flex flex-wrap" id="setup_checklist_cards" style="gap:8px;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!-- Header: shop name + the period this whole screen answers for -->
+            <div class="row">
+                <div class="col-lg-12">
+                    <div class="card m-b-30">
+                        <div class="row card-body">
+                            <div class="col-xs-12 col-sm-6 col-lg-1 mb-1 shop_img">
+                                <img src="static/images/default/store.png" id="store_image" onerror="this.onerror=null;this.src='static/images/default/store.png';" class="img-fluid rounded text-center" style="width: 63px; margin: 0 auto;" alt="shop" loading="lazy" decoding="async">
+                            </div>
+                            <div class="col-xs-12 col-sm-6 col-lg-3 mb-1 shop_name">
+                                <h3 class="text-secondary title_h2 branch-name mt-0 mb-1"><lang class="lang_goldwins">Goldwins</lang></h3>
+                                <p class="mb-0 font-14"><lang class="lang_branch_title">Branch</lang></p>
+                            </div>
+                            <div class="col-xs-12 col-sm-12 col-lg-8 mb-1 shop_button_group">
+                                <div class="button-list pull-right">
+                                    <div class="btn-group shop_buttons">
+                                        <button type="button" class="btn btn-light active" id="btnDashboardCountDay" onclick="PosnicPro.dashboard.activeInActiveFilterButtons('day', this)"> <lang class="lang_this_day">Today </lang></button>
+                                        <button type="button" class="btn btn-light" id="btnDashboardCountWeek" onclick="PosnicPro.dashboard.activeInActiveFilterButtons('week', this)"><lang class="lang_this_week">This Week </lang></button>
+                                        <button type="button" class="btn btn-light" id="btnDashboardCountMonth" onclick="PosnicPro.dashboard.activeInActiveFilterButtons('month', this)"><lang class="lang_this_month">This Month </lang></button>
+                                        <button type="button" class="btn btn-light" id="btnDashboardCountYear" onclick="PosnicPro.dashboard.activeInActiveFilterButtons('year', this)"> <lang class="lang_year">This Year </lang></button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Greeting + quick links in one compact bar. The greeting is worked
+                 out on the client from the time of day (no request); the links are
+                 one click to the pages people use most, each carrying the same ACL
+                 as its menu item so a user only sees the ones they can open. -->
+            <div class="row">
+                <div class="col-lg-12">
+                    <div class="card bg-primary-rgba m-b-30">
+                        <div class="card-body" style="padding:14px 18px;">
+                            <div class="d-flex flex-wrap align-items-center justify-content-between" style="gap:10px;">
+                                <h5 class="text-primary mb-0" id="dashboard_greeting"><lang class="lang_welcome">Welcome</lang></h5>
+                                <div class="d-flex flex-wrap" style="gap:8px;">
+                                    <a href="#/sales/new" data-module="sales" data-access="write" class="btn btn-primary btn-sm"><i class="feather icon-plus-circle mr-1"></i><lang class="lang_addnewsale_title">New Sale</lang></a>
+                                    <a href="#/sales" data-module="sales" data-access="read||write||delete" class="btn btn-light btn-sm"><i class="feather icon-shopping-bag mr-1"></i><lang class="lang_salehistory_title">Sales History</lang></a>
+                                    <a href="#/quickreport" data-module="report" data-access="read" class="btn btn-light btn-sm"><i class="feather icon-bar-chart-2 mr-1"></i><lang class="lang_daily_report">Daily Report</lang></a>
+                                    <a href="#/items" data-module="item" data-access="read" class="btn btn-light btn-sm"><i class="feather icon-package mr-1"></i><lang class="lang_itemdetail_title">Items</lang></a>
+                                    <a href="#/items/new" data-module="item" data-access="write" class="btn btn-light btn-sm"><i class="feather icon-plus mr-1"></i><lang class="lang_additem_title">Add Item</lang></a>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- The six numbers a manager reads, for the chosen period. Financial
+                 layer: a salesperson never sees the shop's money totals. -->
+            <div class="row" data-module="dashboard" data-access="financials">
+                <div class="col-lg-12">
+                    <div class="card m-b-30">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <h5 class="mb-0 text-secondary"><i class="feather icon-bar-chart-2 mr-1"></i> <lang class="lang_totals">Totals</lang> <span class="text-muted" style="font-size:12px;" id="kpi_period_label"></span></h5>
+                            </div>
+                            <div class="row text-center">
+                                <div class="col-6 col-md-4 col-lg-2 mb-2"><div class="text-muted" style="font-size:12.5px;"><lang class="lang_noreturnds">Total Sales</lang></div><h4 class="mb-0" id="kpi_sales"><lang class="lang_text_2">&mdash;</lang></h4></div>
+                                <div class="col-6 col-md-4 col-lg-2 mb-2"><div class="text-muted" style="font-size:12.5px;"><lang class="lang_total_purchase">Total Purchase</lang></div><h4 class="mb-0" id="kpi_purchase"><lang class="lang_text_2">&mdash;</lang></h4></div>
+                                <div class="col-6 col-md-4 col-lg-2 mb-2"><div class="text-muted" style="font-size:12.5px;"><lang class="lang_total_expenses">Total Expenses</lang></div><h4 class="mb-0" id="kpi_expenses"><lang class="lang_text_2">&mdash;</lang></h4></div>
+                                <div class="col-6 col-md-4 col-lg-2 mb-2"><div class="text-muted" style="font-size:12.5px;"><lang class="lang_total_tax">Total Tax</lang></div><h4 class="mb-0" id="kpi_tax"><lang class="lang_text_2">&mdash;</lang></h4></div>
+                                <div class="col-6 col-md-4 col-lg-2 mb-2"><div class="text-muted" style="font-size:12.5px;"><lang class="lang_total_upi">Total UPI</lang></div><h4 class="mb-0" id="kpi_upi"><lang class="lang_text_2">&mdash;</lang></h4></div>
+                                <div class="col-6 col-md-4 col-lg-2 mb-2"><div class="text-muted" style="font-size:12.5px;"><lang class="lang_total_cash">Total Cash</lang></div><h4 class="mb-0" id="kpi_cash"><lang class="lang_text_2">&mdash;</lang></h4></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Profit summary - financial layer, hidden from non-management users -->
+            <div class="row" data-module="dashboard" data-access="financials">
+                <div class="col-lg-12">
+                    <div class="card m-b-30">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <h5 class="mb-0 text-secondary"><i class="feather icon-trending-up mr-1"></i> <lang class="lang_profit">Profit</lang> <span class="text-muted" style="font-size:12px;" id="profit_period_label"></span></h5>
+                                <span class="text-muted" id="profit_sales_count" style="font-size:12px;"></span>
+                            </div>
+                            <div class="row text-center align-items-center" style="font-size:13.5px;">
+                                <div class="col-6 col-md mb-2"><div class="text-muted"><lang class="lang_rgrp_sales">Sales</lang></div><div class="f-w-6" id="profit_revenue">-</div></div>
+                                <div class="col-6 col-md mb-2"><div class="text-muted"><lang class="lang_cost_of_goods">Cost of goods</lang></div><div class="f-w-6" id="profit_cogs">-</div></div>
+                                <div class="col-6 col-md mb-2"><div class="text-muted"><lang class="lang_gross_profit">Gross profit</lang></div><div class="f-w-6 text-success" id="profit_gross">-</div></div>
+                                <div class="col-6 col-md mb-2"><div class="text-muted"><lang class="lang_expensecut_title">Expenses</lang></div><div class="f-w-6 text-danger" id="profit_expenses">-</div></div>
+                                <div class="col-12 col-md mb-2" style="border-left:1px solid #eef0f3;">
+                                    <div class="text-muted"><lang class="lang_net_profit">Net profit</lang></div>
+                                    <div style="font-size:22px; font-weight:700;" id="profit_net" class="text-success">-</div>
+                                    <div class="text-muted" style="font-size:12px;" id="profit_margin"></div>
+                                </div>
+                            </div>
+                            <div class="text-muted" style="font-size:11.5px; margin-top:6px;">
+                                <lang class="lang_net_profit_sales_cost_of_goods_sold_expens">Net profit = sales &minus; cost of goods sold &minus; expenses, using the cost recorded on each sale.</lang>
+                                <span id="profit_cashflow_note"></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Everyone: what's selling, and who owes money. When there are no
+                 dues, JS (syncDuesHeight) sizes the empty card to match Best
+                 Sellers so the page fits one screen; with dues it grows. -->
+            <div class="row">
+                <div class="col-md-8" id="dashboard_best_col">
+                    <div class="card m-b-30">
+                        <div class="card-header">
+                            <div class="row align-items-center">
+                                <div class="col-9">
+                                    <h5 class="card-title mb-0"><lang class="lang_best_sale">Best Selling Products</lang></h5>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="table-responsive">
+                                <table id="tblBestSellingProducts" class="table table-borderless">
+                                    <thead class="BestSellingitem">
+                                        <tr>
+                                            <th style="width: 5%">#</th>
+                                            <th style="width: 65%"><lang class="lang_name_title">Name</lang></th>
+                                            <th style="width: 10%"><lang class="lang_quantity_title">Qty</lang></th>
+                                            <th style="width: 20%"><lang class="lang_amount_title">Amount</lang></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td colspan="4">
+                                                <div class='text-center text-dark'>
+                                                    <div class="table_cart_content"></div>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- Shown only when Customer credit is switched on. A shop that
+                     never sells on account cannot have dues, so the panel could
+                     only ever tell it that nobody owes anything - which reads as
+                     a feature that is broken rather than one it does not use. -->
+                <div class="col-md-4" id="dashboard_dues_col">
+                    <div class="card m-b-30 recent_card" style="overflow: hidden; min-height:auto;">
+                        <div class="card-header">
+                            <div class="row align-items-center">
+                                <div class="col-9">
+                                    <h5 class="card-title mb-0"><lang class="lang_pending_payment">Customer Dues (money owed to you)</lang></h5>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-body recentBody" style="min-height:auto;">
+                            <div class="ecom-notification-box">
+                                <ul class="list-unstyled" id="lstRecentActivities">
+                                    <li class="text-muted" style="padding:12px 4px;"><lang class="lang_no_customer_owes_money_right_now">No customer owes money right now.</lang></li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+          </div>
+        </div>
+    </div>
+</div>

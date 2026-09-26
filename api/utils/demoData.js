@@ -1,0 +1,934 @@
+// Demo data for different business types
+
+const iceCreamDemoData = {
+  categories: [
+    { name: 'Ice Cream Flavors', description: 'Various ice cream flavors' },
+    { name: 'Toppings', description: 'Ice cream toppings and sauces' },
+    { name: 'Cones & Cups', description: 'Serving containers' },
+    { name: 'Sundaes', description: 'Special sundae combinations' },
+  ],
+  products: [
+    // Ice Cream Flavors (6 products)
+    {
+      name: 'Vanilla Ice Cream',
+      category: 'Ice Cream Flavors',
+      price: 3.5,
+      unit: 'scoop',
+      stock: 100,
+    },
+    {
+      name: 'Chocolate Ice Cream',
+      category: 'Ice Cream Flavors',
+      price: 3.5,
+      unit: 'scoop',
+      stock: 100,
+    },
+    {
+      name: 'Strawberry Ice Cream',
+      category: 'Ice Cream Flavors',
+      price: 3.75,
+      unit: 'scoop',
+      stock: 100,
+    },
+    {
+      name: 'Mango Ice Cream',
+      category: 'Ice Cream Flavors',
+      price: 4.0,
+      unit: 'scoop',
+      stock: 100,
+    },
+    {
+      name: 'Mint Chocolate Chip',
+      category: 'Ice Cream Flavors',
+      price: 4.25,
+      unit: 'scoop',
+      stock: 100,
+    },
+    {
+      name: 'Cookie Dough Ice Cream',
+      category: 'Ice Cream Flavors',
+      price: 4.5,
+      unit: 'scoop',
+      stock: 100,
+    },
+
+    // Toppings (4 products)
+    { name: 'Chocolate Syrup', category: 'Toppings', price: 0.75, unit: 'serving', stock: 200 },
+    { name: 'Caramel Sauce', category: 'Toppings', price: 0.75, unit: 'serving', stock: 200 },
+    { name: 'Sprinkles', category: 'Toppings', price: 0.5, unit: 'serving', stock: 200 },
+    { name: 'Whipped Cream', category: 'Toppings', price: 0.5, unit: 'serving', stock: 200 },
+
+    // Cones & Cups (3 products)
+    { name: 'Waffle Cone', category: 'Cones & Cups', price: 1.5, unit: 'piece', stock: 150 },
+    { name: 'Sugar Cone', category: 'Cones & Cups', price: 1.0, unit: 'piece', stock: 150 },
+    { name: 'Cup (Small)', category: 'Cones & Cups', price: 0.5, unit: 'piece', stock: 200 },
+
+    // Sundaes (2 products)
+    { name: 'Banana Split', category: 'Sundaes', price: 8.99, unit: 'serving', stock: 50 },
+    { name: 'Hot Fudge Sundae', category: 'Sundaes', price: 6.99, unit: 'serving', stock: 50 },
+  ],
+};
+
+const cafeDemoData = {
+  categories: [
+    { name: 'Hot Beverages', description: 'Coffee, tea, and hot drinks' },
+    { name: 'Cold Beverages', description: 'Iced drinks and smoothies' },
+    { name: 'Snacks', description: 'Quick bites and snacks' },
+    { name: 'Groceries', description: 'Daily essentials' },
+  ],
+  products: [
+    // Hot Beverages (5 products)
+    { name: 'Espresso', category: 'Hot Beverages', price: 2.5, unit: 'cup', stock: 100 },
+    { name: 'Cappuccino', category: 'Hot Beverages', price: 3.5, unit: 'cup', stock: 100 },
+    { name: 'Latte', category: 'Hot Beverages', price: 3.75, unit: 'cup', stock: 100 },
+    { name: 'Hot Chocolate', category: 'Hot Beverages', price: 3.25, unit: 'cup', stock: 100 },
+    { name: 'Green Tea', category: 'Hot Beverages', price: 2.0, unit: 'cup', stock: 100 },
+
+    // Cold Beverages (4 products)
+    { name: 'Iced Coffee', category: 'Cold Beverages', price: 3.5, unit: 'cup', stock: 100 },
+    { name: 'Iced Latte', category: 'Cold Beverages', price: 4.0, unit: 'cup', stock: 100 },
+    { name: 'Mango Smoothie', category: 'Cold Beverages', price: 4.5, unit: 'cup', stock: 100 },
+    {
+      name: 'Fresh Orange Juice',
+      category: 'Cold Beverages',
+      price: 3.5,
+      unit: 'glass',
+      stock: 100,
+    },
+
+    // Snacks (3 products)
+    { name: 'Croissant', category: 'Snacks', price: 2.5, unit: 'piece', stock: 50 },
+    { name: 'Muffin', category: 'Snacks', price: 2.75, unit: 'piece', stock: 50 },
+    { name: 'Sandwich', category: 'Snacks', price: 5.5, unit: 'piece', stock: 50 },
+
+    // Groceries (3 products)
+    { name: 'Milk (1L)', category: 'Groceries', price: 2.0, unit: 'bottle', stock: 100 },
+    { name: 'Bread Loaf', category: 'Groceries', price: 2.5, unit: 'loaf', stock: 80 },
+    { name: 'Eggs (12 pack)', category: 'Groceries', price: 3.5, unit: 'pack', stock: 60 },
+  ],
+};
+
+/*
+ * A RESTAURANT, FOR A RESTAURANT.
+ *
+ * "restaurant" has been answered with the CAFE pack - coffee, smoothies and a
+ * croissant - because that was the closest catalogue that existed. The comment
+ * on DEMO_PACK_BY_TYPE says so in as many words: "Closer than groceries, which
+ * is where it landed before." Closer is not the same as right, and a
+ * restaurant that signs up and is shown a coffee shop has to delete the whole
+ * thing before it can start.
+ *
+ * WHY THE DISHES CARRY MORE THAN A PRICE.
+ *
+ * Every other pack is a price list, because a hardware shop's catalogue IS a
+ * price list. A menu is not. The ordering pages read a dish's diet mark, its
+ * prep time, what is in it, how the shop bills it and whether the kitchen can
+ * cook it to order - and a demo menu carrying none of those demonstrates a
+ * plain list of names, which is precisely what a restaurant already has on
+ * paper and is not why anybody buys this.
+ *
+ * So: veg marks so the veg filter has something to filter; prep times so the
+ * sheet can say "takes about 20 minutes" and the busy-kitchen notice can
+ * quote a figure; a spice choice on the dishes a kitchen really does cook to
+ * order and on none of the others; and nutrition on a handful rather than all,
+ * because that is what a real shop's menu looks like halfway through being
+ * filled in - and because it shows the badges appearing only where the numbers
+ * earn them.
+ *
+ * PRICES ARE ON THE SAME SCALE AS EVERY OTHER PACK. These are installed in
+ * whatever currency the shop trades in, so 4.50 has to read sensibly as
+ * dollars, euros and hundreds of rupees alike. A menu priced 380 would arrive
+ * in a Dublin cafe as a 380 euro biryani.
+ */
+const restaurantDemoData = {
+  categories: [
+    { name: 'Starters', description: 'To begin with' },
+    { name: 'Main Course', description: 'Curries and grills' },
+    { name: 'Breads & Rice', description: 'To go alongside' },
+    { name: 'Desserts', description: 'To finish' },
+    { name: 'Beverages', description: 'Hot and cold drinks' },
+  ],
+  products: [
+    /* Starters. Two of the four can be cooked to order; the fried ones go
+       into the same oil as everything else and cannot. */
+    {
+      name: 'Paneer Tikka',
+      category: 'Starters',
+      price: 5.5,
+      unit: 'plate',
+      stock: 40,
+      description: 'Charred on skewers, with mint chutney',
+      diet: 'veg',
+      prep_minutes: 15,
+      spice_choice: true,
+      nutrition: { kcal: 320, protein_g: 18, fat_g: 22, carbohydrate_g: 9 },
+      menu_marks: ['signature'],
+    },
+    {
+      name: 'Chicken 65',
+      category: 'Starters',
+      price: 6.0,
+      unit: 'plate',
+      stock: 40,
+      description: 'Dry, curry leaves, a squeeze of lime',
+      diet: 'non_veg',
+      prep_minutes: 15,
+      spice_choice: true,
+      nutrition: { kcal: 410, protein_g: 34, fat_g: 24, carbohydrate_g: 14 },
+    },
+    {
+      name: 'Gobi Manchurian',
+      category: 'Starters',
+      price: 4.75,
+      unit: 'plate',
+      stock: 40,
+      description: 'Cauliflower, soy, spring onion',
+      diet: 'veg',
+      prep_minutes: 12,
+    },
+    {
+      name: 'Masala Papad',
+      category: 'Starters',
+      price: 1.5,
+      unit: 'piece',
+      stock: 60,
+      description: 'Onion, tomato, coriander',
+      diet: 'veg',
+      prep_minutes: 3,
+    },
+
+    /* Main course. Gravies are cooked to order here; the dal is batch-made
+       in the morning, which is exactly the dish that must NOT offer a spice
+       choice however much a customer would like one. */
+    {
+      name: 'Butter Chicken',
+      category: 'Main Course',
+      price: 8.5,
+      unit: 'bowl',
+      stock: 30,
+      description: 'Tomato, butter, cream, fenugreek',
+      diet: 'non_veg',
+      prep_minutes: 25,
+      spice_choice: true,
+      nutrition: { kcal: 490, protein_g: 32, fat_g: 34, carbohydrate_g: 12, sodium_mg: 620 },
+      menu_marks: ['chefs_pick'],
+    },
+    {
+      name: 'Paneer Butter Masala',
+      category: 'Main Course',
+      price: 7.5,
+      unit: 'bowl',
+      stock: 30,
+      description: 'Tomato, butter, cream, fenugreek',
+      diet: 'veg',
+      prep_minutes: 20,
+      spice_choice: true,
+    },
+    {
+      name: 'Grilled Fish',
+      category: 'Main Course',
+      price: 9.5,
+      unit: 'plate',
+      stock: 20,
+      description: 'Whole fish, lemon and pepper, off the grill',
+      diet: 'non_veg',
+      prep_minutes: 25,
+      spice_choice: true,
+      /* Lean and high in protein; the badges it earns are worked out from
+         these numbers and never written down anywhere. */
+      nutrition: { kcal: 280, protein_g: 42, fat_g: 9, carbohydrate_g: 2, sodium_mg: 340 },
+      food_tags: ['gluten_free'],
+      menu_marks: ['signature'],
+    },
+    {
+      name: 'Dal Tadka',
+      category: 'Main Course',
+      price: 5.0,
+      unit: 'bowl',
+      stock: 40,
+      /* NO spice choice, deliberately. It is made once in the morning in one
+         pot, and a kitchen cannot make one portion of it mild. */
+      description: 'Yellow lentils, ghee, cumin',
+      diet: 'veg',
+      prep_minutes: 15,
+      nutrition: { kcal: 240, protein_g: 13, fat_g: 8, carbohydrate_g: 30, fibre_g: 9 },
+    },
+    {
+      name: 'Egg Curry',
+      category: 'Main Course',
+      price: 5.5,
+      unit: 'bowl',
+      stock: 30,
+      description: 'Two eggs, onion and tomato gravy',
+      diet: 'egg',
+      prep_minutes: 15,
+      spice_choice: true,
+    },
+    {
+      name: 'Vegetable Korma',
+      category: 'Main Course',
+      price: 6.5,
+      unit: 'bowl',
+      stock: 30,
+      description: 'Mixed vegetables, cashew and coconut',
+      diet: 'veg',
+      prep_minutes: 20,
+      spice_choice: true,
+      food_tags: ['gluten_free'],
+    },
+
+    /* Breads and rice. Baked or boiled to order, and none of them is a dish
+       anybody asks to have made milder. */
+    {
+      name: 'Butter Naan',
+      category: 'Breads & Rice',
+      price: 1.75,
+      unit: 'piece',
+      stock: 80,
+      description: '',
+      diet: 'veg',
+      prep_minutes: 8,
+    },
+    {
+      name: 'Garlic Naan',
+      category: 'Breads & Rice',
+      price: 2.0,
+      unit: 'piece',
+      stock: 80,
+      description: '',
+      diet: 'veg',
+      prep_minutes: 8,
+    },
+    {
+      name: 'Parotta',
+      category: 'Breads & Rice',
+      price: 1.5,
+      unit: 'piece',
+      stock: 80,
+      description: 'Layered and flaky',
+      diet: 'veg',
+      prep_minutes: 10,
+    },
+    {
+      name: 'Steamed Rice',
+      category: 'Breads & Rice',
+      price: 2.5,
+      unit: 'bowl',
+      stock: 60,
+      description: '',
+      diet: 'veg',
+      prep_minutes: 10,
+      food_tags: ['gluten_free'],
+    },
+    {
+      name: 'Chicken Biryani',
+      category: 'Breads & Rice',
+      price: 8.0,
+      unit: 'plate',
+      stock: 25,
+      description: 'Dum cooked, with raita',
+      diet: 'non_veg',
+      prep_minutes: 30,
+      /* Dum cooked in one sealed pot for the whole service. Same reason as
+         the dal: it cannot be varied by the portion. */
+      nutrition: { kcal: 620, protein_g: 30, fat_g: 22, carbohydrate_g: 74 },
+      menu_marks: ['house_special'],
+    },
+
+    /* Desserts and drinks. Nothing here takes a spice level, which is the
+       point: the tick is per dish because most dishes should not have it. */
+    {
+      name: 'Gulab Jamun',
+      category: 'Desserts',
+      price: 2.5,
+      unit: 'plate',
+      stock: 50,
+      description: 'Two pieces, warm',
+      diet: 'veg',
+      prep_minutes: 5,
+    },
+    {
+      name: 'Rasmalai',
+      category: 'Desserts',
+      price: 3.0,
+      unit: 'plate',
+      stock: 40,
+      description: 'Chilled, saffron and pistachio',
+      diet: 'veg',
+      prep_minutes: 5,
+    },
+    {
+      name: 'Ice Cream',
+      category: 'Desserts',
+      price: 2.0,
+      unit: 'scoop',
+      stock: 60,
+      description: '',
+      diet: 'veg',
+      prep_minutes: 2,
+    },
+    {
+      name: 'Masala Chai',
+      category: 'Beverages',
+      price: 1.25,
+      unit: 'cup',
+      stock: 100,
+      description: '',
+      diet: 'veg',
+      prep_minutes: 5,
+    },
+    {
+      name: 'Filter Coffee',
+      category: 'Beverages',
+      price: 1.5,
+      unit: 'cup',
+      stock: 100,
+      description: '',
+      diet: 'veg',
+      prep_minutes: 5,
+    },
+    {
+      name: 'Fresh Lime Soda',
+      category: 'Beverages',
+      price: 2.0,
+      unit: 'glass',
+      stock: 80,
+      description: 'Sweet, salted or both',
+      diet: 'vegan',
+      prep_minutes: 3,
+      food_tags: ['plant_based'],
+    },
+    {
+      name: 'Mineral Water',
+      category: 'Beverages',
+      price: 0.75,
+      unit: 'bottle',
+      stock: 100,
+      description: '',
+      diet: 'vegan',
+      prep_minutes: 0,
+    },
+  ],
+};
+
+const bakeryDemoData = {
+  categories: [
+    { name: 'Bread', description: 'Fresh baked bread' },
+    { name: 'Pastries', description: 'Sweet and savory pastries' },
+    { name: 'Cakes', description: 'Cakes and celebration items' },
+    { name: 'Cookies', description: 'Cookies and biscuits' },
+  ],
+  products: [
+    // Bread (4 products)
+    { name: 'White Bread', category: 'Bread', price: 2.5, unit: 'loaf', stock: 100 },
+    { name: 'Whole Wheat Bread', category: 'Bread', price: 3.0, unit: 'loaf', stock: 100 },
+    { name: 'Baguette', category: 'Bread', price: 2.75, unit: 'piece', stock: 80 },
+    { name: 'Sourdough', category: 'Bread', price: 4.5, unit: 'loaf', stock: 60 },
+
+    // Pastries (5 products)
+    { name: 'Croissant', category: 'Pastries', price: 2.5, unit: 'piece', stock: 100 },
+    { name: 'Danish Pastry', category: 'Pastries', price: 3.0, unit: 'piece', stock: 80 },
+    { name: 'Cinnamon Roll', category: 'Pastries', price: 3.25, unit: 'piece', stock: 80 },
+    { name: 'Apple Turnover', category: 'Pastries', price: 2.75, unit: 'piece', stock: 80 },
+    { name: 'Donut', category: 'Pastries', price: 1.5, unit: 'piece', stock: 120 },
+
+    // Cakes (3 products)
+    { name: 'Chocolate Cake Slice', category: 'Cakes', price: 4.5, unit: 'slice', stock: 40 },
+    { name: 'Cheesecake Slice', category: 'Cakes', price: 5.0, unit: 'slice', stock: 40 },
+    { name: 'Birthday Cake (8")', category: 'Cakes', price: 25.0, unit: 'cake', stock: 10 },
+
+    // Cookies (3 products)
+    { name: 'Chocolate Chip Cookies', category: 'Cookies', price: 1.5, unit: 'piece', stock: 150 },
+    { name: 'Oatmeal Cookies', category: 'Cookies', price: 1.5, unit: 'piece', stock: 150 },
+    { name: 'Sugar Cookies', category: 'Cookies', price: 1.25, unit: 'piece', stock: 150 },
+  ],
+};
+
+const supermarketDemoData = {
+  categories: [
+    { name: 'Groceries & Staples', description: 'Rice, flour, dal, oil and daily staples' },
+    { name: 'Snacks & Biscuits', description: 'Packaged snacks, biscuits and namkeen' },
+    { name: 'Beverages', description: 'Tea, coffee, soft drinks and juices' },
+    { name: 'Dairy & Bread', description: 'Milk, curd, butter, paneer and bakery' },
+    { name: 'Personal Care', description: 'Soap, shampoo, toothpaste and hygiene' },
+    { name: 'Household & Cleaning', description: 'Detergents, cleaners and home needs' },
+  ],
+  products: [
+    // Groceries & Staples
+    {
+      name: 'Rice (Sona Masoori) 5kg',
+      category: 'Groceries & Staples',
+      price: 380,
+      unit: 'bag',
+      stock: 40,
+    },
+    { name: 'Wheat Atta 5kg', category: 'Groceries & Staples', price: 260, unit: 'bag', stock: 40 },
+    { name: 'Toor Dal 1kg', category: 'Groceries & Staples', price: 165, unit: 'kg', stock: 50 },
+    { name: 'Sugar 1kg', category: 'Groceries & Staples', price: 46, unit: 'kg', stock: 80 },
+    {
+      name: 'Iodised Salt 1kg',
+      category: 'Groceries & Staples',
+      price: 24,
+      unit: 'kg',
+      stock: 100,
+    },
+    {
+      name: 'Sunflower Oil 1L',
+      category: 'Groceries & Staples',
+      price: 145,
+      unit: 'bottle',
+      stock: 60,
+    },
+    {
+      name: 'Tea Powder 250g',
+      category: 'Groceries & Staples',
+      price: 140,
+      unit: 'pack',
+      stock: 50,
+    },
+    // Snacks & Biscuits
+    {
+      name: 'Glucose Biscuits',
+      category: 'Snacks & Biscuits',
+      price: 10,
+      unit: 'pack',
+      stock: 200,
+    },
+    { name: 'Cream Biscuits', category: 'Snacks & Biscuits', price: 30, unit: 'pack', stock: 120 },
+    {
+      name: 'Potato Chips 52g',
+      category: 'Snacks & Biscuits',
+      price: 20,
+      unit: 'pack',
+      stock: 150,
+    },
+    {
+      name: 'Mixture Namkeen 200g',
+      category: 'Snacks & Biscuits',
+      price: 55,
+      unit: 'pack',
+      stock: 80,
+    },
+    // Beverages
+    { name: 'Cola 750ml', category: 'Beverages', price: 40, unit: 'bottle', stock: 96 },
+    { name: 'Mango Drink 600ml', category: 'Beverages', price: 35, unit: 'bottle', stock: 96 },
+    { name: 'Packaged Water 1L', category: 'Beverages', price: 20, unit: 'bottle', stock: 120 },
+    // Dairy & Bread
+    { name: 'Milk 500ml', category: 'Dairy & Bread', price: 27, unit: 'packet', stock: 60 },
+    { name: 'Curd 400g', category: 'Dairy & Bread', price: 35, unit: 'cup', stock: 40 },
+    { name: 'Bread (Sandwich)', category: 'Dairy & Bread', price: 40, unit: 'loaf', stock: 30 },
+    { name: 'Butter 100g', category: 'Dairy & Bread', price: 58, unit: 'pack', stock: 30 },
+    // Personal Care
+    { name: 'Bath Soap 100g', category: 'Personal Care', price: 35, unit: 'piece', stock: 100 },
+    { name: 'Shampoo Sachet', category: 'Personal Care', price: 2, unit: 'sachet', stock: 400 },
+    { name: 'Toothpaste 100g', category: 'Personal Care', price: 55, unit: 'tube', stock: 80 },
+    // Household & Cleaning
+    {
+      name: 'Detergent Powder 1kg',
+      category: 'Household & Cleaning',
+      price: 110,
+      unit: 'pack',
+      stock: 50,
+    },
+    {
+      name: 'Dishwash Bar',
+      category: 'Household & Cleaning',
+      price: 20,
+      unit: 'piece',
+      stock: 100,
+    },
+    {
+      name: 'Floor Cleaner 500ml',
+      category: 'Household & Cleaning',
+      price: 95,
+      unit: 'bottle',
+      stock: 40,
+    },
+  ],
+};
+
+const textileDemoData = {
+  categories: [
+    { name: "Men's Wear", description: 'Shirts, trousers and menswear' },
+    { name: "Women's Wear", description: 'Sarees, kurtis and womenswear' },
+    { name: 'Kids Wear', description: "Children's clothing" },
+    { name: 'Fabrics', description: 'Cloth sold by the meter' },
+  ],
+  products: [
+    { name: 'Formal Shirt (Cotton)', category: "Men's Wear", price: 799, unit: 'piece', stock: 40 },
+    { name: 'Casual T-Shirt', category: "Men's Wear", price: 399, unit: 'piece', stock: 60 },
+    { name: 'Formal Trousers', category: "Men's Wear", price: 999, unit: 'piece', stock: 35 },
+    { name: 'Lungi', category: "Men's Wear", price: 250, unit: 'piece', stock: 50 },
+    { name: 'Cotton Saree', category: "Women's Wear", price: 1200, unit: 'piece', stock: 30 },
+    { name: 'Silk Saree', category: "Women's Wear", price: 4500, unit: 'piece', stock: 15 },
+    { name: 'Kurti (Printed)', category: "Women's Wear", price: 599, unit: 'piece', stock: 45 },
+    { name: 'Chudidar Set', category: "Women's Wear", price: 899, unit: 'set', stock: 30 },
+    { name: 'Kids T-Shirt', category: 'Kids Wear', price: 249, unit: 'piece', stock: 50 },
+    { name: 'Kids Frock', category: 'Kids Wear', price: 449, unit: 'piece', stock: 35 },
+    { name: 'School Uniform Set', category: 'Kids Wear', price: 699, unit: 'set', stock: 40 },
+    {
+      name: 'Shirting Fabric (Cotton)',
+      category: 'Fabrics',
+      price: 220,
+      unit: 'meter',
+      stock: 200,
+    },
+    { name: 'Suiting Fabric', category: 'Fabrics', price: 450, unit: 'meter', stock: 150 },
+    { name: 'Blouse Material', category: 'Fabrics', price: 150, unit: 'meter', stock: 100 },
+  ],
+};
+
+const electricalDemoData = {
+  categories: [
+    { name: 'Wires & Cables', description: 'House wiring and cables' },
+    { name: 'Switches & Sockets', description: 'Modular switches, sockets and MCBs' },
+    { name: 'Lighting', description: 'Bulbs, tubes and decorative lights' },
+    { name: 'Fans & Appliances', description: 'Fans and small appliances' },
+  ],
+  products: [
+    {
+      name: 'Copper Wire 1.5sqmm (90m)',
+      category: 'Wires & Cables',
+      price: 1450,
+      unit: 'roll',
+      stock: 25,
+    },
+    {
+      name: 'Copper Wire 2.5sqmm (90m)',
+      category: 'Wires & Cables',
+      price: 2250,
+      unit: 'roll',
+      stock: 20,
+    },
+    { name: 'Extension Cord 5m', category: 'Wires & Cables', price: 350, unit: 'piece', stock: 30 },
+    {
+      name: 'Modular Switch 6A',
+      category: 'Switches & Sockets',
+      price: 45,
+      unit: 'piece',
+      stock: 200,
+    },
+    {
+      name: '3-Pin Socket 16A',
+      category: 'Switches & Sockets',
+      price: 95,
+      unit: 'piece',
+      stock: 100,
+    },
+    {
+      name: 'MCB 16A Single Pole',
+      category: 'Switches & Sockets',
+      price: 180,
+      unit: 'piece',
+      stock: 60,
+    },
+    {
+      name: 'Switch Board Plate (8M)',
+      category: 'Switches & Sockets',
+      price: 120,
+      unit: 'piece',
+      stock: 80,
+    },
+    { name: 'LED Bulb 9W', category: 'Lighting', price: 99, unit: 'piece', stock: 150 },
+    { name: 'LED Tube 20W 4ft', category: 'Lighting', price: 220, unit: 'piece', stock: 80 },
+    { name: 'LED Panel 15W (Round)', category: 'Lighting', price: 320, unit: 'piece', stock: 50 },
+    {
+      name: 'Ceiling Fan 1200mm',
+      category: 'Fans & Appliances',
+      price: 1650,
+      unit: 'piece',
+      stock: 20,
+    },
+    {
+      name: 'Table Fan 400mm',
+      category: 'Fans & Appliances',
+      price: 1350,
+      unit: 'piece',
+      stock: 15,
+    },
+    {
+      name: 'Electric Kettle 1.5L',
+      category: 'Fans & Appliances',
+      price: 850,
+      unit: 'piece',
+      stock: 15,
+    },
+  ],
+};
+
+const hardwareDemoData = {
+  categories: [
+    { name: 'Hand Tools', description: 'Hammers, screwdrivers and tools' },
+    { name: 'Fasteners', description: 'Screws, nails, nuts and bolts' },
+    { name: 'Plumbing', description: 'Pipes, taps and fittings' },
+    { name: 'Paint & Supplies', description: 'Paints, brushes and finishing' },
+  ],
+  products: [
+    { name: 'Claw Hammer 500g', category: 'Hand Tools', price: 280, unit: 'piece', stock: 25 },
+    { name: 'Screwdriver Set (6pc)', category: 'Hand Tools', price: 350, unit: 'set', stock: 30 },
+    { name: 'Measuring Tape 5m', category: 'Hand Tools', price: 120, unit: 'piece', stock: 40 },
+    { name: 'Pliers 8 inch', category: 'Hand Tools', price: 220, unit: 'piece', stock: 30 },
+    { name: 'Hacksaw with Blade', category: 'Hand Tools', price: 180, unit: 'piece', stock: 20 },
+    { name: 'Wood Screws 1" (100pc)', category: 'Fasteners', price: 90, unit: 'box', stock: 60 },
+    { name: 'Wire Nails 2" 1kg', category: 'Fasteners', price: 110, unit: 'kg', stock: 50 },
+    {
+      name: 'Anchor Fastener 6mm (50pc)',
+      category: 'Fasteners',
+      price: 150,
+      unit: 'box',
+      stock: 40,
+    },
+    { name: 'PVC Pipe 3/4" (3m)', category: 'Plumbing', price: 210, unit: 'piece', stock: 40 },
+    { name: 'Bib Tap (Brass)', category: 'Plumbing', price: 380, unit: 'piece', stock: 25 },
+    { name: 'Teflon Tape', category: 'Plumbing', price: 15, unit: 'roll', stock: 150 },
+    { name: 'PVC Elbow 3/4"', category: 'Plumbing', price: 18, unit: 'piece', stock: 100 },
+    {
+      name: 'Emulsion Paint 1L (White)',
+      category: 'Paint & Supplies',
+      price: 320,
+      unit: 'tin',
+      stock: 30,
+    },
+    {
+      name: 'Paint Brush 4 inch',
+      category: 'Paint & Supplies',
+      price: 95,
+      unit: 'piece',
+      stock: 40,
+    },
+    {
+      name: 'Sandpaper Sheet (80 grit)',
+      category: 'Paint & Supplies',
+      price: 12,
+      unit: 'sheet',
+      stock: 200,
+    },
+  ],
+};
+
+/*
+ * Which pack a shop gets, from whatever word describes it.
+ *
+ * THE VOCABULARY IS NOT OURS ALONE. The word arrives from the cloud signup,
+ * where the list is: retail, supermarket, restaurant, cafe, bakery, pharmacy,
+ * hardware, electronics, textile, other. This file was written against a
+ * different list, and the two disagreed in a way nothing reported:
+ *
+ *   - "electronics" matched no case, so the ELECTRICAL pack was unreachable
+ *     and an electronics shop was handed groceries
+ *   - "icecream" could not be sent at all, so that pack was unreachable too
+ *   - "restaurant" fell to the default, so a restaurant was handed groceries
+ *     when the cafe pack - prepared food and drink - is what it wanted
+ *
+ * Two of the seven packs could not be reached by any real signup. The failure
+ * was silent because the default returns something plausible: every shop got a
+ * supermarket, which looks like a decision rather than a miss.
+ *
+ * So both vocabularies are accepted, and the input is normalised, because
+ * "Cafe" and "ice cream" are the same answers as "cafe" and "icecream" and a
+ * switch on a raw string does not think so.
+ */
+const DEMO_PACK_BY_TYPE = {
+  icecream: 'iceCream',
+  'ice cream': 'iceCream',
+
+  cafe: 'cafe',
+  coffee: 'cafe',
+  /*
+   * A restaurant gets a restaurant now.
+   *
+   * This pointed at the cafe pack - coffee, smoothies and a croissant -
+   * because that was the closest catalogue that existed, and the note here
+   * said so: "Closer than groceries, which is where it landed before."
+   * Closer is not right. A restaurant that signed up was shown a coffee
+   * shop and had to delete the whole thing before it could start.
+   */
+  restaurant: 'restaurant',
+
+  bakery: 'bakery',
+
+  supermarket: 'supermarket',
+  kirana: 'supermarket',
+  grocery: 'supermarket',
+  groceries: 'supermarket',
+  retail: 'supermarket',
+
+  textile: 'textile',
+  textiles: 'textile',
+  apparel: 'textile',
+  clothing: 'textile',
+
+  electrical: 'electrical',
+  electronics: 'electronics',
+
+  hardware: 'hardware',
+};
+
+const DEMO_PACKS = {
+  iceCream: iceCreamDemoData,
+  restaurant: restaurantDemoData,
+  cafe: cafeDemoData,
+  bakery: bakeryDemoData,
+  supermarket: supermarketDemoData,
+  textile: textileDemoData,
+  electrical: electricalDemoData,
+  electronics: electricalDemoData,
+  hardware: hardwareDemoData,
+};
+
+/*
+ * The packs a shop can be offered, in the order a chooser should list them.
+ *
+ * SEPARATE FROM DEMO_PACK_BY_TYPE on purpose. That map is an INPUT vocabulary -
+ * every word a signup form, an onboarding answer or a Gateway payload might use
+ * for a trade, and several of them point at the same pack ("kirana", "grocery"
+ * and "retail" are all the supermarket set). Showing that map to somebody
+ * choosing an industry would offer them the same catalogue five times under
+ * five names.
+ *
+ * This is the OUTPUT list: one entry per distinct catalogue, with the words a
+ * shopkeeper would use for their own trade. A pack added to DEMO_PACKS without
+ * a line here fails the test rather than quietly never being offered.
+ */
+const DEMO_PACK_LABELS = {
+  supermarket: 'Supermarket, kirana & grocery',
+  restaurant: 'Restaurant',
+  /* No longer "Cafe & restaurant": a restaurant has its own pack now, and a
+     chooser offering both under one name would send half of them back to the
+     coffee shop. */
+  cafe: 'Cafe & coffee shop',
+  bakery: 'Bakery',
+  iceCream: 'Ice cream parlour',
+  textile: 'Clothing & textiles',
+  electrical: 'Electronics & electrical',
+  hardware: 'Hardware & tools',
+};
+
+/*
+ * What a chooser needs to draw itself: the key to send back, the words to show,
+ * and how much arrives if it is picked.
+ *
+ * The counts are COUNTED, never written down. A hand-maintained "24 products"
+ * is right on the day it is typed and wrong from the next edit onwards, and
+ * nothing about a stale number looks wrong.
+ */
+function listDemoPacks() {
+  return Object.keys(DEMO_PACK_LABELS).map((key) => {
+    const pack = DEMO_PACKS[key] || { categories: [], products: [] };
+    return {
+      key,
+      label: DEMO_PACK_LABELS[key],
+      categories: (pack.categories || []).length,
+      products: (pack.products || []).length,
+      /* Photographs are attached from the manifest at load, so this says what
+         the shop will actually see rather than what the catalogue hoped for. */
+      photos: (pack.products || []).filter((p) => p && p.image).length,
+    };
+  });
+}
+
+/*
+ * Is this a pack a caller may ask for by name?
+ *
+ * getDemoDataByType falls back to supermarket for anything it does not know,
+ * which is right when the input is a trade somebody typed - but wrong when it
+ * is a deliberate choice from a list. Silently installing groceries into a
+ * bakery because a key was misspelt is a bad answer delivered confidently.
+ */
+function isDemoPack(key) {
+  if (Object.prototype.hasOwnProperty.call(DEMO_PACK_LABELS, String(key || ''))) return true;
+  /* Dataset trades are packs too - the website's per-currency zips. Resolved
+     through the same normaliser the installer uses, so the chooser and the
+     validator can never disagree about what a key means. */
+  // eslint-disable-next-line global-require
+  const { datasetKeyFor } = require('../src/services/demo-dataset');
+  return datasetKeyFor(key) !== null;
+}
+
+function getDemoDataByType(businessType) {
+  const key = String(businessType == null ? '' : businessType)
+    .trim()
+    .toLowerCase();
+  const pack = DEMO_PACK_BY_TYPE[key];
+  /* Generic retail default: a kirana/supermarket set fits most shops, and is
+     the right answer for "retail", "pharmacy" and "other", which have no pack
+     of their own yet. */
+  return DEMO_PACKS[pack] || supermarketDemoData;
+}
+
+/*
+ * Attach the photographs, where there is one.
+ *
+ * DERIVED, NOT WRITTEN IN. The images live in the frontend as static files and
+ * their manifest is written by scripts/fetch-demo-images.js. Pasting paths into
+ * the product literals would mean a product could name a file that is not
+ * there, or a file could sit unused, and neither would say so. Reading the
+ * manifest means the two cannot disagree: an image exists and is used, or it
+ * does not and the product simply has none.
+ *
+ * A product without one is a normal, finished state - PosnicPro.autoTile gives
+ * it a coloured tile from its own name, which is a real answer on a sale grid.
+ * Many of these products have no photograph because the automated search
+ * returned somebody's brand, a photograph of people, or the wrong object
+ * entirely, and those were turned down on sight - the reasons are kept in
+ * scripts/demo-image-rejects.json so a re-run cannot undo the review. A wrong
+ * picture is read as fact; an absent one is read as an absent one.
+ *
+ * Best-effort on purpose: a missing or unreadable manifest must never stop a
+ * shop being created. It costs the pictures, nothing else.
+ */
+function attachImages() {
+  /* Declared without a value: the catch below returns, so the only way past
+     this point is with the manifest assigned. Seeding it with {} first is an
+     assignment nothing ever reads, which eslint reports as an error. */
+  let credits;
+  try {
+    // eslint-disable-next-line global-require
+    credits = require('../../frontend/static/images/demo/credits.json');
+  } catch (e) {
+    return;
+  }
+
+  const byPack = {};
+  for (const entry of Object.values(credits)) {
+    if (!entry || !entry.pack || !entry.product || !entry.file) continue;
+    (byPack[entry.pack] = byPack[entry.pack] || {})[entry.product] = entry.file;
+  }
+
+  const packs = {
+    iceCream: iceCreamDemoData,
+    cafe: cafeDemoData,
+    bakery: bakeryDemoData,
+    supermarket: supermarketDemoData,
+    textile: textileDemoData,
+    electrical: electricalDemoData,
+    hardware: hardwareDemoData,
+    restaurant: restaurantDemoData,
+  };
+
+  for (const [name, pack] of Object.entries(packs)) {
+    const map = byPack[name];
+    if (!map || !pack || !Array.isArray(pack.products)) continue;
+    for (const product of pack.products) {
+      if (map[product.name]) product.image = map[product.name];
+    }
+  }
+}
+
+attachImages();
+
+module.exports = {
+  getDemoDataByType,
+  listDemoPacks,
+  isDemoPack,
+  DEMO_PACK_LABELS,
+  attachImages,
+  iceCreamDemoData,
+  restaurantDemoData,
+  cafeDemoData,
+  bakeryDemoData,
+  supermarketDemoData,
+  textileDemoData,
+  electricalDemoData,
+  hardwareDemoData,
+};

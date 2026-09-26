@@ -1,0 +1,146 @@
+'use strict';
+
+jest.mock('../../../src/controllers/settings.controller', () => {
+  const make = jest.fn();
+  return {
+    getJSONCountry: make,
+    getJSONState: make,
+    getJSONCurrency: make,
+    getJSONTimeZone: make,
+    forgotPassword: make,
+    getDefaultCustomer: make,
+    getDefaultSupplier: make,
+    getDefaultCustomerSupplier: make,
+    backupTable: make,
+    updateGeneralSetting: make,
+    updateStarterLocale: make,
+    updateCommonSettings: make,
+    getBranchModules: make,
+    getModifierGroups: make,
+    addModifierGroup: make,
+    editModifierGroup: make,
+    deleteModifierGroup: make,
+    getTaxProfile: make,
+    getPriceLists: make,
+    savePriceList: make,
+    deletePriceList: make,
+    getTaxAll: make,
+    getTaxAjaxList: make,
+    getTaxGroup: make,
+    addTax: make,
+    editTax: make,
+    deleteTax: make,
+    getUnitAll: make,
+    previewReceiptQr: make,
+    getUnitAjaxList: make,
+    addUnit: make,
+    editUnit: make,
+    deleteUnit: make,
+    addTaxGroup: make,
+    editTaxGroup: make,
+    deleteTaxGroup: make,
+    addDenomForm: make,
+    addDenomData: make,
+    getDenomAll: make,
+    editDenomForm: make,
+    deleteDenom: make,
+    getPaymentAll: make,
+    addPaymentData: make,
+    editPaymentForm: make,
+    deletePayment: make,
+    updateWay2SmsSetting: make,
+    updateTextLocalSmsSetting: make,
+    updateOfflineSetting: make,
+    updateBranchLogo: make,
+    updateKioskImages: make,
+    storedImageData: make,
+    branchImageDelete: make,
+    updateCustomerSettings: make,
+    updateSupplierSettings: make,
+    changePassword: make,
+    salesSmsReceipt: make,
+    saveWhatsAppReceipt: make,
+    getWhatsAppReceipt: make,
+    paymentsKey: make,
+    phonepepaymentsKey: make,
+    deleteCollection: make,
+    deleteAllSelectedCollection: make,
+    getJSONGstState: make,
+    listPrintTills: make,
+    allowPrintTill: make,
+    forgetPrintTill: make,
+    restoreBackup: make,
+    getDasboardSalesCount: make,
+    getRecycleBin: make,
+    autoSuggestionRecycleBinTableField: make,
+    getAllCollectionTotal: make,
+    emailSetting: make,
+    kioskAccountSettings: make,
+    kioskPrinterSettings: make,
+    kioskPayment: make,
+    kioskupdateInfo: make,
+    addTableOrderData: make,
+    getTableOrderAll: make,
+    editTableOrderForm: make,
+    deleteTableOrder: make,
+    getThemeSettings: make,
+    updateThemeSettings: make,
+  };
+});
+
+jest.mock('../../../src/middleware/auth', () => ({ protect: jest.fn((req, res, next) => next()) }));
+jest.mock('../../../src/middleware/validation', () => ({
+  handleValidationErrors: jest.fn((req, res, next) => next()),
+}));
+jest.mock('../../../src/middleware/upload', () => ({
+  single: jest.fn(() => (req, res, next) => next()),
+  fields: jest.fn(() => (req, res, next) => next()),
+}));
+jest.mock('../../../src/middleware/settings.validation', () => ({
+  validateGeneralSetting: [],
+  validateTax: [],
+  validateUnit: [],
+  validateTaxGroup: [],
+  validateDenom: [],
+  validatePayment: [],
+  validateCommonSettings: [],
+  validateChangePassword: [],
+  validateWay2SmsSetting: [],
+  validateTextLocalSmsSetting: [],
+}));
+
+const router = require('../../../src/routes/settings.routes');
+
+describe('settings.routes', () => {
+  test('exposes settings routes', () => {
+    expect(router.stack.filter((layer) => layer.route).length).toBeGreaterThan(10);
+  });
+
+  test('reference data carries a day of HTTP cache', () => {
+    /* Country/state/currency/timezone lists are anonymous, byte-identical
+       for every caller, and change only with a release. The versioned SW
+       cache resets on every deploy, so THIS header is what makes the repeat
+       fetch free ("getJSONState this is not covered with service worker?"). */
+    const refRoutes = [
+      '/getJSONCountry',
+      '/getJSONState',
+      '/getJSONCurrency',
+      '/getJSONTimeZone',
+      '/getJSONGstState',
+    ];
+    for (const p of refRoutes) {
+      const layer = router.stack.find((l) => l.route && l.route.path === p);
+      expect(layer).toBeDefined();
+      /* two handlers: the cache middleware, then the controller */
+      expect(layer.route.stack.length).toBeGreaterThanOrEqual(2);
+      const res = { set: jest.fn() };
+      const next = jest.fn();
+      layer.route.stack[0].handle({}, res, next);
+      expect(res.set).toHaveBeenCalledWith(
+        'Cache-Control',
+        'public, max-age=86400, stale-while-revalidate=604800'
+      );
+      expect(next).toHaveBeenCalled();
+    }
+  });
+});

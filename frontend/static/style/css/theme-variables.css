@@ -1,0 +1,3409 @@
+/* Theme Variables CSS - Dynamic theming support */
+
+/* Self-hosted DM Sans (variable font) - served same-origin from /static/fonts
+   so browser privacy/ad-block extensions and CDN blockers can NEVER stop the
+   font from loading (which is why earlier font changes looked unchanged). */
+@font-face {
+    font-family: 'DM Sans';
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: url(/static/fonts/dmsans/dmsans-1.woff2) format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+    font-family: 'DM Sans';
+    font-style: normal;
+    font-weight: 400 700;
+    font-display: swap;
+    src: url(/static/fonts/dmsans/dmsans-0.woff2) format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* Self-hosted Lexend (Eye Comfort theme) - same reasoning as DM Sans above,
+   plus the no-remote-code guard: a till may be offline and no shipped page may
+   load executable content from another host. Variable font, weights 400-500. */
+@font-face {
+    font-family: 'Lexend';
+    font-style: normal;
+    font-weight: 400 500;
+    font-display: swap;
+    src: url(/static/fonts/lexend/lexend-latin.woff2) format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+    font-family: 'Lexend';
+    font-style: normal;
+    font-weight: 400 500;
+    font-display: swap;
+    src: url(/static/fonts/lexend/lexend-latin-ext.woff2) format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+:root {
+    /* Primary Colors */
+    --theme-primary-color: #506fe4;
+    --theme-primary-hover: #3f5cd6;
+    
+    /* Background Colors */
+    --theme-body-bg: #f2f3f7;
+    --theme-card-bg: #ffffff;
+    --theme-sidebar-bg: #ffffff;
+    --theme-topbar-bg: #ffffff;
+    
+    /* Text Colors - dark navy instead of pure black: high legibility without
+       the halation/harshness of #000 over a long shift. Muted passes WCAG AA. */
+    --theme-text-primary: #16203a;
+    --theme-text-secondary: #3a4459;
+    --theme-text-muted: #5b6577;
+     
+    /* Font Settings
+       Native system-font stack: Segoe UI on Windows, SF on macOS, Roboto on
+       Android/Linux. Zero network load (works offline in Electron), crisp on
+       every OS, and the feel is native + professional. 'Mukta Vaani' is kept
+       as a late fallback. Body weight 400 for legibility (300 strains). */
+    --theme-font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+    --theme-font-size-base: 16px;
+    --theme-font-size-small: calc(var(--theme-font-size-base) - 2px);
+    --theme-font-size-large: calc(var(--theme-font-size-base) + 2px);
+    --theme-font-weight: 400;
+    
+    /* Border Colors - cool grey that harmonises with the indigo brand */
+    --theme-border-color: #e5e8ef;
+
+    /* Table Colors - header a hair cooler; row hover carries a faint brand tint */
+    --theme-table-header-bg: #f6f7fb;
+    --theme-table-row-hover: #eef2fd;
+    
+    /* Menu Colors */
+    --theme-menu-bg: #ffffff;
+    --theme-menu-text: #333333;
+    --theme-menu-active-bg: #5a8dee;
+    --theme-menu-active-text: #ffffff;
+    
+    /* Button Colors */
+    --theme-btn-primary-bg: var(--theme-primary-color);
+    --theme-btn-primary-text: #ffffff;
+    
+    /* Alert/Status Colors - calmer, accessible tones (the old neon green/red
+       read as "loud" over a long shift); harmonised with the indigo primary. */
+    --theme-success-color: #16b364;
+    --theme-warning-color: #f79009;
+    --theme-danger-color: #f04438;
+    --theme-info-color: #2e90fa;
+}
+
+ html,
+ body {
+     background-color: var(--theme-body-bg);
+     color: var(--theme-text-primary);
+     font-family: var(--theme-font-family);
+     font-size: var(--theme-font-size-base);
+     font-weight: var(--theme-font-weight);
+     /* Crisper glyph edges on retina / macOS. (Dropped text-rendering:
+        optimizeLegibility - it forces expensive text shaping on every reflow,
+        which added to the resize/scroll jank on dense pages.) */
+     -webkit-font-smoothing: antialiased;
+     -moz-osx-font-smoothing: grayscale;
+ }
+
+ a {
+     color: var(--theme-primary-color);
+ }
+
+ a:hover {
+     color: var(--theme-primary-hover);
+ }
+
+ [data-theme] .text-dark,
+ [data-theme] .text-black,
+ [data-theme] .text-body {
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .text-muted {
+     color: var(--theme-text-muted) !important;
+ }
+ 
+ [data-theme] .text-white {
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .select2-container--default .select2-selection--single,
+ [data-theme] .select2-container--default .select2-selection--multiple {
+     background-color: var(--theme-card-bg) !important;
+     border-color: var(--theme-border-color) !important;
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .select2-container--default .select2-selection--single .select2-selection__rendered {
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .select2-container--default .select2-selection--single .select2-selection__placeholder {
+     color: var(--theme-text-muted) !important;
+ }
+
+ [data-theme] .select2-container--default .select2-selection--single .select2-selection__arrow b {
+     border-color: var(--theme-text-muted) transparent transparent transparent !important;
+ }
+
+ [data-theme] .select2-container--default.select2-container--focus .select2-selection--single,
+ [data-theme] .select2-container--default.select2-container--focus .select2-selection--multiple,
+ [data-theme] .select2-container--default.select2-container--open .select2-selection--single,
+ [data-theme] .select2-container--default.select2-container--open .select2-selection--multiple {
+     border-color: var(--theme-primary-color) !important;
+ }
+
+ [data-theme] .select2-dropdown {
+     background-color: var(--theme-card-bg) !important;
+     border-color: var(--theme-border-color) !important;
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .select2-container--default .select2-results__option {
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .select2-container--default .select2-results__option--highlighted[aria-selected] {
+     background-color: var(--theme-table-row-hover) !important;
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .select2-container--default .select2-results__option[aria-selected='true'] {
+     background-color: var(--theme-table-row-hover) !important;
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .wallet-box {
+     background-color: var(--theme-card-bg) !important;
+     border-color: var(--theme-border-color) !important;
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .wallet-box label,
+ [data-theme] .wallet-box span,
+ [data-theme] .wallet-box lang {
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .wallet-box .feather,
+ [data-theme] .wallet-box i {
+     color: var(--theme-text-muted) !important;
+ }
+
+ .card,
+ .portlet.light {
+     background-color: var(--theme-card-bg);
+     border-color: var(--theme-border-color);
+     color: var(--theme-text-primary);
+ }
+
+ .table {
+     color: var(--theme-text-primary);
+ }
+
+ .table th {
+     background-color: var(--theme-table-header-bg);
+     color: var(--theme-text-primary);
+ }
+
+ .table-hover tbody tr:hover {
+     background-color: var(--theme-table-row-hover);
+ }
+
+ [data-theme] #chartdiv,
+ [data-theme] .chartdiv {
+     background-color: var(--theme-card-bg) !important;
+     border: 1px solid var(--theme-border-color) !important;
+     border-radius: 5px;
+ }
+
+ [data-theme] #chartdiv svg text,
+ [data-theme] #chartdiv svg tspan {
+     fill: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] #chartdiv svg path[stroke="#000000"],
+ [data-theme] #chartdiv svg line[stroke="#000000"] {
+     stroke: var(--theme-border-color) !important;
+ }
+
+ [data-theme] #chartdiv svg [fill="#000000"],
+ [data-theme] #chartdiv svg [fill="#000"] {
+     fill: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] #chartdiv svg [stroke="#000000"],
+ [data-theme] #chartdiv svg [stroke="#000"] {
+     stroke: var(--theme-border-color) !important;
+ }
+
+ [data-theme] #chartdiv svg foreignObject,
+ [data-theme] #chartdiv svg foreignObject * {
+     color: var(--theme-text-primary) !important;
+ }
+
+ .form-control {
+     background-color: var(--theme-card-bg);
+     border-color: var(--theme-border-color);
+     color: var(--theme-text-primary);
+ }
+
+ /* --- Input-group corners: keep the field and its trailing button meeting
+    cleanly, so no rounded-corner "bulge" shows at the join (New Purchase /
+    New Sale search boxes). Higher specificity than the base radius; no !important. */
+ .chat-search .input-group input[type="search"],
+ .input-group > .form-control:not(:last-child) {
+     border-top-right-radius: 0;
+     border-bottom-right-radius: 0;
+ }
+ .chat-search .input-group-append > .btn,
+ .input-group > .input-group-append > .btn {
+     border-top-left-radius: 0;
+     border-bottom-left-radius: 0;
+ }
+
+ /* --- Details > Activities: the stacked stat cards (Total Sales, Items Sold,
+    Returns) used a 30px gap that read as too airy. Tighten it, scoped to the
+    activity portlet so global .m-b-30 spacing is untouched (no !important). */
+ .slider-portlet-vh .card.m-b-30 {
+     margin-bottom: 14px;
+ }
+
+ /* --- New Purchase qty +/- buttons: the feather icon sat a couple of pixels
+    low inside the button. Flex-center it so the +/- lines up with the centered
+    quantity value (a real fix, not a magic-number nudge). */
+ .input-group .receive_qty_check {
+     display: inline-flex;
+     align-items: center;
+     justify-content: center;
+     line-height: 1;
+ }
+
+ /* --- Customer search product cards: the thumbnail was img-fluid with no
+    height cap, so a tall product image filled the whole card. Keep it a
+    consistent, contained thumbnail in the grid; clicking it still opens the
+    full image in the popup. */
+ .product-bar .product-head {
+     height: 170px;
+     display: flex;
+     align-items: center;
+     justify-content: center;
+     overflow: hidden;
+ }
+ .product-bar .product-head img,
+ .product-bar .product-head .img-fluid {
+     max-height: 170px;
+     max-width: 100%;
+     width: auto;
+     object-fit: contain;
+ }
+
+ [data-theme] select,
+ [data-theme] .custom-select,
+ [data-theme] select.form-control,
+ [data-theme] select.border-control {
+     background-color: var(--theme-card-bg) !important;
+     border-color: var(--theme-border-color) !important;
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] select:focus,
+ [data-theme] .custom-select:focus,
+ [data-theme] select.form-control:focus,
+ [data-theme] select.border-control:focus {
+     border-color: var(--theme-primary-color) !important;
+ }
+
+ [data-theme] select option {
+     background-color: var(--theme-card-bg);
+     color: var(--theme-text-primary);
+ }
+
+ [data-theme] .daterange-timepicker-all,
+ [data-theme] .daterange-style,
+ [data-theme] .date-align,
+ [data-theme] .view_kot_report_daterange {
+     background-color: var(--theme-card-bg) !important;
+     border-color: var(--theme-border-color) !important;
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .daterange-timepicker-all .feather,
+ [data-theme] .daterange-style .feather,
+ [data-theme] .view_kot_report_daterange .feather {
+     color: var(--theme-text-muted) !important;
+ }
+
+ [data-theme] .daterangepicker {
+     background-color: var(--theme-card-bg) !important;
+     border-color: var(--theme-border-color) !important;
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .daterangepicker .calendar-table {
+     background-color: var(--theme-card-bg) !important;
+     border-color: var(--theme-border-color) !important;
+ }
+
+ [data-theme] .daterangepicker .calendar-table th,
+ [data-theme] .daterangepicker .calendar-table td {
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .daterangepicker td.off,
+ [data-theme] .daterangepicker td.off.in-range,
+ [data-theme] .daterangepicker td.off.start-date,
+ [data-theme] .daterangepicker td.off.end-date {
+     color: var(--theme-text-muted) !important;
+ }
+
+ [data-theme] .daterangepicker td.available:hover,
+ [data-theme] .daterangepicker th.available:hover {
+     background-color: var(--theme-table-row-hover) !important;
+ }
+
+ [data-theme] .daterangepicker td.in-range {
+     background-color: var(--theme-table-row-hover) !important;
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .daterangepicker td.active,
+ [data-theme] .daterangepicker td.active:hover {
+     background-color: var(--theme-primary-color) !important;
+     color: #ffffff !important;
+ }
+
+ [data-theme] .daterangepicker .ranges li {
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .daterangepicker .ranges li:hover,
+ [data-theme] .daterangepicker .ranges li.active {
+     background-color: var(--theme-table-row-hover) !important;
+     color: var(--theme-text-primary) !important;
+ }
+
+ [data-theme] .daterangepicker select,
+ [data-theme] .daterangepicker input {
+     background-color: var(--theme-card-bg) !important;
+     border-color: var(--theme-border-color) !important;
+     color: var(--theme-text-primary) !important;
+ }
+
+ .form-control::placeholder {
+     color: var(--theme-text-muted);
+     opacity: 1;
+ }
+
+ .form-control:disabled,
+ .form-control[readonly] {
+     color: var(--theme-text-muted);
+ }
+
+ .form-control:focus {
+     border-color: var(--theme-primary-color);
+ }
+
+ .dropdown-menu {
+     background-color: var(--theme-card-bg);
+     border-color: var(--theme-border-color);
+ }
+
+ .dropdown-item {
+     color: var(--theme-text-primary);
+ }
+
+ .dropdown-item:hover,
+ .dropdown-item:focus {
+     background-color: var(--theme-table-row-hover);
+     color: var(--theme-text-primary);
+ }
+
+/* ============================================
+   DARK THEME - VS Code Inspired
+   Background: Deep charcoal, Text: Soft white
+   ============================================ */
+[data-theme="dark"] {
+    --theme-primary-color: #569cd6;
+    --theme-primary-hover: #4fc3f7;
+    --theme-body-bg: #1e1e1e;
+    --theme-card-bg: #252526;
+    --theme-sidebar-bg: #252526;
+    --theme-topbar-bg: #323233;
+    --theme-text-primary: #ffffff;
+    --theme-text-secondary: #e0e0e0;
+    --theme-text-muted: #c7c7c7;
+    --theme-border-color: #525252;
+    --theme-table-header-bg: #2d2d2d;
+    --theme-table-row-hover: #2a2d2e;
+    --theme-menu-bg: #252526;
+    --theme-menu-text: #e0e0e0;
+    --theme-menu-active-bg: #37373d;
+    --theme-btn-primary-bg: #0e639c;
+    --theme-success-color: #4ec9b0;
+    --theme-warning-color: #dcdcaa;
+    --theme-danger-color: #f14c4c;
+    --theme-info-color: #3794ff;
+}
+
+[data-theme="dark"] .vertical-menu li a,
+[data-theme="dark"] .metismenu li a {
+    color: #e0e0e0 !important;
+}
+
+[data-theme="dark"] .vertical-menu li a:hover,
+[data-theme="dark"] .metismenu li a:hover {
+    color: #ffffff !important;
+    background-color: #2a2d2e !important;
+}
+
+[data-theme="dark"] .title_h2 {
+    color: #569cd6 !important;
+}
+
+[data-theme="dark"] label.btn.active {
+    color: #e0e0e0 !important;
+} 
+
+[data-theme="dark"] .table,
+[data-theme="dark"] .table td,
+[data-theme="dark"] .table span {
+    color: #ffffff !important;
+}
+
+[data-theme="dark"] .table th {
+    color: #569cd6 !important;
+    background-color: #2d2d2d !important;
+}
+
+[data-theme="dark"] .nav-pills .nav-link {
+    color: #e0e0e0 !important;
+}
+
+[data-theme="dark"] .form-control {
+    background-color: #3c3c3c !important;
+    border-color: #3c3c3c !important;
+    color: #ffffff !important;
+}
+
+[data-theme="dark"] .form-control:focus {
+    border-color: #569cd6 !important;
+}
+
+[data-theme="dark"] .btn-outline-primary {
+    color: #569cd6 !important;
+    border-color: #569cd6 !important;
+}
+
+[data-theme="dark"] .dropdown-menu {
+    background-color: #252526 !important;
+    border-color: #3c3c3c !important;
+}
+
+[data-theme="dark"] .dropdown-item {
+    color: #e0e0e0 !important;
+}
+
+[data-theme="dark"] .dropdown-item:hover {
+    background-color: #2a2d2e !important;
+    color: #ffffff !important;
+}
+
+[data-theme="dark"] .leftbar,
+[data-theme="dark"] .leftbar-tab-menu {
+    background-color: #252526 !important;
+}
+
+[data-theme="dark"] .v-pills-tab .nav-link {
+    color: #e0e0e0 !important;
+    background-color: transparent !important;
+}
+
+[data-theme="dark"] .v-pills-tab .nav-link:hover {
+    color: #ffffff !important;
+    background-color: #37373d !important;
+}
+
+[data-theme="dark"] .v-pills-tab .nav-link.active {
+    color: #ffffff !important;
+    background-color: #569cd6 !important;
+}
+
+[data-theme="dark"] .btn-outline-secondary {
+    color: #e0e0e0 !important;
+    border-color: #4a4a4a !important;
+}
+
+[data-theme="dark"] .btn-outline-secondary:hover {
+    color: #ffffff !important;
+    background-color: #37373d !important;
+}
+
+[data-theme="dark"] #v-pills-manage,
+[data-theme="dark"] #v-pills-manage .vertical-menu {
+    background-color: #252526 !important;
+}
+
+[data-theme="dark"] #v-pills-manage .vertical-menu > li > a {
+    color: #e0e0e0 !important;
+}
+
+[data-theme="dark"] .menu-title {
+    color: #569cd6 !important;
+}
+
+[data-theme="dark"] .breadcrumbbar .page-title {
+    color: #ffffff !important;
+}
+
+[data-theme="dark"] .description-prod {
+    background-color: #252526 !important;
+    color: #e0e0e0 !important;
+}
+
+[data-theme="dark"] p {
+    color: #e0e0e0 !important;
+}
+
+/* Tables with explicit white backgrounds - dark text */
+[data-theme="dark"] .bg-white .table td,
+[data-theme="dark"] .bg-white .table,
+[data-theme="dark"] .table[style*="background: white"] td,
+[data-theme="dark"] .table[style*="background:#fff"] td,
+[data-theme="dark"] .table[style*="background: #fff"] td {
+    color: #1e1e1e !important;
+}
+
+[data-theme="dark"] .bg-white .table th {
+    color: #1e1e1e !important;
+    background-color: #cccccc !important;
+}
+
+/* Nav tabs background fix */
+[data-theme="dark"] .nav-tabs {
+    background-color: #37373d !important;
+}
+
+/* Register items with white background */
+[data-theme="dark"] .register-item-content {
+    background-color: #252526 !important;
+}
+
+[data-theme="dark"] .register-item-content td {
+    color: #ffffff !important;
+}
+
+[data-theme="dark"] .nav-tabs .nav-link,
+[data-theme="dark"] .nav-tabs a.nav-link,
+[data-theme="dark"] .nav-tabs .nav-item a {
+    color: #e0e0e0 !important;
+    background-color: transparent !important;
+}
+
+[data-theme="dark"] .nav-tabs .nav-link.active,
+[data-theme="dark"] .nav-tabs a.nav-link.active,
+[data-theme="dark"] .nav-tabs .nav-item a.active {
+    color: #1e1e1e !important;
+    background-color: #ffffff !important;
+}
+
+[data-theme="dark"] .dropdown-toggle {
+    color: #e0e0e0 !important;
+}
+
+[data-theme="dark"] .userbox .profile-icon {
+    color: #ffffff !important;
+}
+
+[data-theme="dark"] .topbar .infobar .infobar-icon {
+    background-color: #37373d !important;
+    color: #569cd6 !important;
+}
+
+[data-theme="dark"] .topbar .togglebar .menu-hamburger {
+    background-color: #37373d !important;
+    color: #569cd6 !important;
+}
+
+[data-theme="dark"] a {
+    color: #569cd6 !important;
+}
+
+[data-theme="dark"] .loadingSpinner {
+    background-color: transparent !important;
+    background: url('../../../static/images/loader/loading.gif') 50% 50% no-repeat transparent !important;
+}
+
+/* Table striped rows */
+[data-theme="dark"] .table-striped tbody tr:nth-of-type(odd) {
+    background-color: #37373d !important;
+    color: #ffffff !important;
+}
+
+/* Settings sidebar */
+[data-theme="dark"] .infobar-settings-sidebar .infobar-settings-sidebar-head h4 {
+    color: #569cd6 !important;
+}
+
+/* Table model item */
+[data-theme="dark"] .table_model_item {
+    color: #569cd6 !important;
+}
+
+/* Toolbar */
+[data-theme="dark"] .toolbar-primary .tool-item {
+    background: #569cd6 !important;
+}
+
+/* Chat search */
+[data-theme="dark"] .chat-list .chat-search {
+    background-color: #252526 !important;
+    border-color: #3c3c3c !important;
+}
+
+/* Flag background */
+[data-theme="dark"] .topbar .infobar .flag {
+    background-color: #37373d !important;
+}
+
+/* Slider checked */
+[data-theme="dark"] input:checked + .slider {
+    background-color: #569cd6 !important;
+}
+
+/* Custom file label */
+[data-theme="dark"] .custom-file-label::after {
+    background-color: #569cd6 !important;
+}
+
+[data-theme="dark"] .text-primary {
+    color: #569cd6 !important;
+}
+
+[data-theme="dark"] .btn-primary-rgba {
+    background-color: rgba(86, 156, 214, 0.2) !important;
+    color: #569cd6 !important;
+}
+
+/* Headings */
+[data-theme="dark"] .h1, [data-theme="dark"] .h2, [data-theme="dark"] .h3,
+[data-theme="dark"] .h4, [data-theme="dark"] .h5, [data-theme="dark"] .h6,
+[data-theme="dark"] h1, [data-theme="dark"] h2, [data-theme="dark"] h3,
+[data-theme="dark"] h4, [data-theme="dark"] h5, [data-theme="dark"] h6 {
+    color: #ffffff !important;
+}
+
+/* Dashboard empty message */
+[data-theme="dark"] tbody[style*="color"],
+[data-theme="dark"] ul[style*="color"],
+[data-theme="dark"] #lstRecentActivities {
+    color: #e0e0e0 !important;
+}
+
+/* Chart containers - specific IDs only */
+[data-theme="dark"] #chartdiv,
+[data-theme="dark"] .chartdiv {
+    background-color: var(--theme-card-bg) !important;
+    border-radius: 5px;
+}
+
+[data-theme="dark"] #chartdiv .card-body,
+[data-theme="dark"] .card-body:has(#chartdiv) {
+    background-color: var(--theme-card-bg) !important;
+}
+
+/* Light button */
+[data-theme="dark"] .btn-light {
+    color: #ffffff !important;
+    background-color: #37373d !important;
+    border-color: #4a4a4a !important;
+}
+
+/* Modal header */
+[data-theme="dark"] .modal-header {
+    background-color: #569cd6 !important;
+    border-color: #569cd6 !important;
+}
+
+/* Outline primary button */
+[data-theme="dark"] .btn-outline-primary {
+    color: #569cd6 !important;
+    border-color: #569cd6 !important;
+}
+
+[data-theme="dark"] .btn-outline-primary:hover {
+    background-color: #569cd6 !important;
+    color: #1e1e1e !important;
+}
+
+/* Portlet light */
+[data-theme="dark"] .portlet.light {
+    background-color: #252526 !important;
+    color: #ffffff !important;
+}
+
+/* Active menu SVG icons */
+[data-theme="dark"] .vertical-menu li a.active img,
+[data-theme="dark"] .metismenu li a.active img {
+    filter: brightness(0) saturate(100%) invert(70%) sepia(50%) saturate(500%) hue-rotate(180deg) !important;
+}
+
+/* Menu hover color */
+[data-theme="dark"] .vertical-menu li a:hover,
+[data-theme="dark"] .metismenu li a:hover {
+    color: #569cd6 !important;
+}
+
+/* Checkbox checked */
+[data-theme="dark"] input[type=checkbox]:checked:after,
+[data-theme="dark"] .checkbox input[type=checkbox]:checked:after,
+[data-theme="dark"] .checkbox-inline input[type=checkbox]:checked:after {
+    background-color: #569cd6 !important;
+    border-color: #569cd6 !important;
+}
+
+/* Radio buttons */
+[data-theme="dark"] .custom-radio .custom-control-input:checked~.custom-control-label::before,
+[data-theme="dark"] .custom-control-input:checked~.custom-control-label::before {
+    background-color: #569cd6 !important;
+    border-color: #569cd6 !important;
+}
+
+/* Live icon links */
+[data-theme="dark"] .live-icon,
+[data-theme="dark"] a {
+    color: #569cd6;
+}
+
+[data-theme="dark"] a:hover {
+    color: #7eb8e8;
+}
+
+/* Touch sales hover/flash effect */
+[data-theme="dark"] .touch-sales-hover-effect {
+    background-color: #252526 !important;
+}
+
+[data-theme="dark"] .touch-sales-hover-effect:hover {
+    box-shadow: 0 0 11px rgba(86, 156, 214, 0.4) !important;
+}
+
+[data-theme="dark"] .touch-sales-hover-effect.highlight,
+[data-theme="dark"] .touch-sales-hover-effect.flash {
+    background-color: #37373d !important;
+    animation: darkFlash 0.5s ease-out !important;
+}
+
+@keyframes darkFlash {
+    0% { background-color: #569cd6; }
+    100% { background-color: #252526; }
+}
+
+
+/* ============================================
+   LIGHT THEMES - Colored accents
+   ============================================ */
+
+/* Blue Light Theme */
+/* =====================================================================
+   THEME-WIDE component mapping. Many components hardcode the OLD primary
+   #506fe4 and white #fff instead of reading theme variables, so EVERY
+   non-default theme (blue, green, dark, nord...) shows stray blue/white in
+   these spots - the same holes found while tuning comfort. Map them to the
+   theme variables with the ORIGINAL value as fallback: a theme that defines
+   the var gets themed, one that doesn't stays exactly as before -> no
+   regressions. Scoped [data-theme] so the bare-:root default keeps its
+   original look; comfort's own tuned rules come later and win where it
+   deliberately differs (warm modal header, menu chip, tab highlight).
+   ===================================================================== */
+/* Accent: #506fe4 -> theme primary */
+[data-theme] .btn-primary,
+[data-theme] .bg-primary,
+[data-theme] .toolbar-primary .tool-item { background-color: var(--theme-primary-color, #506fe4) !important; border-color: var(--theme-primary-color, #506fe4) !important; color: var(--theme-btn-primary-text, #fff) !important; }
+/* The default (non-hover) state was missing a text colour, so in themes without
+   their own .btn-primary override (e.g. VS Code) the label inherited the primary
+   colour and vanished into the identical background. Force a contrasting label. */
+[data-theme] .btn-primary, [data-theme] .btn-primary * { color: var(--theme-btn-primary-text, #fff) !important; }
+[data-theme] .btn-primary:hover,
+[data-theme] .btn-primary:focus,
+[data-theme] .toolbar-primary .tool-item:hover,
+[data-theme] .toolbar-primary .tool-item.selected { background-color: var(--theme-primary-hover, #3a5de1) !important; border-color: var(--theme-primary-hover, #3a5de1) !important; color: #fff !important; }
+[data-theme] .toolbar-primary.tool-top .arrow { border-top-color: var(--theme-primary-color, #506fe4) !important; }
+[data-theme] .btn-primary-rgba { background-color: transparent !important; color: var(--theme-primary-color, #506fe4) !important; }
+[data-theme] .btn-primary-rgba:hover { background-color: var(--theme-primary-color, #506fe4) !important; color: #fff !important; }
+[data-theme] .text-primary,
+[data-theme] .table_model_item,
+[data-theme] .btn-outline-primary { color: var(--theme-primary-color, #506fe4) !important; }
+[data-theme] .btn-outline-primary { border-color: var(--theme-primary-color, #506fe4) !important; }
+[data-theme] .btn-outline-primary:hover { background-color: var(--theme-primary-color, #506fe4) !important; color: #fff !important; }
+[data-theme] .badge-primary { background-color: var(--theme-primary-color, #506fe4) !important; color: #fff !important; }
+[data-theme] .infobar-settings-sidebar .infobar-settings-sidebar-head h4 { color: var(--theme-primary-color, #506fe4) !important; }
+[data-theme] .vertical-menu > li > a.active,
+[data-theme] .vertical-menu > li.active > a,
+[data-theme] .vertical-menu > li:hover > a { color: var(--theme-primary-color, #506fe4) !important; }
+/* Clean underline tabs for EVERY theme (var-driven; default uses the fallback).
+   Replaces bootstrap's dated "folder" active tab - a white box that blended into
+   the content and read as two highlighted tabs. Applies app-wide: item-detail
+   popups, reports, all tabbed pages. */
+.nav-tabs { border-bottom: 1px solid var(--theme-border-color, #e5e5e5) !important; }
+.nav-tabs .nav-link { border: none !important; border-bottom: 3px solid transparent !important; background: transparent !important; color: var(--theme-text-secondary, #6c757d) !important; border-radius: 0 !important; margin-bottom: -1px; padding: 10px 16px; font-weight: 500; }
+.nav-tabs .nav-link:hover { color: var(--theme-text-primary, #212529) !important; border-bottom-color: var(--theme-border-color, #cfcfcf) !important; background: transparent !important; }
+.nav-tabs .nav-link.active { color: var(--theme-primary-color, #506fe4) !important; background: transparent !important; border: none !important; border-bottom: 3px solid var(--theme-primary-color, #506fe4) !important; font-weight: 600 !important; }
+/* Surfaces: #fff / hardcoded greys -> theme card */
+[data-theme] .Neon-input-dragDrop,
+[data-theme] .btn-payment-mode,
+[data-theme] .chat-list,
+[data-theme] .chat-list .chat-search input[type=search] { background-color: var(--theme-card-bg, #fff) !important; color: var(--theme-text-primary, #212529) !important; }
+[data-theme] .btn-payment-mode.active { background-color: var(--theme-primary-color, #506fe4) !important; border-color: var(--theme-primary-color, #506fe4) !important; color: var(--theme-btn-primary-text, #ffffff) !important; }
+[data-theme] .btn-payment-mode.active * { color: var(--theme-btn-primary-text, #ffffff) !important; }
+[data-theme] .file-upload .file-select { background: var(--theme-card-bg, #fff) !important; }
+[data-theme] .file-upload .file-select .file-select-button { background: var(--theme-table-header-bg, #dce4ec) !important; color: var(--theme-text-primary, #333) !important; }
+
+/* Eye Comfort - warm, low-blue "paper" light theme for all-day use. Colours are
+   set as variables (like every theme) AND with explicit overrides so it applies
+   whether or not a given element reads the variable. */
+[data-theme="comfort"] {
+    --theme-primary-color: #4F7A69;
+    --theme-primary-hover: #40655A;
+    --theme-body-bg: #F3ECDB;
+    --theme-card-bg: #FBF6EA;
+    --theme-sidebar-bg: #EAE1CE;
+    --theme-topbar-bg: #FBF6EA;
+    --theme-text-primary: #3A352B;
+    --theme-text-secondary: #5B5545;
+    --theme-border-color: #E2D7BF;
+    --theme-menu-bg: #EAE1CE;
+    --theme-menu-text: #4A4433;
+    --theme-menu-active-bg: #4F7A69;
+    --theme-menu-active-text: #ffffff;
+}
+/* Warm surfaces instead of white */
+[data-theme="comfort"] body,
+[data-theme="comfort"] .page_loader,
+[data-theme="comfort"] .contentbar,
+[data-theme="comfort"] .breadcrumbbar { background-color: #F3ECDB !important; }
+[data-theme="comfort"] .card,
+[data-theme="comfort"] .topbar,
+[data-theme="comfort"] .navbar,
+[data-theme="comfort"] .modal-content { background-color: #FBF6EA !important; }
+/* Light warm sidebar with dark text - no harsh dark block */
+[data-theme="comfort"] .vertical-menu,
+[data-theme="comfort"] .leftbar,
+[data-theme="comfort"] .vertical-menu-detail { background-color: #EAE1CE !important; }
+[data-theme="comfort"] .vertical-menu li a,
+[data-theme="comfort"] .metismenu li a { color: #4A4433 !important; }
+[data-theme="comfort"] .vertical-menu li a:hover,
+[data-theme="comfort"] .vertical-menu li.mm-active > a { color: #4F7A69 !important; }
+/* Warm, softened text - not pure black */
+[data-theme="comfort"] body,
+[data-theme="comfort"] p,
+[data-theme="comfort"] td,
+[data-theme="comfort"] label,
+[data-theme="comfort"] .table { color: #4B463C; }
+[data-theme="comfort"] h1, [data-theme="comfort"] h2, [data-theme="comfort"] h3,
+[data-theme="comfort"] h4, [data-theme="comfort"] h5, [data-theme="comfort"] h6 { color: #3A352B; }
+/* Sage-teal accent - the restful hue */
+[data-theme="comfort"] .btn-primary { background-color: #4F7A69 !important; border-color: #4F7A69 !important; color: #fff !important; }
+[data-theme="comfort"] .btn-primary:hover { background-color: #40655A !important; border-color: #40655A !important; }
+[data-theme="comfort"] .btn-primary-rgba { background-color: rgba(79, 122, 105, 0.12) !important; color: #40655A !important; }
+[data-theme="comfort"] a { color: #4F7A69; }
+[data-theme="comfort"] .title_h2,
+[data-theme="comfort"] .menu-title,
+[data-theme="comfort"] .text-primary { color: #4F7A69 !important; }
+[data-theme="comfort"] input[type=checkbox]:checked:after,
+[data-theme="comfort"] .checkbox input[type=checkbox]:checked:after,
+[data-theme="comfort"] .custom-radio .custom-control-input:checked~.custom-control-label::before,
+[data-theme="comfort"] .custom-control-input:checked~.custom-control-label::before { background-color: #4F7A69 !important; border-color: #4F7A69 !important; }
+/* Warm the surfaces that were still hard-coded white: table headers, title and
+   breadcrumb bars, and the datatable/page loading overlays. */
+[data-theme="comfort"] .table thead th,
+[data-theme="comfort"] thead th,
+[data-theme="comfort"] .BestSellingitem,
+[data-theme="comfort"] .Expireditem,
+[data-theme="comfort"] .BestSellingitem th,
+[data-theme="comfort"] .dataTables_scrollHead { background-color: #EFE7D3 !important; color: #3A352B !important; }
+[data-theme="comfort"] .breadcrumbbar,
+[data-theme="comfort"] .crumbbar_padding,
+[data-theme="comfort"] .page-title-box { background-color: #F3ECDB !important; }
+[data-theme="comfort"] .dataTables_processing,
+[data-theme="comfort"] .page_loader,
+[data-theme="comfort"] .preloader,
+[data-theme="comfort"] .loader-login { background-color: #F3ECDB !important; }
+/* Smoother, warmer text throughout - antialiased, warm dark-grey not black, so
+   it reads easily over a long shift without harshness. */
+[data-theme="comfort"] { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+[data-theme="comfort"] body,
+[data-theme="comfort"] p,
+[data-theme="comfort"] td,
+[data-theme="comfort"] label,
+[data-theme="comfort"] .table,
+[data-theme="comfort"] .text-dark { color: #453F34; }
+[data-theme="comfort"] .text-muted,
+[data-theme="comfort"] .dim { color: #8A8069 !important; }
+/* Form fields, dropdowns and modals - warm, not white. */
+[data-theme="comfort"] .form-control,
+[data-theme="comfort"] textarea,
+[data-theme="comfort"] .custom-select,
+[data-theme="comfort"] .select2-container--default .select2-selection--single,
+[data-theme="comfort"] .select2-container--default .select2-selection--multiple,
+[data-theme="comfort"] .select2-dropdown,
+[data-theme="comfort"] .dropdown-menu { background-color: #FBF6EA !important; border-color: #E2D7BF !important; color: #3A352B !important; }
+[data-theme="comfort"] .form-control::placeholder { color: #A99E86 !important; }
+/* Top-bar icon buttons (fullscreen, shortcut, alerts, menu toggle) - no grey
+   chip on the warm bar; a soft warm tint only on hover. */
+[data-theme="comfort"] .infobar-icon,
+[data-theme="comfort"] .topbar-toggle-hamburger { background-color: transparent !important; }
+[data-theme="comfort"] .infobar-icon:hover { background-color: #EFE7D3 !important; }
+/* Light buttons + the dashboard period buttons (Today / This Week ...) */
+[data-theme="comfort"] .btn-light,
+[data-theme="comfort"] .btn-round { background-color: #EFE7D3 !important; border-color: #E2D7BF !important; color: #4A4433 !important; }
+[data-theme="comfort"] .btn-light:hover { background-color: #E6DAC0 !important; }
+[data-theme="comfort"] .shop_buttons .btn.active,
+[data-theme="comfort"] .btn-light.active { background-color: #4F7A69 !important; border-color: #4F7A69 !important; color: #fff !important; }
+/* Loading overlays */
+[data-theme="comfort"] .preloader,
+[data-theme="comfort"] .loading,
+[data-theme="comfort"] .loader { background-color: #F3ECDB !important; }
+/* Broad warm coverage for surfaces that are otherwise hard-coded white across
+   pages: modals, tables and the datatable loading overlay (the white flash on
+   refresh), file-upload boxes, input add-ons, and any bg-white utility. */
+[data-theme="comfort"] .modal-content,
+[data-theme="comfort"] .modal-header,
+[data-theme="comfort"] .modal-footer,
+[data-theme="comfort"] .bg-white,
+[data-theme="comfort"] .input-group-text,
+[data-theme="comfort"] .custom-file-label,
+[data-theme="comfort"] .dropzone,
+[data-theme="comfort"] .fileupload,
+[data-theme="comfort"] .image-upload,
+[data-theme="comfort"] .dataTables_wrapper,
+[data-theme="comfort"] table.dataTable,
+[data-theme="comfort"] .dataTable td,
+[data-theme="comfort"] .dataTables_processing { background-color: #FBF6EA !important; color: #3A352B; border-color: #E2D7BF; }
+/* The datatable refresh overlay is often opaque white - warm it. */
+[data-theme="comfort"] .dataTables_processing { background-color: #F3ECDB !important; }
+/* Checkboxes/radios: warm the box, keep the sage tick. */
+[data-theme="comfort"] input[type=checkbox],
+[data-theme="comfort"] input[type=radio] { accent-color: #4F7A69; }
+/* Softer top-bar icon hover (the previous one read as harsh). */
+[data-theme="comfort"] .infobar-icon:hover { background-color: #E7DCC6 !important; border-radius: 6px; }
+/* The +Add / menu-toggle chip - no grey. */
+[data-theme="comfort"] .topbar-toggle-hamburger,
+[data-theme="comfort"] .menu-hamburger,
+[data-theme="comfort"] .navbar-toggle { background-color: transparent !important; }
+[data-theme="comfort"] .menu-hamburger:hover,
+[data-theme="comfort"] .topbar-toggle-hamburger:hover { background-color: transparent !important; }
+/* The datatable/refresh overlay (.loadingSpinner) painted a near-white panel
+   with a white-background GIF. On this theme, drop the GIF and warm the panel,
+   then draw a clean sage CSS spinner - no white flash on refresh. */
+[data-theme="comfort"] .loadingSpinner {
+    background-image: none !important;
+    background-color: #F3ECDB !important;
+    opacity: 0.92 !important;
+}
+[data-theme="comfort"] .loadingSpinner::after {
+    content: '';
+    position: absolute;
+    top: 42%;
+    left: 50%;
+    width: 42px;
+    height: 42px;
+    margin: -21px 0 0 -21px;
+    border: 4px solid #E2D7BF;
+    border-top-color: #4F7A69;
+    border-radius: 50%;
+    animation: ps-comfort-spin 0.8s linear infinite;
+}
+@keyframes ps-comfort-spin { to { transform: rotate(360deg); } }
+/* +Add button (btn-rounded): sage on hover, not the default blue. */
+[data-theme="comfort"] .btn-rounded:hover,
+[data-theme="comfort"] .add_dropdown .btn:hover { background-color: #4F7A69 !important; border-color: #4F7A69 !important; color: #fff !important; }
+/* Warm table rows/cells so checkbox and data columns are not white. */
+[data-theme="comfort"] .table td,
+[data-theme="comfort"] .table tbody tr,
+[data-theme="comfort"] table.dataTable tbody tr { background-color: #FBF6EA !important; }
+/* Report tabs + content, and common content panels - transparent so they sit on
+   the warm card (an overall fix for every report page's white tab area), with a
+   warm active tab. */
+[data-theme="comfort"] .nav-tabs,
+[data-theme="comfort"] .nav-tabs .nav-link,
+[data-theme="comfort"] .tab-content,
+[data-theme="comfort"] .tab-pane,
+[data-theme="comfort"] .card-body,
+[data-theme="comfort"] .card-header,
+[data-theme="comfort"] .card-footer,
+[data-theme="comfort"] .contentbar { background-color: transparent !important; }
+[data-theme="comfort"] .nav-tabs { border-bottom-color: #E2D7BF !important; }
+[data-theme="comfort"] .nav-tabs .nav-link { color: #5B5545 !important; }
+[data-theme="comfort"] .nav-tabs .nav-link.active,
+/* Report TAB links (Purchase Details / Graphical / Outstanding etc.) were
+   cramped - text touched the corner/border. 10px vertical padding on ALL tab
+   links (active + inactive) so they stay aligned and have breathing room. */
+[data-theme="comfort"] .nav-tabs .nav-link,
+[data-theme="comfort"] .custom-tab-line .nav-link { padding: 10px 16px !important; }
+/* Active tab highlight (warm bg + sage underline + bold) for ALL .nav-tabs -
+   not just report .custom-tab-line, so item-detail popup tabs match instead of
+   the default faint #fff/#506fe4 active style. */
+[data-theme="comfort"] .custom-tab-line .nav-link.active,
+[data-theme="comfort"] .nav-tabs .nav-link.active { background-color: transparent !important; color: #4F7A69 !important; border: none !important; border-bottom: 3px solid #4F7A69 !important; font-weight: 600; }
+[data-theme="comfort"] .nav-tabs .nav-link:hover { color: #4F7A69 !important; }
+[data-theme="comfort"] .white-box,
+[data-theme="comfort"] .box,
+[data-theme="comfort"] .panel,
+[data-theme="comfort"] .widget { background-color: #FBF6EA !important; }
+/* Hamburger hover: style.css gives a blue chip (#506fe4) AND tints the icon blue
+   via a filter. Replace with a warm chip + the icon's normal color. Broad
+   selectors so it catches every container the hamburger lives in. */
+[data-theme="comfort"] .menu-hamburger:hover,
+[data-theme="comfort"] .topbar .togglebar .menu-hamburger:hover,
+[data-theme="comfort"] .topbar-mobile .mobile-togglebar .menu-hamburger:hover { background-color: #E4D9BF !important; border-radius: 8px; }
+[data-theme="comfort"] .menu-hamburger:hover img,
+[data-theme="comfort"] .topbar .togglebar .menu-hamburger:hover img,
+[data-theme="comfort"] .topbar-mobile .mobile-togglebar .menu-hamburger:hover img { filter: none !important; }
+/* +Add button: LIGHT (cream + sage outline) at REST, DARK sage only on
+   hover/open. Also nudge the "+Add" label down ~2px so it sits centred. */
+[data-theme="comfort"] #dropdownMenuButton,
+[data-theme="comfort"] .add_dropdown .btn-rounded {
+    background-color: #EFE7D3 !important;
+    border: 1px solid #4F7A69 !important;
+    color: #4F7A69 !important;
+    box-shadow: none !important;
+    padding: 9px 22px 6px !important;
+}
+[data-theme="comfort"] #dropdownMenuButton:hover,
+[data-theme="comfort"] #dropdownMenuButton:focus,
+[data-theme="comfort"] #dropdownMenuButton:active,
+[data-theme="comfort"] #dropdownMenuButton[aria-expanded="true"],
+[data-theme="comfort"] .show > #dropdownMenuButton,
+[data-theme="comfort"] .add_dropdown .btn-rounded:hover,
+[data-theme="comfort"] .add_dropdown .btn-rounded:focus,
+[data-theme="comfort"] .add_dropdown.show .btn-rounded { background-color: #4F7A69 !important; border-color: #4F7A69 !important; color: #fff !important; box-shadow: none !important; }
+/* Checkboxes: a real warm box with a sage tick (native ones stay OS-white with
+   accent-color alone). appearance:none restyles only the box - the onclick
+   select logic is untouched. */
+[data-theme="comfort"] input[type=checkbox]:not(.custom-control-input) {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    margin-top: -2px;
+    background-color: #FBF6EA !important;
+    border: 1px solid #C0B393 !important;
+    border-radius: 3px;
+    position: relative;
+    vertical-align: middle;
+    cursor: pointer;
+}
+[data-theme="comfort"] input[type=checkbox]:not(.custom-control-input):checked {
+    background-color: #4F7A69 !important;
+    border-color: #4F7A69 !important;
+}
+[data-theme="comfort"] input[type=checkbox]:not(.custom-control-input):checked::after {
+    content: '';
+    position: absolute;
+    left: 5px;
+    top: 2px;
+    width: 4px;
+    height: 8px;
+    border: solid #fff;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+
+/* File "Browse" button had a hardcoded grey-white (#dce4ec) with no theme var. */
+[data-theme="comfort"] .file-upload .file-select { background: #FBF6EA !important; border-color: #C0B393 !important; }
+[data-theme="comfort"] .file-upload .file-select .file-select-button { background: #E4D9BF !important; color: #3A352B !important; }
+[data-theme="comfort"] .file-upload .file-select:hover .file-select-button,
+[data-theme="comfort"] .file-upload.active .file-select .file-select-button { background: #4F7A69 !important; color: #fff !important; }
+
+/* CATCH-ALL for white inputs on ANY page (purchase, item, etc.): every text-like
+   input goes warm regardless of class. Excludes checkbox/radio (styled above). */
+[data-theme="comfort"] input[type=text],
+[data-theme="comfort"] input[type=number],
+[data-theme="comfort"] input[type=email],
+[data-theme="comfort"] input[type=password],
+[data-theme="comfort"] input[type=search],
+[data-theme="comfort"] input[type=tel],
+[data-theme="comfort"] input[type=url],
+[data-theme="comfort"] input[type=date],
+[data-theme="comfort"] input[type=datetime-local],
+[data-theme="comfort"] input:not([type]),
+[data-theme="comfort"] select,
+[data-theme="comfort"] textarea { background-color: #FBF6EA !important; color: #3A352B !important; }
+
+/* Select2 widgets render their own divs (not real selects) - warm those too. */
+[data-theme="comfort"] .select2-container--default .select2-selection--single,
+[data-theme="comfort"] .select2-container--default .select2-selection--multiple,
+[data-theme="comfort"] .select2-dropdown,
+[data-theme="comfort"] .select2-search__field { background-color: #FBF6EA !important; color: #3A352B !important; border-color: #C0B393 !important; }
+[data-theme="comfort"] .select2-container--default .select2-results__option[aria-selected=true],
+[data-theme="comfort"] .select2-container--default .select2-results__option--highlighted { background-color: #EAE1CE !important; color: #3A352B !important; }
+
+/* Table/datatable header text was smaller than the rows - match the row size and
+   make it bold so headers read as headers. Global (a real design fix). */
+.table thead th,
+table.dataTable thead th,
+.dataTables_scrollHead th { font-size: 1em !important; font-weight: 600 !important; }
+
+/* Sales & return cart headers (Items / Qty / Unit / Price / Disc / Tax / Total
+   / Action) carry .btn-primary, which forces white text - but the header cells
+   render on a LIGHT themed background, so the labels were white-on-light and
+   invisible (worst in the default theme). Force the header text to the theme's
+   own readable text colour in EVERY theme, leaving the background untouched. */
+.table thead.btn-primary,
+.table thead.btn-primary th,
+.table thead.btn-primary th * {
+    color: var(--theme-text-primary, #16203a) !important;
+}
+
+/* .table th { background: var(--theme-table-header-bg) } - comfort never set that
+   var, so ALL <th> (header row AND the body checkbox/# columns, which are <th>)
+   fell back to white. Set the var warm for the header row, and make body-row <th>
+   cells transparent so they blend into the row instead of looking like headers. */
+[data-theme="comfort"] { --theme-table-header-bg: #EFE7D3; }
+[data-theme="comfort"] .table thead th,
+[data-theme="comfort"] table.dataTable thead th { background-color: #EFE7D3 !important; padding: 13px 15px !important; vertical-align: middle !important; }
+[data-theme="comfort"] .table tbody th,
+[data-theme="comfort"] table.dataTable tbody th,
+[data-theme="comfort"] .table tbody td,
+[data-theme="comfort"] table.dataTable tbody td { background-color: transparent !important; color: #3A352B !important; }
+
+/* Readonly/disabled fields (bootstrap forces #e9ecef/#f2f3f7 grey - common on
+   purchase auto-calc totals), input-group addons, and file-input labels all
+   stayed non-warm. Keep them readable-warm, slightly dimmer than editable fields. */
+[data-theme="comfort"] .form-control:disabled,
+[data-theme="comfort"] .form-control[readonly],
+[data-theme="comfort"] input[readonly],
+[data-theme="comfort"] input:disabled { background-color: #F1EADA !important; color: #6B6350 !important; opacity: 1; }
+[data-theme="comfort"] .input-group-text,
+[data-theme="comfort"] .input-group-append .input-group-text,
+[data-theme="comfort"] .input-group-prepend .input-group-text { background-color: #EAE1CE !important; border-color: #E2D7BF !important; color: #3A352B !important; }
+[data-theme="comfort"] .custom-file-label,
+[data-theme="comfort"] .custom-file-label::after { background-color: #FBF6EA !important; border-color: #E2D7BF !important; color: #3A352B !important; }
+
+/* ITEM UPLOAD BOX: the "Neon" drag-drop uploader (custom.css:1400) is a HARDCODED
+   white box with a blue (#008BFF) Browse button - a different component from the
+   .file-select I fixed before, which is why item_upload_image stayed white. */
+[data-theme="comfort"] .Neon-input-dragDrop { background: #FBF6EA !important; border-color: #C0B393 !important; color: #6B6350 !important; }
+[data-theme="comfort"] .Neon-input-choose-btn,
+[data-theme="comfort"] .Neon-input-choose-btn.blue { background: transparent !important; color: #4F7A69 !important; border-color: #4F7A69 !important; }
+[data-theme="comfort"] .Neon-input-choose-btn.blue:hover,
+[data-theme="comfort"] .Neon-input-choose-btn:hover { background: #4F7A69 !important; color: #fff !important; }
+
+/* REPORT/CARD SURFACES: cards, light panels and the report "cart-head" blocks
+   (Quick Sale Report body, From/To rows) rendered white/grey. Warm them all so
+   the report cells - which are transparent - sit on a warm surface, not white. */
+[data-theme="comfort"] .card,
+[data-theme="comfort"] .card-body,
+[data-theme="comfort"] .bg-white,
+[data-theme="comfort"] .bg-light,
+[data-theme="comfort"] .cart-head,
+[data-theme="comfort"] .cart-head .row { background-color: #FBF6EA !important; }
+
+/* Report header ("Quick Sale Reports") text was cramped against the top edge. */
+[data-theme="comfort"] .breadcrumbbar .page-title { padding: 8px 0 !important; }
+
+/* =====================================================================
+   COMFORT DE-BLUE SWEEP: the app's primary accent #506fe4 is hardcoded
+   342x (not a variable), so it leaks blue into modals, the sidebar, row
+   actions and buttons. Remap those components to sage; warm the last few
+   hardcoded-white surfaces (payment toggles, chat-list).
+   ===================================================================== */
+
+/* Modal: header was SOLID blue (#506fe4) with white title/X. */
+[data-theme="comfort"] .modal-content { background-color: #FBF6EA !important; }
+[data-theme="comfort"] .modal-header { background-color: #EAE1CE !important; border-color: #E2D7BF !important; }
+[data-theme="comfort"] .modal-title { color: #3A352B !important; }
+[data-theme="comfort"] .modal-header .close,
+[data-theme="comfort"] .modal-header .close span,
+[data-theme="comfort"] .modal-header .close:hover { color: #4F7A69 !important; text-shadow: none !important; opacity: 1 !important; }
+[data-theme="comfort"] .modal-footer { background-color: #FBF6EA !important; border-color: #E2D7BF !important; }
+
+/* Left vertical menu: active + hover text/icon were blue (#506fe4 + a blue
+   icon filter). Sage text; drop the blue tint so the icon keeps its colour. */
+/* Hover: a clearly visible sage chip (the old cream was too faint). */
+[data-theme="comfort"] .vertical-menu > li:hover > a { color: #3E6153 !important; background-color: #DCE8E1 !important; border-radius: 8px; }
+/* Active/selected: stronger sage + an inset accent bar + bold, so the current
+   page reads distinctly from a mere hover. */
+[data-theme="comfort"] .vertical-menu > li > a.active,
+[data-theme="comfort"] .vertical-menu > li.active > a { color: #2F5344 !important; background-color: #C6DACE !important; border-radius: 8px; font-weight: 600; }
+/* Keep the icon's RESTING neutral filter on hover/active (not `none`, which
+   reverts the white source SVG to invisible-white). Selection is shown by the
+   warm chip + sage text; the icon stays the same neutral tone as at rest. */
+[data-theme="comfort"] .vertical-menu > li > a.active img,
+[data-theme="comfort"] .vertical-menu > li.active > a img,
+[data-theme="comfort"] .vertical-menu > li:hover > a img { filter: invert(0.6) sepia(1) saturate(1) hue-rotate(185deg) !important; }
+
+/* Row-action popup (eye/edit/trash) + all .btn-primary-rgba buttons. */
+[data-theme="comfort"] .btn-primary-rgba { background-color: rgba(79,122,105,0.12) !important; color: #4F7A69 !important; }
+[data-theme="comfort"] .btn-primary-rgba:hover,
+[data-theme="comfort"] .btn-primary-rgba:focus,
+[data-theme="comfort"] .btn-primary-rgba:active { background-color: #4F7A69 !important; color: #fff !important; }
+
+/* Solid primary + bootstrap primary utility classes -> sage. */
+[data-theme="comfort"] .btn-primary { background-color: #4F7A69 !important; border-color: #4F7A69 !important; color: #fff !important; }
+[data-theme="comfort"] .btn-primary:hover,
+[data-theme="comfort"] .btn-primary:focus,
+[data-theme="comfort"] .btn-primary:active { background-color: #3E6153 !important; border-color: #3E6153 !important; }
+[data-theme="comfort"] .bg-primary { background-color: #4F7A69 !important; }
+[data-theme="comfort"] .text-primary { color: #4F7A69 !important; }
+[data-theme="comfort"] .badge-primary { background-color: #4F7A69 !important; color: #fff !important; }
+[data-theme="comfort"] .btn-outline-primary { color: #4F7A69 !important; border-color: #4F7A69 !important; }
+[data-theme="comfort"] .btn-outline-primary:hover { background-color: #4F7A69 !important; color: #fff !important; }
+
+/* Payment-mode toggle buttons: white -> warm; selected -> sage. */
+[data-theme="comfort"] .btn-payment-mode { background-color: #FBF6EA !important; border-color: #C0B393 !important; color: #3A352B !important; }
+[data-theme="comfort"] .btn-payment-mode.active { background-color: #4F7A69 !important; border-color: #4F7A69 !important; color: #fff !important; }
+
+/* Chat-list panel (notifications/search) was white. */
+[data-theme="comfort"] .chat-list,
+[data-theme="comfort"] .chat-list .chat-search,
+[data-theme="comfort"] .chat-list .chat-search input[type=search] { background-color: #FBF6EA !important; color: #3A352B !important; }
+
+/* Detail popups are a CUSTOM .infobar-settings-sidebar panel (NOT a bootstrap
+   .modal - that's why the modal overrides missed them). Title + close X were
+   blue (#506fe4; the X is an <img> tinted blue by a filter). */
+[data-theme="comfort"] .infobar-settings-sidebar .infobar-settings-sidebar-head h4 { color: #3A352B !important; }
+[data-theme="comfort"] .infobar-settings-sidebar .infobar-settings-sidebar-head .infobar-settings-close { color: #4F7A69 !important; }
+[data-theme="comfort"] .infobar-settings-sidebar .infobar-settings-sidebar-head .infobar-settings-close img { filter: brightness(0) opacity(0.6) !important; }
+
+/* Datatable ROW-ACTION toolbar (open/eye/edit/trash) - the real one is
+   .toolbar-primary .tool-item (solid #506fe4), plus its pointer triangle. */
+[data-theme="comfort"] .toolbar-primary .tool-item { background: #4F7A69 !important; }
+[data-theme="comfort"] .toolbar-primary .tool-item.selected,
+[data-theme="comfort"] .toolbar-primary .tool-item:hover { background: #3E6153 !important; }
+[data-theme="comfort"] .toolbar-primary.tool-top .arrow { border-color: #4F7A69 transparent transparent !important; }
+[data-theme="comfort"] .toolbar-primary.tool-bottom .arrow { border-color: transparent transparent #4F7A69 !important; }
+
+/* Item-name link in tables was blue (.table_model_item has color:#506fe4 !important). */
+[data-theme="comfort"] .table_model_item { color: #4F7A69 !important; }
+
+/* Icon tooltips: dark sage instead of pure black, to sit with the theme. */
+[data-theme="comfort"] .tooltip-inner { background-color: #3E6153 !important; color: #FBF6EA !important; }
+[data-theme="comfort"] .bs-tooltip-top .arrow::before,
+[data-theme="comfort"] .bs-tooltip-auto[x-placement^="top"] .arrow::before { border-top-color: #3E6153 !important; }
+[data-theme="comfort"] .bs-tooltip-bottom .arrow::before,
+[data-theme="comfort"] .bs-tooltip-auto[x-placement^="bottom"] .arrow::before { border-bottom-color: #3E6153 !important; }
+[data-theme="comfort"] .bs-tooltip-left .arrow::before,
+[data-theme="comfort"] .bs-tooltip-auto[x-placement^="left"] .arrow::before { border-left-color: #3E6153 !important; }
+[data-theme="comfort"] .bs-tooltip-right .arrow::before,
+[data-theme="comfort"] .bs-tooltip-auto[x-placement^="right"] .arrow::before { border-right-color: #3E6153 !important; }
+
+/* Brown/Coffee Light Theme - Warm, earthy, cozy */
+[data-theme="brown"] {
+    --theme-primary-color: #795548;
+    --theme-primary-hover: #6D4C41;
+    --theme-body-bg: #EFEBE9;
+    --theme-sidebar-bg: #5D4037;
+    --theme-menu-bg: #5D4037;
+    --theme-menu-text: #ffffff;
+    --theme-menu-active-bg: #4E342E;
+}
+
+[data-theme="brown"] .vertical-menu li a { color: #ffffff !important; }
+[data-theme="brown"] .title_h2 { color: #5D4037 !important; }
+[data-theme="brown"] .menu-title { color: #5D4037 !important; }
+[data-theme="brown"] .vertical-menu-detail { background-color: #D7CCC8 !important; }
+[data-theme="brown"] .vertical-menu { background-color: #D7CCC8 !important; }
+[data-theme="brown"] .vertical-menu li a { color: #5D4037 !important; }
+[data-theme="brown"] .leftbar { background-color: #D7CCC8 !important; }
+[data-theme="brown"] .vertical-menu li a:hover { color: #4E342E !important; }
+[data-theme="brown"] input[type=checkbox]:checked:after { background-color: #795548 !important; border-color: #795548 !important; }
+[data-theme="brown"] .custom-control-input:checked~.custom-control-label::before { background-color: #795548 !important; border-color: #795548 !important; }
+[data-theme="brown"] a { color: #5D4037; }
+[data-theme="brown"] .btn-primary-rgba { background-color: rgba(121, 85, 72, 0.1) !important; color: #5D4037 !important; }
+[data-theme="brown"] .table_model_item { color: #5D4037 !important; }
+[data-theme="brown"] .btn-outline-primary { color: #795548 !important; border-color: #795548 !important; }
+[data-theme="brown"] .btn-primary { background-color: #795548 !important; border-color: #795548 !important; }
+[data-theme="brown"] thead.btn-primary { background-color: #795548 !important; border-color: #795548 !important; }
+[data-theme="brown"] .nav-pills .nav-link { color: #5D4037 !important; }
+
+/* Apply theme variables to elements */
+body {
+    background-color: var(--theme-body-bg) !important;
+    font-family: var(--theme-font-family) !important;
+    font-size: var(--theme-font-size-base) !important;
+    font-weight: var(--theme-font-weight) !important;
+    color: var(--theme-text-secondary) !important;
+}
+
+/* Note: Heading colors use original CSS defaults to preserve .title_h2 etc. */
+
+.card {
+    background-color: var(--theme-card-bg) !important;
+    border-color: var(--theme-border-color) !important;
+}
+
+.card-body {
+    background-color: var(--theme-card-bg) !important;
+}
+
+.card-header {
+    background-color: var(--theme-card-bg) !important;
+    border-color: var(--theme-border-color) !important;
+}
+
+/* Note: .nav-pills .nav-link color only overridden in dark theme */
+
+.nav-pills .nav-link.active {
+    background-color: var(--theme-primary-color) !important;
+    color: #ffffff !important;
+}
+
+.vertical-menu {
+    background-color: var(--theme-sidebar-bg) !important;
+}
+
+.vertical-menu li a {
+    font-size: var(--theme-font-size-base) !important;
+    font-family: var(--theme-font-family) !important;
+}
+
+/* Note: .vertical-menu li a color only overridden in dark/colored themes */
+
+.vertical-menu > li > a.active {
+    color: var(--theme-primary-color) !important;
+}
+
+.vertical-menu > li:hover > a {
+    color: var(--theme-primary-color) !important;
+}
+
+.topbar {
+    background-color: var(--theme-topbar-bg) !important;
+    font-size: var(--theme-font-size-base) !important;
+    font-family: var(--theme-font-family) !important;
+}
+
+.topbar * {
+    font-size: inherit !important;
+}
+
+/* Nav pills font */
+.nav-pills .nav-link {
+    font-size: var(--theme-font-size-base) !important;
+    font-family: var(--theme-font-family) !important;
+}
+
+/* Buttons font */
+.btn {
+    font-size: var(--theme-font-size-base) !important;
+    font-family: var(--theme-font-family) !important;
+}
+
+/* Note: Table, button, form-control styles use original CSS defaults.
+   Theme variables are available for dark mode presets only. */
+
+/* Leftbar / Sidebar */
+.leftbar {
+    background: var(--theme-sidebar-bg) !important;
+    background-color: var(--theme-sidebar-bg) !important;
+}
+
+/* Vertical Menu Icon */
+.vertical-menu-icon {
+    background-color: var(--theme-primary-color, #506fe4) !important;
+}
+
+.vertical-menu-icon i {
+    color: var(--theme-menu-active-text, #ffffff) !important;
+}
+
+/* Topbar and Infobar */
+.topbar .infobar {
+    background-color: var(--theme-topbar-bg) !important;
+}
+
+.infobar-icon a,
+.infobar-icon i {
+    color: var(--theme-primary-color) !important;
+}
+
+/* Clock-in/out + shop-activity infobar icons (inline SVG). They inherit the
+   primary-blue colour above, which disappears on the blue hover background -
+   so set it explicitly: theme text colour at rest, white on hover. width:auto
+   like the theme icon, because the default .infobar-icon 60px pill read as a
+   different, wider control than its neighbours. */
+#shift_clock_btn, #bell_feed_btn { width: auto !important; min-width: 40px; justify-content: center; align-items: center; }
+#shift_clock_btn .shift-clock-ico, #bell_feed_btn .shift-clock-ico { width: 20px !important; height: 20px !important; flex: 0 0 20px; margin: auto; display: block; color: var(--theme-text-primary, #495057) !important; }
+#shift_clock_btn:hover .shift-clock-ico, #bell_feed_btn:hover .shift-clock-ico { color: #fff !important; }
+
+/* On-shift indicator: a small green dot on the clock button while the user is
+   clocked in - identification without shouting. Set by shiftWidget (refresh +
+   page-load sync). */
+#shift_clock_btn.on-shift { position: relative; }
+#shift_clock_btn.on-shift::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #2ecc71;
+  box-shadow: 0 0 0 2px #f2f3f7;
+}
+#shift_clock_btn.on-shift:hover::after { box-shadow: 0 0 0 2px var(--theme-primary-color, #506fe4); }
+
+/* Sweet-alert confirm button label stays readable on its coloured background
+   (e.g. the "Yes" on the logout prompt was blue text on a blue button). */
+.swal2-confirm { color: #fff !important; }
+
+/* Infobar Settings Sidebar (right side panel) */
+.infobar-settings-sidebar {
+    background-color: var(--theme-card-bg) !important;
+}
+
+.infobar-settings-sidebar .card {
+    background-color: var(--theme-card-bg) !important;
+}
+
+.infobar-settings-sidebar .card-header {
+    background-color: var(--theme-card-bg) !important;
+    border-color: var(--theme-border-color) !important;
+}
+
+.infobar-settings-sidebar .card-body {
+    background-color: var(--theme-card-bg) !important;
+}
+
+/* Text Dark override */
+.text-dark {
+    color: var(--theme-text-primary) !important;
+}
+
+/* Additional menu styling */
+.metismenu {
+    background-color: var(--theme-sidebar-bg) !important;
+}
+
+/* Note: .metismenu li a color only overridden in dark/colored themes */
+
+.metismenu li a.active {
+    color: var(--theme-primary-color) !important;
+}
+
+.metismenu li a:hover {
+    color: var(--theme-primary-color) !important;
+}
+
+/* Dropdown menus */
+.dropdown-menu {
+    background-color: var(--theme-card-bg) !important;
+    border-color: var(--theme-border-color) !important;
+}
+
+.dropdown-item {
+    color: var(--theme-text-secondary) !important;
+}
+
+.dropdown-item:hover {
+    background-color: var(--theme-body-bg) !important;
+    color: var(--theme-text-primary) !important;
+}
+
+/* Modal styling */
+.modal-content {
+    background-color: var(--theme-card-bg) !important;
+}
+
+.modal-header {
+    border-color: var(--theme-border-color) !important;
+}
+
+.modal-footer {
+    border-color: var(--theme-border-color) !important;
+}
+
+/* Theme Settings Panel Specific Styles */
+.theme-color-box {
+    width: 40px;
+    height: 40px;
+    border-radius: 4px;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: all 0.3s ease;
+}
+
+.theme-color-box:hover {
+    transform: scale(1.1);
+}
+
+.theme-color-box.active {
+    border-color: var(--theme-primary-color);
+    box-shadow: 0 0 0 2px rgba(90, 141, 238, 0.3);
+}
+
+.theme-preset-card {
+    cursor: pointer;
+    transition: all 0.3s ease;
+    border: 2px solid transparent;
+}
+
+.theme-preset-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+
+.theme-preset-card.active {
+    border: 2px solid var(--theme-primary-color) !important;
+    box-shadow: 0 0 0 2px rgba(90, 141, 238, 0.3) !important;
+}
+
+.color-picker-wrapper {
+    position: relative;
+}
+
+.color-picker-wrapper .form-control {
+    padding-left: 45px;
+}
+
+.color-preview {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 25px;
+    height: 25px;
+    border-radius: 4px;
+    border: 1px solid #ddd;
+}
+
+.font-size-preview {
+    padding: 10px;
+    border: 1px solid var(--theme-border-color);
+    border-radius: 4px;
+    margin-top: 10px;
+}
+
+.theme-section-title {
+    font-weight: 600;
+    color: var(--theme-text-primary);
+    margin-bottom: 15px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--theme-border-color);
+}
+
+/* Payment Display Section - Default styling (applies to all themes) */
+/* #paymentdisplay .payable-total,
+#paymentdisplay .pay_amount_total {
+    font-weight: 600;
+} */
+
+/* Payment Display Section - Only apply when theme is active */
+[data-theme] #paymentdisplay {
+    background-color: var(--theme-card-bg) !important;
+}
+
+[data-theme] #paymentdisplay td,
+[data-theme] #paymentdisplay span,
+[data-theme] #paymentdisplay .items_head,
+[data-theme] #paymentdisplay .discount-label,
+[data-theme] #paymentdisplay .label-text {
+    color: var(--theme-text-primary) !important;
+}
+
+[data-theme] #paymentdisplay .payable-total {
+    color: var(--theme-text-primary) !important;
+    background-color: var(--theme-table-header-bg) !important;
+}
+
+/* [data-theme] #paymentdisplay .pay_amount_total {
+    color: var(--theme-text-primary) !important;
+    font-weight: 600;
+} */
+
+[data-theme] #paymentdisplay a:not(.btn) {
+    color: var(--theme-primary-color) !important;
+}
+
+[data-theme] #paymentdisplay .text-warning,
+[data-theme] #paymentdisplay .total-amount-size {
+    color: var(--theme-warning-color) !important;
+}
+
+[data-theme] #paymentdisplay .sales_price_fields,
+[data-theme] #paymentdisplay .display-currency {
+    color: var(--theme-primary-color) !important;
+}
+
+[data-theme] #paymentdisplay #sub_total_hide,
+[data-theme] #paymentdisplay #pay_total_hide {
+    background-color: var(--theme-table-header-bg) !important;
+}
+
+[data-theme] #paymentdisplay #sub_total_hide span,
+[data-theme] #paymentdisplay #pay_total_hide span {
+    color: var(--theme-primary-color) !important;
+}
+
+[data-theme] .keysale-borderless {
+    background-color: var(--theme-card-bg) !important;
+}
+
+[data-theme] .keysale-borderless td,
+[data-theme] .keysale-borderless span {
+    color: var(--theme-text-primary) !important;
+}
+
+/* Product Cards - Only apply when theme is active */
+[data-theme] .wsk-cp {
+    border-color: var(--theme-border-color) !important;
+} 
+
+[data-theme] .wsk-cp-product {
+    background-color: var(--theme-card-bg) !important;
+    border-color: var(--theme-border-color) !important;
+}
+
+[data-theme] .wsk-cp-product .description-prod {
+    background-color: var(--theme-card-bg) !important;
+    color: var(--theme-text-primary) !important;
+}
+
+[data-theme] .wsk-cp-product .description-prod p {
+    color: var(--theme-text-primary) !important;
+}
+
+[data-theme] .wsk-cp-product .price {
+    color: var(--theme-primary-color) !important;
+}
+
+[data-theme] .wsk-cp-product .price-text-color {
+    color: var(--theme-primary-color) !important;
+}
+
+/* Infobar Settings Sidebar Body */
+.infobar-settings-sidebar-body {
+    background-color: var(--theme-body-bg) !important;
+    color: var(--theme-text-primary) !important;
+}
+
+/* ============================================
+   KOT PAGE THEME SUPPORT
+   Override inline styles for KOT module
+   ============================================ */
+
+/* KOT Tables Grid - Base styles (works for all themes including default) */
+#kot_tables_grid .kot-table-box h2 {
+    color: var(--theme-success-color, #28a745) !important;
+}
+
+#kot_tables_grid .kot-table-box[data-table-number="TA"] h2,
+#kot_tables_grid .kot-table-box[data-table-number="TA"] div {
+    color: var(--theme-warning-color, #ff9800) !important;
+}
+
+/* KOT Main Container */
+[data-theme] #kot .contentbar {
+    background-color: var(--theme-body-bg) !important;
+}
+
+[data-theme] #kot .col-lg-6,
+[data-theme] #kot .col-md-7,
+[data-theme] #kot .col-md-5 {
+    background-color: var(--theme-card-bg) !important;
+    border-color: var(--theme-border-color) !important;
+}
+
+/* KOT Tables Grid - Theme specific */
+[data-theme] #kot_tables_grid .kot-table-box {
+    background-color: var(--theme-card-bg) !important;
+    border-color: var(--theme-border-color) !important;
+}
+
+[data-theme] #kot_tables_grid .kot-table-box h2 {
+    color: var(--theme-success-color) !important;
+}
+
+/* Selected table - ensure text is visible on selection background */
+[data-theme] #kot_tables_grid .kot-table-box[style*="background: #e3f2fd"] h2,
+[data-theme] #kot_tables_grid .kot-table-box[style*="background: rgb(227, 242, 253)"] h2 {
+    color: var(--theme-text-primary) !important;
+}
+
+[data-theme] #kot_tables_grid .kot-table-box[data-table-number="TA"] h2,
+[data-theme] #kot_tables_grid .kot-table-box[data-table-number="TA"] div {
+    color: var(--theme-warning-color) !important;
+}
+
+/* KOT Table Details Panel */
+[data-theme] #kot_table_details {
+    background-color: var(--theme-card-bg) !important;
+    color: var(--theme-text-primary) !important;
+}
+
+[data-theme] #kot_table_details h3 {
+    color: var(--theme-text-primary) !important;
+}
+
+[data-theme] #kot_table_details .kot-item {
+    background-color: var(--theme-card-bg) !important;
+    border-color: var(--theme-border-color) !important;
+}
+
+[data-theme] #kot_table_details .kot-item > div {
+    background-color: var(--theme-card-bg) !important;
+}
+
+/* KOT Item Table */
+[data-theme] #kot_table_details table {
+    background-color: var(--theme-card-bg) !important;
+}
+
+[data-theme] #kot_table_details table tr {
+    border-color: var(--theme-border-color) !important;
+}
+
+[data-theme] #kot_table_details table td {
+    color: var(--theme-text-primary) !important;
+}
+
+[data-theme] #kot_table_details .kot-item-price-display {
+    color: var(--theme-success-color) !important;
+}
+
+[data-theme] #kot_table_details .kot-total-display {
+    color: var(--theme-success-color) !important;
+}
+
+/* KOT Date/Time/PAX info */
+[data-theme] #kot_table_details .kot-item span[style*="color: #6c757d"] {
+    color: var(--theme-text-secondary) !important;
+}
+
+/* KOT Header border */
+[data-theme] #kot_table_details .d-flex[style*="border-bottom"] {
+    border-color: var(--theme-border-color) !important;
+}
+
+/* KOT Add Item Section */
+[data-theme] .kot-add-item-section {
+    border-color: var(--theme-border-color) !important;
+}
+
+[data-theme] .kot-add-item-section h6 {
+    color: var(--theme-text-primary) !important;
+}
+
+[data-theme] .kot-product-search {
+    background-color: var(--theme-card-bg) !important;
+    border-color: var(--theme-border-color) !important;
+    color: var(--theme-text-primary) !important;
+}
+
+[data-theme] .kot-search-results {
+    background-color: var(--theme-card-bg) !important;
+    border-color: var(--theme-border-color) !important;
+}
+
+/* KOT Quantity Controls */
+[data-theme] .kot-item-qty-controls .qty-input {
+    background-color: var(--theme-card-bg) !important;
+    border-color: var(--theme-border-color) !important;
+    color: var(--theme-text-primary) !important;
+}
+
+/* KOT Empty State */
+[data-theme] #kot_no_tables {
+    color: var(--theme-text-secondary) !important;
+}
+
+[data-theme] #kot_no_tables i {
+    color: var(--theme-text-muted) !important;
+}
+
+[data-theme] #kot_no_tables h5 {
+    color: var(--theme-text-secondary) !important;
+}
+
+[data-theme] #kot_no_tables p {
+    color: var(--theme-text-muted) !important;
+}
+
+/* KOT Details Empty State */
+[data-theme] #kot_table_details .text-center[style*="color: #6c757d"] {
+    color: var(--theme-text-secondary) !important;
+}
+
+[data-theme] #kot_table_details .text-center i[style*="opacity"] {
+    color: var(--theme-text-muted) !important;
+}
+
+/* KOT Discount Info */
+[data-theme] #kot_table_details div[style*="color: #ffc107"] {
+    color: var(--theme-warning-color) !important;
+}
+
+/* Loader background */
+[data-theme] .loader-table-kot {
+    background-color: var(--theme-card-bg) !important;
+}
+
+[data-theme] .loader-table-kot h3 {
+    color: var(--theme-text-primary) !important;
+}
+
+/* KOT Details Panel */
+[data-theme] #kot_details_panel {
+    background-color: var(--theme-card-bg) !important;
+}
+
+/* KOT Contentbar */
+[data-theme] #kot .contentbar {
+    background-color: var(--theme-body-bg) !important;
+}
+
+[data-theme] #kot .contentbar > .row {
+    background-color: var(--theme-card-bg) !important;
+}
+
+/* KOT Selected table highlight - preserve selection color but adjust for theme */
+[data-theme] #kot_tables_grid .kot-table-box[style*="background: #e3f2fd"],
+[data-theme] #kot_tables_grid .kot-table-box[style*="background: rgb(227, 242, 253)"] {
+    background-color: var(--theme-menu-active-bg) !important;
+}
+
+/* KOT Modals */
+[data-theme] #kot_pax_modal .modal-content,
+[data-theme] #table_kot_modal .modal-content,
+[data-theme] #kot_discount_modal .modal-content,
+[data-theme] #kot_view_modal .modal-content,
+[data-theme] #kot_clear_discount_modal .modal-content,
+[data-theme] #kot_delete_item_modal .modal-content,
+[data-theme] #kot_add_item_modal .modal-content {
+    background-color: var(--theme-card-bg) !important;
+}
+
+[data-theme] #kot_pax_modal .modal-body,
+[data-theme] #table_kot_modal .modal-body,
+[data-theme] #kot_discount_modal .modal-body,
+[data-theme] #kot_view_modal .modal-body,
+[data-theme] #kot_add_item_modal .modal-body {
+    background-color: var(--theme-card-bg) !important;
+    color: var(--theme-text-primary) !important;
+}
+
+[data-theme] #kot_add_item_modal .modal-body div[style*="background: white"] {
+    background-color: var(--theme-card-bg) !important;
+}
+
+[data-theme] #kot_pax_modal .modal-footer,
+[data-theme] #table_kot_modal .modal-footer,
+[data-theme] #kot_discount_modal .modal-footer,
+[data-theme] #kot_view_modal .modal-footer,
+[data-theme] #kot_add_item_modal .modal-footer {
+    background-color: var(--theme-card-bg) !important;
+    border-color: var(--theme-border-color) !important;
+}
+
+[data-theme] #kot_pax_modal label,
+[data-theme] #kot_discount_modal label,
+[data-theme] #kot_view_modal label {
+    color: var(--theme-text-primary) !important;
+}
+
+/* KOT History Tables */
+[data-theme] #table_kot_list {
+    background-color: var(--theme-card-bg) !important;
+}
+
+[data-theme] #table_kot_list thead {
+    background-color: var(--theme-table-header-bg) !important;
+}
+
+[data-theme] #table_kot_list th {
+    background-color: var(--theme-table-header-bg) !important;
+    color: var(--theme-text-primary) !important;
+}
+
+[data-theme] #table_kot_list td {
+    background-color: var(--theme-card-bg) !important;
+    color: var(--theme-text-primary) !important;
+}
+
+/* KOT View Modal Info */
+[data-theme] #kot_view_modal p,
+[data-theme] #kot_view_modal strong {
+    color: var(--theme-text-primary) !important;
+}
+
+[data-theme] #kot_view_modal h6 {
+    color: var(--theme-text-primary) !important;
+}
+
+/* Override inline color styles in KOT items */
+[data-theme] #kot_table_details span[style*="color: #6c757d"],
+[data-theme] #kot_table_details i[style*="color: #6c757d"] {
+    color: var(--theme-text-secondary) !important;
+}
+
+[data-theme] #kot_table_details span[style*="color: #28a745"],
+[data-theme] #kot_table_details div[style*="color: #28a745"] {
+    color: var(--theme-success-color) !important;
+}
+
+[data-theme] #kot_table_details i[style*="color: #dee2e6"] {
+    color: var(--theme-text-muted) !important;
+}
+
+/* KOT Buttons text colors for dark theme */
+[data-theme] .kot-modify-btn,
+[data-theme] .kot-update-btn {
+    color: var(--theme-text-primary) !important;
+}
+
+/* KOT border overrides */
+[data-theme] #kot .col-lg-6[style*="border-right"] {
+    border-color: var(--theme-border-color) !important;
+}
+
+[data-theme] #kot_table_details div[style*="border-bottom: 2px solid #e9ecef"],
+[data-theme] #kot_table_details div[style*="border-bottom: 2px solid #dee2e6"] {
+    border-color: var(--theme-border-color) !important;
+}
+
+[data-theme] #kot_table_details tr[style*="border-bottom: 1px solid #f0f0f0"] {
+    border-color: var(--theme-border-color) !important;
+}
+
+/*
+ * Confirmation dialogs.
+ *
+ * SweetAlert draws its own popup with a hard-coded white background, and
+ * nothing here ever styled it - so under a dark theme the popup stayed white
+ * while its text inherited the light colour meant for a dark page. White on
+ * white: the buttons showed and the question did not.
+ *
+ * That is worse than it sounds, because the same dialog asks "are you sure you
+ * want to delete this?". Somebody was being asked to confirm a destructive
+ * action from an unlabelled box with a Yes and a No in it.
+ *
+ * The popup now follows the theme rather than fighting it: card background,
+ * primary text, muted body - the same variables every other panel uses, so it
+ * stays readable in whichever theme a shop picks.
+ */
+[data-theme] .swal2-popup,
+[data-theme] .swal2-modal {
+    background-color: var(--theme-card-bg) !important;
+    color: var(--theme-text-primary) !important;
+}
+
+[data-theme] .swal2-title,
+[data-theme] .swal2-modal .swal2-title {
+    color: var(--theme-text-primary) !important;
+}
+
+[data-theme] .swal2-content,
+[data-theme] .swal2-html-container,
+[data-theme] .swal2-modal .swal2-content {
+    color: var(--theme-text-secondary) !important;
+}
+
+/* The close cross and the validation strip live on the same surface. */
+[data-theme] .swal2-close {
+    color: var(--theme-text-secondary) !important;
+}
+
+[data-theme] .swal2-input,
+[data-theme] .swal2-textarea,
+[data-theme] .swal2-select {
+    background-color: var(--theme-body-bg) !important;
+    color: var(--theme-text-primary) !important;
+    border-color: var(--theme-border-color) !important;
+}
+
+/* =====================================================================
+   CHARACTER THEMES - Terminal (B&W cmd), Turbo C (DOS blue), macOS.
+   Placed at end so their overrides win. The generalized [data-theme] block
+   already handles most accent/surface components via variables; these blocks
+   define each palette + the handful of base-hardcoded spots that assume a
+   light background (dark-theme text/surfaces) and the monospace fonts.
+   ===================================================================== */
+
+/* --- Terminal: black & white, monospace (Windows cmd.exe / console) --- */
+[data-theme="terminal"] {
+    --theme-primary-color: #e8e8e8;
+    --theme-primary-hover: #ffffff;
+    --theme-body-bg: #0c0c0c;
+    --theme-card-bg: #161616;
+    --theme-sidebar-bg: #0c0c0c;
+    --theme-topbar-bg: #161616;
+    --theme-text-primary: #e8e8e8;
+    --theme-text-secondary: #b0b0b0;
+    --theme-text-muted: #808080;
+    --theme-border-color: #3a3a3a;
+    --theme-table-header-bg: #1e1e1e;
+    --theme-table-row-hover: #1c1c1c;
+    --theme-menu-bg: #0c0c0c;
+    --theme-menu-text: #cccccc;
+    --theme-menu-active-bg: #2a2a2a;
+    --theme-menu-active-text: #ffffff;
+    --theme-btn-primary-bg: #e8e8e8;
+    --theme-btn-primary-text: #000000;
+    --theme-font-family: 'Cascadia Mono', 'Consolas', 'Courier New', monospace;
+    --theme-success-color: #cfcfcf;
+    --theme-warning-color: #ffffff;
+    --theme-danger-color: #ff6b6b;
+    --theme-info-color: #b0b0b0;
+}
+
+/* --- Turbo C / DOS: Borland blue IDE, yellow highlights, monospace --- */
+[data-theme="dosblue"] {
+    --theme-primary-color: #ffff55;
+    --theme-primary-hover: #ffff99;
+    --theme-body-bg: #0000aa;
+    --theme-card-bg: #0000aa;
+    --theme-sidebar-bg: #0000aa;
+    --theme-topbar-bg: #000080;
+    --theme-text-primary: #eaeaea;
+    --theme-text-secondary: #b8b8e0;
+    --theme-text-muted: #8a8ac8;
+    --theme-border-color: #5555ff;
+    --theme-table-header-bg: #000088;
+    --theme-table-row-hover: #0000cc;
+    --theme-menu-bg: #0000aa;
+    --theme-menu-text: #d8d8d8;
+    --theme-menu-active-bg: #00aaaa;
+    --theme-menu-active-text: #000000;
+    --theme-btn-primary-bg: #ffff55;
+    --theme-btn-primary-text: #0000aa;
+    --theme-font-family: 'Cascadia Mono', 'Consolas', 'Courier New', monospace;
+    --theme-success-color: #55ff55;
+    --theme-warning-color: #ffff55;
+    --theme-danger-color: #ff5555;
+    --theme-info-color: #55ffff;
+}
+[data-theme="dosblue"] .card,
+[data-theme="dosblue"] .card-body { border: 1px solid #5555ff !important; }
+
+/* --- macOS: clean light grey, SF font, system-blue accent --- */
+[data-theme="macos"] {
+    --theme-primary-color: #007aff;
+    --theme-primary-hover: #0063cc;
+    --theme-body-bg: #ececec;
+    --theme-card-bg: #ffffff;
+    --theme-sidebar-bg: #f5f5f7;
+    --theme-topbar-bg: #f5f5f7;
+    --theme-text-primary: #1d1d1f;
+    --theme-text-secondary: #3a3a3c;
+    --theme-text-muted: #86868b;
+    --theme-border-color: #d2d2d7;
+    --theme-table-header-bg: #f5f5f7;
+    --theme-table-row-hover: #f2f2f4;
+    --theme-menu-bg: #f5f5f7;
+    --theme-menu-text: #1d1d1f;
+    --theme-menu-active-bg: #0064cc;
+    --theme-menu-active-text: #ffffff;
+    --theme-btn-primary-bg: #007aff;
+    --theme-btn-primary-text: #ffffff;
+    --theme-font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    --theme-success-color: #34c759;
+    --theme-warning-color: #ff9500;
+    --theme-danger-color: #ff3b30;
+    --theme-info-color: #5ac8fa;
+}
+
+/* --- Shared dark-surface fixes for the two DARK character themes. Base CSS
+   hardcodes several text/surface colours that assume a light bg; drive them
+   from each theme's own variables so one rule set serves both. --- */
+[data-theme="terminal"] .vertical-menu li a,
+[data-theme="dosblue"] .vertical-menu li a,
+[data-theme="terminal"] .nav-pills .nav-link,
+[data-theme="dosblue"] .nav-pills .nav-link { color: var(--theme-menu-text) !important; }
+[data-theme="terminal"] .card, [data-theme="terminal"] .card-body,
+[data-theme="dosblue"] .card, [data-theme="dosblue"] .card-body { background-color: var(--theme-card-bg) !important; color: var(--theme-text-primary) !important; }
+[data-theme="terminal"] .dropdown-menu,
+[data-theme="dosblue"] .dropdown-menu { background-color: var(--theme-card-bg) !important; border-color: var(--theme-border-color) !important; }
+[data-theme="terminal"] .dropdown-item,
+[data-theme="dosblue"] .dropdown-item,
+[data-theme="terminal"] .dropdown-toggle,
+[data-theme="dosblue"] .dropdown-toggle { color: var(--theme-text-primary) !important; }
+[data-theme="terminal"] .dropdown-item:hover,
+[data-theme="dosblue"] .dropdown-item:hover { background-color: var(--theme-table-row-hover) !important; }
+[data-theme="terminal"] .table, [data-theme="terminal"] .table td, [data-theme="terminal"] .table span,
+[data-theme="dosblue"] .table, [data-theme="dosblue"] .table td, [data-theme="dosblue"] .table span { color: var(--theme-text-primary) !important; }
+[data-theme="terminal"] h1,[data-theme="terminal"] h2,[data-theme="terminal"] h3,[data-theme="terminal"] h4,[data-theme="terminal"] h5,[data-theme="terminal"] h6,
+[data-theme="terminal"] .h1,[data-theme="terminal"] .h2,[data-theme="terminal"] .h3,[data-theme="terminal"] .h4,[data-theme="terminal"] .h5,[data-theme="terminal"] .h6,
+[data-theme="dosblue"] h1,[data-theme="dosblue"] h2,[data-theme="dosblue"] h3,[data-theme="dosblue"] h4,[data-theme="dosblue"] h5,[data-theme="dosblue"] h6,
+[data-theme="dosblue"] .h1,[data-theme="dosblue"] .h2,[data-theme="dosblue"] .h3,[data-theme="dosblue"] .h4,[data-theme="dosblue"] .h5,[data-theme="dosblue"] .h6 { color: var(--theme-text-primary) !important; }
+[data-theme="terminal"] .btn-light,
+[data-theme="dosblue"] .btn-light { color: var(--theme-text-primary) !important; background-color: var(--theme-table-header-bg) !important; border-color: var(--theme-border-color) !important; }
+[data-theme="terminal"] input[type=checkbox]:checked:after,
+[data-theme="dosblue"] input[type=checkbox]:checked:after { background-color: var(--theme-primary-color) !important; border-color: var(--theme-primary-color) !important; }
+[data-theme="terminal"] .table-striped tbody tr:nth-of-type(odd),
+[data-theme="dosblue"] .table-striped tbody tr:nth-of-type(odd) { background-color: var(--theme-table-row-hover) !important; color: var(--theme-text-primary) !important; }
+/* Light primary accents (white / yellow) need DARK button text to stay legible. */
+[data-theme="terminal"] .btn-primary, [data-theme="terminal"] .btn-primary:hover, [data-theme="terminal"] .btn-primary:focus { color: #000000 !important; }
+[data-theme="dosblue"] .btn-primary, [data-theme="dosblue"] .btn-primary:hover, [data-theme="dosblue"] .btn-primary:focus,
+[data-theme="dosblue"] .toolbar-primary .tool-item { color: #0000aa !important; }
+
+/* ===== Terminal & Turbo C dark-theme visibility fixes ===== */
+/* Vertical menus (narrow rail + expanded): match the theme, and force icons
+   light - the base tints them a dim grey-blue that vanishes on a dark bg. */
+[data-theme="terminal"] .vertical-menu-icon,
+[data-theme="dosblue"] .vertical-menu-icon { background-color: var(--theme-sidebar-bg) !important; }
+[data-theme="terminal"] .vertical-menu-icon .nav-link img,
+[data-theme="dosblue"] .vertical-menu-icon .nav-link img,
+[data-theme="terminal"] .vertical-menu > li > a img,
+[data-theme="dosblue"] .vertical-menu > li > a img { filter: brightness(0) invert(1) !important; }
+/* Top-bar utility icons + left hamburger toggle: drop the white circle chip,
+   leave just the icon (per request). */
+[data-theme="terminal"] .topbar .infobar .infobar-icon,
+[data-theme="dosblue"] .topbar .infobar .infobar-icon,
+[data-theme="terminal"] .topbar .togglebar .menu-hamburger,
+[data-theme="dosblue"] .topbar .togglebar .menu-hamburger,
+[data-theme="terminal"] .topbar-mobile .mobile-togglebar .menu-hamburger,
+[data-theme="dosblue"] .topbar-mobile .mobile-togglebar .menu-hamburger { background-color: transparent !important; }
+/* Row-action toolbar was white-on-white in Terminal (white primary + white
+   icons). Terminal -> dark chip + light icons; Turbo C keeps its yellow chip
+   with dark-blue icons. */
+[data-theme="terminal"] .toolbar-primary .tool-item { background: #2a2a2a !important; }
+[data-theme="terminal"] .toolbar-primary .tool-item:hover,
+[data-theme="terminal"] .toolbar-primary .tool-item.selected { background: #3a3a3a !important; }
+[data-theme="terminal"] .toolbar-primary.tool-top .arrow { border-top-color: #2a2a2a !important; }
+[data-theme="terminal"] .toolbar-primary .tool-item > .feather,
+[data-theme="terminal"] .toolbar-primary .tool-item i { color: #e8e8e8 !important; }
+[data-theme="terminal"] .toolbar-primary .tool-item img { filter: brightness(0) invert(1) !important; }
+[data-theme="dosblue"] .toolbar-primary .tool-item > .feather,
+[data-theme="dosblue"] .toolbar-primary .tool-item i { color: #0000aa !important; }
+/* Profile dropdown items were dark navy (#141d46) - invisible on a dark menu. */
+[data-theme="terminal"] .userbox .profile-icon,
+[data-theme="dosblue"] .userbox .profile-icon { color: var(--theme-text-primary) !important; }
+
+/* ===== Loading overlay: themed surface + a CSS spinner for EVERY theme,
+   replacing the white layer + GIF (an overall change, per request). ===== */
+[data-theme] .loadingSpinner {
+    background-image: none !important;
+    background-color: var(--theme-body-bg) !important;
+    opacity: 0.92 !important;
+}
+[data-theme] .loadingSpinner::after {
+    content: '';
+    position: absolute;
+    top: 42%;
+    left: 50%;
+    width: 42px;
+    height: 42px;
+    margin: -21px 0 0 -21px;
+    border: 4px solid var(--theme-border-color, #cccccc);
+    border-top-color: var(--theme-primary-color, #506fe4);
+    border-radius: 50%;
+    animation: ps-comfort-spin 0.8s linear infinite;
+}
+
+/* ---- Terminal & Turbo C: sale screen, menu highlights, empty illustration ---- */
+/* Sale cart body/rows carry inline background:#fff + dark text - override both
+   (CSS !important beats a plain inline style). */
+[data-theme="terminal"] #sales_new_items_tbody,
+[data-theme="dosblue"] #sales_new_items_tbody,
+[data-theme="terminal"] #paymentdisplay,
+[data-theme="dosblue"] #paymentdisplay,
+[data-theme="terminal"] .touch-table-tbody,
+[data-theme="dosblue"] .touch-table-tbody { background: var(--theme-card-bg) !important; }
+[data-theme="terminal"] #sales_new_items_tbody td,
+[data-theme="dosblue"] #sales_new_items_tbody td,
+[data-theme="terminal"] #sales_new_items_tbody .text-dark,
+[data-theme="dosblue"] #sales_new_items_tbody .text-dark,
+[data-theme="terminal"] .register-item-content .text-dark,
+[data-theme="dosblue"] .register-item-content .text-dark { color: var(--theme-text-primary) !important; }
+/* Empty-cart illustration (wallet.svg): dim it so its white blobs don't glare. */
+[data-theme="terminal"] .sales-cart-image,
+[data-theme="dosblue"] .sales-cart-image { opacity: 0.12 !important; }
+/* New Sale tabs (nav-justified): light text + themed underline. */
+[data-theme="terminal"] .nav-tabs.nav-justified .nav-link,
+[data-theme="dosblue"] .nav-tabs.nav-justified .nav-link { color: var(--theme-text-secondary) !important; background: transparent !important; }
+[data-theme="terminal"] .nav-tabs.nav-justified .nav-link.active,
+[data-theme="dosblue"] .nav-tabs.nav-justified .nav-link.active { color: var(--theme-primary-color) !important; background: transparent !important; }
+/* Expanded left menu: visible hover + active highlight. */
+[data-theme="terminal"] .vertical-menu > li:hover > a,
+[data-theme="dosblue"] .vertical-menu > li:hover > a { background-color: rgba(255,255,255,0.08) !important; border-radius: 6px; }
+[data-theme="terminal"] .vertical-menu > li > a.active,
+[data-theme="terminal"] .vertical-menu > li.active > a,
+[data-theme="dosblue"] .vertical-menu > li > a.active,
+[data-theme="dosblue"] .vertical-menu > li.active > a { background-color: rgba(255,255,255,0.14) !important; border-radius: 6px; }
+/* Narrow icon rail active chip. Terminal: subtle white overlay (white icon stays
+   visible). Turbo C: keep the yellow (primary) chip but flip the icon DARK so it
+   reads on yellow. */
+[data-theme="terminal"] .vertical-menu-icon .nav-pills .nav-link.active { background-color: rgba(255,255,255,0.12) !important; }
+[data-theme="dosblue"] .vertical-menu-icon .nav-pills .nav-link.active { background-color: var(--theme-primary-color) !important; }
+[data-theme="dosblue"] .vertical-menu-icon .nav-pills .nav-link.active img { filter: brightness(0) !important; }
+/* Form inputs were base-white on the two dark character themes (each dark theme
+   defines its own .form-control; these didn't). Theme them dark. */
+[data-theme="terminal"] .form-control,
+[data-theme="dosblue"] .form-control,
+[data-theme="terminal"] .border-control,
+[data-theme="dosblue"] .border-control,
+[data-theme="terminal"] textarea,
+[data-theme="dosblue"] textarea,
+[data-theme="terminal"] input[type=text],
+[data-theme="dosblue"] input[type=text],
+[data-theme="terminal"] input[type=number],
+[data-theme="dosblue"] input[type=number],
+[data-theme="terminal"] input[type=search],
+[data-theme="dosblue"] input[type=search],
+[data-theme="terminal"] input[type=email],
+[data-theme="dosblue"] input[type=email],
+[data-theme="terminal"] input[type=password],
+[data-theme="dosblue"] input[type=password],
+[data-theme="terminal"] input[type=tel],
+[data-theme="dosblue"] input[type=tel],
+[data-theme="terminal"] input[type=date],
+[data-theme="dosblue"] input[type=date],
+[data-theme="terminal"] .select2-container--default .select2-selection--single,
+[data-theme="dosblue"] .select2-container--default .select2-selection--single,
+[data-theme="terminal"] .select2-container--default .select2-selection--multiple,
+[data-theme="dosblue"] .select2-container--default .select2-selection--multiple { background-color: var(--theme-card-bg) !important; color: var(--theme-text-primary) !important; border-color: var(--theme-border-color) !important; }
+[data-theme="terminal"] .form-control::placeholder,
+[data-theme="dosblue"] .form-control::placeholder,
+[data-theme="terminal"] input::placeholder,
+[data-theme="dosblue"] input::placeholder { color: var(--theme-text-muted) !important; opacity: 1; }
+
+/* ===== macOS: the Mac feel is rounded corners + soft layered shadows + blue
+   pill sidebar selections + focus rings - not just the SF font. Was too close
+   to Default; these give it a distinct identity. ===== */
+[data-theme="macos"] { --theme-body-bg: #e8e8ed; }
+[data-theme="macos"] .card {
+    border-radius: 12px !important;
+    border: 1px solid #e3e3e8 !important;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05), 0 8px 24px rgba(0,0,0,0.05) !important;
+}
+[data-theme="macos"] .btn { border-radius: 8px !important; }
+[data-theme="macos"] .btn-primary { box-shadow: 0 1px 2px rgba(0,122,255,0.35) !important; }
+[data-theme="macos"] .btn-rounded { border-radius: 8px !important; }
+[data-theme="macos"] .form-control,
+[data-theme="macos"] .border-control,
+[data-theme="macos"] .custom-select,
+[data-theme="macos"] textarea { border-radius: 8px !important; border-color: #d2d2d7 !important; }
+[data-theme="macos"] .form-control:focus,
+[data-theme="macos"] .border-control:focus {
+    border-color: #007aff !important;
+    box-shadow: 0 0 0 3px rgba(0,122,255,0.18) !important;
+}
+/* Sidebar: rounded rows, a solid-blue pill for the current page, soft hover. */
+[data-theme="macos"] .vertical-menu > li > a {
+    border-radius: 8px !important;
+    margin: 1px 8px;
+    padding: 7px 12px !important;
+}
+[data-theme="macos"] .vertical-menu > li:hover > a { background-color: rgba(0,0,0,0.05) !important; color: #1d1d1f !important; }
+[data-theme="macos"] .vertical-menu > li > a.active,
+[data-theme="macos"] .vertical-menu > li.active > a { background-color: #0064cc !important; color: #ffffff !important; }
+[data-theme="macos"] .vertical-menu > li > a.active img,
+[data-theme="macos"] .vertical-menu > li.active > a img { filter: brightness(0) invert(1) !important; }
+/* Soft, deep-shadowed rounded popovers + a hairline topbar. */
+[data-theme="macos"] .modal-content,
+[data-theme="macos"] .dropdown-menu {
+    border-radius: 12px !important;
+    border: 1px solid #e3e3e8 !important;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.14) !important;
+}
+[data-theme="macos"] .topbar { border-bottom: 1px solid #e3e3e8 !important; }
+[data-theme="macos"] .dropdown-item { border-radius: 6px !important; margin: 1px 6px; }
+
+/* ===================================================================
+   NEW PROFESSIONAL THEMES: Clean Light, Soft Dark, Warm Night.
+   =================================================================== */
+
+/* --- Clean Light: minimal off-white (Linear/Notion feel), indigo accent,
+   subtle grey pill selections. Light base needs few overrides. --- */
+[data-theme="cleanlight"] {
+    --theme-primary-color: #52525b;
+    --theme-primary-hover: #3f3f46;
+    --theme-body-bg: #fbfbfb;
+    --theme-card-bg: #ffffff;
+    --theme-sidebar-bg: #fbfbfb;
+    --theme-topbar-bg: #ffffff;
+    --theme-text-primary: #18181b;
+    --theme-text-secondary: #52525b;
+    --theme-text-muted: #a1a1aa;
+    --theme-border-color: #e7e7ea;
+    --theme-table-header-bg: #f6f6f7;
+    --theme-table-row-hover: #f4f4f5;
+    --theme-menu-bg: #fbfbfb;
+    --theme-menu-text: #3f3f46;
+    --theme-menu-active-bg: #eef0f4;
+    --theme-menu-active-text: #18181b;
+    --theme-btn-primary-bg: #52525b;
+    --theme-btn-primary-text: #ffffff;
+    --theme-success-color: #16a34a;
+    --theme-warning-color: #d97706;
+    --theme-danger-color: #dc2626;
+    --theme-info-color: #52525b;
+}
+[data-theme="cleanlight"] .card { border: 1px solid #ececee !important; box-shadow: none !important; }
+[data-theme="cleanlight"] .vertical-menu > li > a { border-radius: 7px !important; margin: 1px 8px; padding: 7px 12px !important; }
+[data-theme="cleanlight"] .vertical-menu > li:hover > a { background-color: #f4f4f5 !important; }
+[data-theme="cleanlight"] .vertical-menu > li > a.active,
+[data-theme="cleanlight"] .vertical-menu > li.active > a { background-color: #eef0f4 !important; color: #18181b !important; }
+
+/* --- Soft Dark: GitHub-Dimmed-style layered charcoal (not pure black), soft
+   white text, blue accent. The pro long-session dark. --- */
+[data-theme="softdark"] {
+    --theme-primary-color: #4aa3ff;
+    --theme-primary-hover: #6cb6ff;
+    --theme-body-bg: #16181d;
+    --theme-card-bg: #1d2026;
+    --theme-sidebar-bg: #1a1d23;
+    --theme-topbar-bg: #1d2026;
+    --theme-text-primary: #e6e6e6;
+    --theme-text-secondary: #a7adba;
+    --theme-text-muted: #7d838f;
+    --theme-border-color: #2c3038;
+    --theme-table-header-bg: #22262e;
+    --theme-table-row-hover: #22262e;
+    --theme-menu-bg: #1a1d23;
+    --theme-menu-text: #c3c8d2;
+    --theme-menu-active-bg: #252932;
+    --theme-menu-active-text: #ffffff;
+    --theme-btn-primary-bg: #316dca;
+    --theme-btn-primary-text: #ffffff;
+    --theme-success-color: #57ab5a;
+    --theme-warning-color: #c69026;
+    --theme-danger-color: #e5534b;
+    --theme-info-color: #539bf5;
+}
+
+/* --- Warm Night: warm dark brown-charcoal + cream text, amber accent. Low blue
+   light for late-night sessions. --- */
+[data-theme="warmnight"] {
+    --theme-primary-color: #e0a458;
+    --theme-primary-hover: #eab873;
+    --theme-body-bg: #1c1a17;
+    --theme-card-bg: #252119;
+    --theme-sidebar-bg: #211d16;
+    --theme-topbar-bg: #252119;
+    --theme-text-primary: #ede4d3;
+    --theme-text-secondary: #b8ab97;
+    --theme-text-muted: #8a8069;
+    --theme-border-color: #3a3327;
+    --theme-table-header-bg: #2c2820;
+    --theme-table-row-hover: #2c2820;
+    --theme-menu-bg: #211d16;
+    --theme-menu-text: #cabfa9;
+    --theme-menu-active-bg: #3a3226;
+    --theme-menu-active-text: #f4ecdc;
+    --theme-btn-primary-bg: #b9803c;
+    --theme-btn-primary-text: #1c1a17;
+    --theme-success-color: #8fae6b;
+    --theme-warning-color: #e0a458;
+    --theme-danger-color: #d97066;
+    --theme-info-color: #7fa8c9;
+}
+[data-theme="warmnight"] .btn-primary { color: #1c1a17 !important; }
+
+/* --- Shared dark-surface theming for Soft Dark + Warm Night (form inputs, menu
+   text, dropdowns, headings, tables, sale cart) - all variable-driven so each
+   reads its own palette. --- */
+[data-theme="softdark"] .form-control, [data-theme="warmnight"] .form-control,
+[data-theme="softdark"] .border-control, [data-theme="warmnight"] .border-control,
+[data-theme="softdark"] textarea, [data-theme="warmnight"] textarea,
+[data-theme="softdark"] input[type=text], [data-theme="warmnight"] input[type=text],
+[data-theme="softdark"] input[type=number], [data-theme="warmnight"] input[type=number],
+[data-theme="softdark"] input[type=search], [data-theme="warmnight"] input[type=search],
+[data-theme="softdark"] input[type=email], [data-theme="warmnight"] input[type=email],
+[data-theme="softdark"] input[type=password], [data-theme="warmnight"] input[type=password],
+[data-theme="softdark"] input[type=tel], [data-theme="warmnight"] input[type=tel],
+[data-theme="softdark"] input[type=date], [data-theme="warmnight"] input[type=date],
+[data-theme="softdark"] .select2-container--default .select2-selection--single, [data-theme="warmnight"] .select2-container--default .select2-selection--single,
+[data-theme="softdark"] .dropdown-menu, [data-theme="warmnight"] .dropdown-menu { background-color: var(--theme-card-bg) !important; color: var(--theme-text-primary) !important; border-color: var(--theme-border-color) !important; }
+[data-theme="softdark"] .form-control::placeholder, [data-theme="warmnight"] .form-control::placeholder,
+[data-theme="softdark"] input::placeholder, [data-theme="warmnight"] input::placeholder { color: var(--theme-text-muted) !important; opacity: 1; }
+[data-theme="softdark"] .vertical-menu li a, [data-theme="warmnight"] .vertical-menu li a,
+[data-theme="softdark"] .nav-pills .nav-link, [data-theme="warmnight"] .nav-pills .nav-link,
+[data-theme="softdark"] .dropdown-item, [data-theme="warmnight"] .dropdown-item,
+[data-theme="softdark"] .dropdown-toggle, [data-theme="warmnight"] .dropdown-toggle { color: var(--theme-text-primary) !important; }
+[data-theme="softdark"] .card, [data-theme="warmnight"] .card,
+[data-theme="softdark"] .card-body, [data-theme="warmnight"] .card-body { background-color: var(--theme-card-bg) !important; color: var(--theme-text-primary) !important; }
+[data-theme="softdark"] .table, [data-theme="softdark"] .table td, [data-theme="softdark"] .table span,
+[data-theme="warmnight"] .table, [data-theme="warmnight"] .table td, [data-theme="warmnight"] .table span { color: var(--theme-text-primary) !important; }
+[data-theme="softdark"] h1,[data-theme="softdark"] h2,[data-theme="softdark"] h3,[data-theme="softdark"] h4,[data-theme="softdark"] h5,[data-theme="softdark"] h6,
+[data-theme="softdark"] .h1,[data-theme="softdark"] .h2,[data-theme="softdark"] .h3,[data-theme="softdark"] .h4,[data-theme="softdark"] .h5,[data-theme="softdark"] .h6,
+[data-theme="warmnight"] h1,[data-theme="warmnight"] h2,[data-theme="warmnight"] h3,[data-theme="warmnight"] h4,[data-theme="warmnight"] h5,[data-theme="warmnight"] h6,
+[data-theme="warmnight"] .h1,[data-theme="warmnight"] .h2,[data-theme="warmnight"] .h3,[data-theme="warmnight"] .h4,[data-theme="warmnight"] .h5,[data-theme="warmnight"] .h6 { color: var(--theme-text-primary) !important; }
+[data-theme="softdark"] #sales_new_items_tbody, [data-theme="warmnight"] #sales_new_items_tbody,
+[data-theme="softdark"] .touch-table-tbody, [data-theme="warmnight"] .touch-table-tbody { background: var(--theme-card-bg) !important; }
+[data-theme="softdark"] #sales_new_items_tbody .text-dark, [data-theme="warmnight"] #sales_new_items_tbody .text-dark,
+[data-theme="softdark"] .register-item-content .text-dark, [data-theme="warmnight"] .register-item-content .text-dark { color: var(--theme-text-primary) !important; }
+[data-theme="softdark"] .sales-cart-image, [data-theme="warmnight"] .sales-cart-image { opacity: 0.12 !important; }
+[data-theme="softdark"] .btn-light, [data-theme="warmnight"] .btn-light { color: var(--theme-text-primary) !important; background-color: var(--theme-table-header-bg) !important; border-color: var(--theme-border-color) !important; }
+/* Rounded sidebar rows + accent active pill. */
+[data-theme="softdark"] .vertical-menu > li > a, [data-theme="warmnight"] .vertical-menu > li > a { border-radius: 7px !important; margin: 1px 8px; }
+[data-theme="softdark"] .vertical-menu > li:hover > a, [data-theme="warmnight"] .vertical-menu > li:hover > a { background-color: rgba(255,255,255,0.06) !important; }
+[data-theme="softdark"] .vertical-menu > li > a.active, [data-theme="softdark"] .vertical-menu > li.active > a,
+[data-theme="warmnight"] .vertical-menu > li > a.active, [data-theme="warmnight"] .vertical-menu > li.active > a { background-color: var(--theme-menu-active-bg) !important; border-radius: 7px !important; }
+
+/* Config / settings pill sub-menu (Config left menu): the active item was the raw
+   primary (yellow in Turbo C, blue elsewhere) with unreadable text. Use each
+   theme's DESIGNED active colours (contrasting bg + text). Scoped to #settings so
+   the narrow icon rail (which shares the #v-pills-tab id) is untouched. */
+[data-theme] #settings .nav-pills .nav-link.active,
+[data-theme] #settings .nav-pills .show > .nav-link { background-color: var(--theme-menu-active-bg) !important; color: var(--theme-menu-active-text) !important; }
+
+/* Clean Light: many themes share a blue-ish primary rail, so make this one's
+   narrow icon rail grey (not the indigo primary) with dark icons - so it reads
+   as a distinct neutral/grey theme, not "another blue one". */
+[data-theme="cleanlight"] .vertical-menu-icon { background-color: #e8e8ec !important; }
+[data-theme="cleanlight"] .vertical-menu-icon .nav-link img { filter: brightness(0) invert(0.4) !important; }
+[data-theme="cleanlight"] .vertical-menu-icon .nav-pills .nav-link.active { background-color: #d6d6da !important; }
+
+/* Narrow icon rail (all themes): the logo had a 200px bottom margin that pushed
+   the first icon far below the expanded menu's first item. Bring the icons up
+   near the top, and add a hairline separation from the expanded menu. */
+.vertical-menu-icon .nav-pills .logobar { margin-bottom: 20px !important; }
+.vertical-menu-icon { border-right: 1px solid rgba(128,128,128,0.25) !important; }
+/* Monospace themes: smaller font + no-wrap + tighter spacing so long items like
+   "Customer Category" fit on one line in the expanded menu. */
+[data-theme="terminal"] .vertical-menu > li > a,
+[data-theme="dosblue"] .vertical-menu > li > a { font-size: 13px !important; white-space: nowrap !important; padding-left: 10px !important; padding-right: 6px !important; }
+[data-theme="terminal"] .vertical-menu > li > a > img,
+[data-theme="dosblue"] .vertical-menu > li > a > img { margin-right: 5px !important; }
+/* macOS: grey Finder-style rail (not the blue primary) so it reads distinct from
+   Default and matches the Mac look. */
+[data-theme="macos"] .vertical-menu-icon { background-color: #e8e8ec !important; }
+[data-theme="macos"] .vertical-menu-icon .nav-link img { filter: brightness(0) invert(0.4) !important; }
+[data-theme="macos"] .vertical-menu-icon .nav-pills .nav-link.active { background-color: #d6d6da !important; }
+/* Clean Light: grey the expanded-menu icons too (fully monochrome). */
+[data-theme="cleanlight"] .vertical-menu > li > a img { filter: brightness(0) invert(0.4) !important; }
+/* Hardcoded-blue text (report summary card titles + amounts, and the shop-name
+   logo) made theme-aware so Clean Light greys them and every theme colours them
+   correctly. */
+[data-theme] .summary_font_blue,
+[data-theme] .title_h2 { color: var(--theme-primary-color) !important; }
+/* Modal header (Sale Details etc.) was hardcoded #506fe4 for every theme. Theme
+   it with the primary bg + a CONTRASTING title/close (--theme-btn-primary-text
+   is dark on light-accent themes like Turbo C/Terminal/Warm Night, white else).
+   Also theme the custom infobar detail-panel title. */
+[data-theme] .modal-header { background-color: var(--theme-primary-color) !important; border-color: var(--theme-primary-color) !important; }
+[data-theme] .modal-title,
+[data-theme] .modal-header .close,
+[data-theme] .modal-header .close span { color: var(--theme-btn-primary-text, #ffffff) !important; text-shadow: none !important; opacity: 1 !important; }
+[data-theme] .infobar-settings-sidebar .infobar-settings-sidebar-head h4 { color: var(--theme-primary-color) !important; }
+/* Detail-panel close X is an <img> tinted blue by the base filter. Neutralise it
+   per theme: a dark X on light themes, a light X on dark themes. */
+[data-theme="cleanlight"] .infobar-settings-close img,
+[data-theme="macos"] .infobar-settings-close img,
+[data-theme="brown"] .infobar-settings-close img,
+[data-theme="default"] .infobar-settings-close img { filter: brightness(0) opacity(0.5) !important; }
+[data-theme="dark"] .infobar-settings-close img { filter: brightness(0) invert(1) !important; }
+/* New Sale tabs (nav-justified): active tab was a white box on the dark themes.
+   Theme it (underline style) for EVERY theme, not just terminal/dosblue. */
+[data-theme] .nav-tabs.nav-justified,
+[data-theme] .nav-tabs.nav-justified .nav-item,
+[data-theme] #defaultTabJustified,
+[data-theme] #defaultTabJustified .nav-item { background: transparent !important; }
+[data-theme] .nav-tabs.nav-justified .nav-link,
+[data-theme] #defaultTabJustified .nav-link { color: var(--theme-text-secondary) !important; background: transparent !important; }
+[data-theme] .nav-tabs.nav-justified .nav-link.active,
+[data-theme] #defaultTabJustified .nav-link.active { color: var(--theme-primary-color) !important; background: transparent !important; border-bottom: 3px solid var(--theme-primary-color) !important; }
+
+/* Detail-panel close X for Terminal + Turbo C (was still blue) - light X. */
+[data-theme="terminal"] .infobar-settings-close img,
+[data-theme="dosblue"] .infobar-settings-close img { filter: brightness(0) invert(1) !important; }
+/* Primary badges (Shortcut Keys etc.): contrasting text so a light-accent theme
+   (Terminal white / Turbo C yellow) doesn't render white-on-white. */
+[data-theme] .badge-primary { color: var(--theme-btn-primary-text, #ffffff) !important; }
+/* Dark character themes: theme the modal content + body so popups (Shortcut
+   Keys, Sale Details) are light text on a dark surface, not dark-on-dark. */
+[data-theme="terminal"] .modal-content, [data-theme="dosblue"] .modal-content,
+[data-theme="softdark"] .modal-content, [data-theme="warmnight"] .modal-content { background-color: var(--theme-card-bg) !important; }
+[data-theme="terminal"] .modal-body, [data-theme="dosblue"] .modal-body,
+[data-theme="softdark"] .modal-body, [data-theme="warmnight"] .modal-body { color: var(--theme-text-primary) !important; }
+
+/* Sidebar bottom illustration sat too close to the last menu item - nudge down. */
+.dashboard_img_menu { margin-top: 20px !important; }
+
+/* Clean Light: grey + dim the empty-state illustrations (New Sale, New Purchase)
+   so the colourful piggy doesn't clash with the minimal grey theme. */
+[data-theme="cleanlight"] .sales-cart-image,
+[data-theme="cleanlight"] .receiving-image-wrapper,
+[data-theme="cleanlight"] .receiving-image-wrapper img { filter: grayscale(1) !important; opacity: 0.28 !important; }
+
+/* Toggle switches / custom checkbox + radio: checked colour was hardcoded blue -
+   theme it for every theme. */
+[data-theme] .custom-control-input:checked ~ .custom-control-label::before { background-color: var(--theme-primary-color, #506fe4) !important; border-color: var(--theme-primary-color, #506fe4) !important; }
+/* Empty-state datatable illustration (nodata.svg, in every *_norecord block) +
+   the New Purchase cart image: dim on dark themes, grey+dim on Clean Light -
+   matching the sale-cart image, so the artwork suits the theme. */
+[data-theme="terminal"] [class*="_norecord"] img, [data-theme="dosblue"] [class*="_norecord"] img,
+[data-theme="softdark"] [class*="_norecord"] img, [data-theme="warmnight"] [class*="_norecord"] img,
+[data-theme="dark"] [class*="_norecord"] img,
+[data-theme="terminal"] .receiving-image-wrapper, [data-theme="dosblue"] .receiving-image-wrapper,
+[data-theme="softdark"] .receiving-image-wrapper, [data-theme="warmnight"] .receiving-image-wrapper,
+[data-theme="dark"] .receiving-image-wrapper { opacity: 0.3 !important; }
+[data-theme="cleanlight"] [class*="_norecord"] img { filter: grayscale(1) !important; opacity: 0.4 !important; }
+/* Clean Light: subtle light-grey top-bar icon hover (not a solid dark chip), dark
+   icon on hover (not the blue tint). */
+[data-theme="cleanlight"] .topbar .infobar .infobar-icon:hover,
+[data-theme="cleanlight"] .topbar .togglebar .menu-hamburger:hover { background-color: #e4e4e7 !important; }
+[data-theme="cleanlight"] .topbar .infobar .infobar-icon:hover img { filter: brightness(0) invert(0.3) !important; }
+
+/* ===== Soft Dark + Warm Night: the remaining dark-surface spots the other dark
+   character themes already had (rail, top-bar icon chips, hamburger, profile
+   menu, striped rows, item-details popup, row-action toolbar). ===== */
+/* Narrow rail: dark (not the blue primary) with light icons. */
+[data-theme="softdark"] .vertical-menu-icon,
+[data-theme="warmnight"] .vertical-menu-icon { background-color: var(--theme-sidebar-bg) !important; }
+[data-theme="softdark"] .vertical-menu-icon .nav-link img,
+[data-theme="warmnight"] .vertical-menu-icon .nav-link img,
+[data-theme="softdark"] .vertical-menu > li > a img,
+[data-theme="warmnight"] .vertical-menu > li > a img { filter: brightness(0) invert(1) !important; }
+/* Top-bar utility icons + hamburger toggle: drop the white circle chip. */
+[data-theme="softdark"] .topbar .infobar .infobar-icon,
+[data-theme="warmnight"] .topbar .infobar .infobar-icon,
+[data-theme="softdark"] .topbar .togglebar .menu-hamburger,
+[data-theme="warmnight"] .topbar .togglebar .menu-hamburger,
+[data-theme="softdark"] .topbar-mobile .mobile-togglebar .menu-hamburger,
+[data-theme="warmnight"] .topbar-mobile .mobile-togglebar .menu-hamburger { background-color: transparent !important; }
+/* Profile dropdown items were dark navy - invisible on a dark menu. */
+[data-theme="softdark"] .userbox .profile-icon,
+[data-theme="warmnight"] .userbox .profile-icon { color: var(--theme-text-primary) !important; }
+/* Striped rows (item-details values etc.) had white odd rows. */
+[data-theme="softdark"] .table-striped tbody tr:nth-of-type(odd),
+[data-theme="warmnight"] .table-striped tbody tr:nth-of-type(odd) { background-color: var(--theme-table-row-hover) !important; color: var(--theme-text-primary) !important; }
+[data-theme="softdark"] input[type=checkbox]:checked:after,
+[data-theme="warmnight"] input[type=checkbox]:checked:after { background-color: var(--theme-primary-color) !important; border-color: var(--theme-primary-color) !important; }
+/* Item-details / detail popup (custom infobar panel): title + close X. */
+[data-theme="softdark"] .infobar-settings-sidebar .infobar-settings-sidebar-head h4,
+[data-theme="warmnight"] .infobar-settings-sidebar .infobar-settings-sidebar-head h4 { color: var(--theme-text-primary) !important; }
+[data-theme="softdark"] .infobar-settings-sidebar .infobar-settings-sidebar-head .infobar-settings-close img,
+[data-theme="warmnight"] .infobar-settings-sidebar .infobar-settings-sidebar-head .infobar-settings-close img { filter: brightness(0) invert(1) !important; }
+/* Row-action toolbar: raised dark chip (not a bright blue bar), white icons. */
+[data-theme="softdark"] .toolbar-primary .tool-item,
+[data-theme="warmnight"] .toolbar-primary .tool-item { background: var(--theme-menu-active-bg) !important; }
+[data-theme="softdark"] .toolbar-primary .tool-item:hover, [data-theme="softdark"] .toolbar-primary .tool-item.selected,
+[data-theme="warmnight"] .toolbar-primary .tool-item:hover, [data-theme="warmnight"] .toolbar-primary .tool-item.selected { background: var(--theme-primary-color) !important; }
+[data-theme="softdark"] .toolbar-primary.tool-top .arrow,
+[data-theme="warmnight"] .toolbar-primary.tool-top .arrow { border-top-color: var(--theme-menu-active-bg) !important; }
+
+/* =====================================================================
+   Flash / toast notifications  —  modern, theme-aware redesign
+   ---------------------------------------------------------------------
+   The jQuery Toast plugin ships fixed solid-colour boxes (dark green /
+   red / brown / teal) that look the same on every theme. This replaces
+   them with a clean card that adopts the ACTIVE theme's surface plus a
+   semantic accent bar (green success / red error / amber warning /
+   blue info). Light themes -> light card + dark text; dark themes ->
+   dark card + light text; default theme -> white card. The accent is
+   pulled from each theme's own success/danger/warning/info colour so it
+   harmonises, with universal fallbacks so it stays meaningful.
+   ===================================================================== */
+.jq-toast-wrap { width: 340px; }
+.jq-toast-single {
+    position: relative;
+    background: var(--theme-card-bg, #ffffff) !important;
+    color: var(--theme-text-primary, #2c3e50) !important;
+    border: 1px solid var(--theme-border-color, #e6e9ef) !important;
+    border-left: 4px solid var(--toast-accent, #6b7280) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16) !important;
+    padding: 14px 34px 14px 56px !important;
+    margin: 0 0 10px !important;
+    font-size: 13px !important;
+    line-height: 1.45 !important;
+}
+.jq-toast-single h2 {
+    color: var(--theme-text-primary, #2c3e50) !important;
+    font-size: 14px;
+    font-weight: 700;
+    margin: 0 0 3px;
+    text-transform: capitalize;
+}
+.jq-toast-single a {
+    color: var(--toast-accent, #6b7280) !important;
+    border-bottom-color: var(--toast-accent, #6b7280) !important;
+}
+.close-jq-toast-single {
+    top: 9px;
+    right: 11px;
+    font-size: 16px;
+    color: var(--theme-text-muted, #9aa0ac) !important;
+    opacity: .7;
+}
+.close-jq-toast-single:hover { opacity: 1; }
+.jq-toast-loader {
+    height: 3px;
+    top: 0;
+    border-radius: 10px 10px 0 0;
+    background: var(--toast-accent, #6b7280) !important;
+}
+/* Replace the plugin's left PNG icon with a themed circular badge + glyph */
+.jq-has-icon { background-image: none !important; }
+.jq-toast-single.jq-has-icon::before {
+    content: '';
+    position: absolute;
+    left: 15px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--toast-accent, #6b7280);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 700;
+    font-family: Arial, sans-serif;
+    line-height: 1;
+}
+.jq-icon-success::before { content: '\2713' !important; }  /* check */
+.jq-icon-error::before   { content: '\2715' !important; }  /* cross */
+.jq-icon-warning::before { content: '!'     !important; }
+.jq-icon-info::before    { content: 'i'     !important; }
+/* Semantic accent per type, sourced from the active theme (fallbacks universal) */
+.jq-icon-success { --toast-accent: var(--theme-success-color, #2e7d32); }
+.jq-icon-error   { --toast-accent: var(--theme-danger-color,  #d64545); }
+.jq-icon-warning { --toast-accent: var(--theme-warning-color, #d98a00); }
+.jq-icon-info    { --toast-accent: var(--theme-info-color,    #2b7fbf); }
+
+/* =====================================================================
+   File-upload "Browse" buttons were hardcoded blue on every theme except
+   VS Code (dark). Theme them everywhere: the bootstrap custom-file Browse
+   chip (::after, used on the Purchase page) and the Neon uploader's Browse
+   link (used on the New Item page). Default theme keeps the original blue.
+   ===================================================================== */
+[data-theme] .custom-file-label::after {
+    background-color: var(--theme-primary-color, #506fe4) !important;
+    color: var(--theme-btn-primary-text, #fff) !important;
+}
+[data-theme] .Neon-input-choose-btn.blue {
+    background-color: var(--theme-primary-color, #506fe4) !important;
+    border-color: var(--theme-primary-color, #506fe4) !important;
+    color: var(--theme-btn-primary-text, #fff) !important;
+}
+
+/* =====================================================================
+   DEFAULT THEME SAFETY NET
+   The global rules above read --theme-* variables. On the Default theme
+   (no data-theme attribute) those come from the :root block. If any of
+   them is ever missing or clobbered at runtime, these literal rules keep
+   the core chrome rendering exactly as Default intends - most importantly
+   the blue icon rail with its white SVG icons, which otherwise disappear.
+   ===================================================================== */
+html:not([data-theme]) .vertical-menu-icon { background-color: #506fe4 !important; }
+html:not([data-theme]) .vertical-menu-icon .nav-pills .nav-link img { filter: none !important; opacity: 1 !important; }
+html:not([data-theme]) .leftbar,
+html:not([data-theme]) .vertical-menu,
+html:not([data-theme]) .metismenu { background-color: #ffffff !important; }
+html:not([data-theme]) body { background-color: #f2f3f7 !important; color: #3a4459 !important; }
+
+/* Default theme: SOLID surfaces. The item "view" slide-over (and some popups)
+   had NO explicit background on Default, so the page behind bled through and
+   mixed. Paint every panel / popup / card surface white - the completeness the
+   named themes (Eye Comfort etc.) already have. */
+html:not([data-theme]) .infobar-settings-sidebar,
+html:not([data-theme]) #infobar-settings-sidebar-item-details,
+html:not([data-theme]) #infobar-settings-sidebar-item,
+html:not([data-theme]) #infobar-settings-sidebar-instance,
+html:not([data-theme]) .infobar-settings-sidebar-body,
+html:not([data-theme]) .modal-content,
+html:not([data-theme]) .dropdown-menu,
+html:not([data-theme]) .card,
+html:not([data-theme]) .card-body {
+    background-color: #ffffff !important;
+}
+
+/* Settings (Config) menu: small section headers that group the vertical pill
+   nav into Store / Sales & Billing / Marketing / Customers / Messaging /
+   Devices / Appearance / System. Muted uppercase label, tight under its group,
+   with breathing room above (except the first). */
+.settings-nav-group {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #9aa4b2;
+    margin: 18px 0 6px;
+    padding-left: 2px;
+}
+.settings-nav-group:first-child {
+    margin-top: 0;
+}
+
+/* --- Detail drawer polish (item / category / customer / supplier / branch,
+   applies in every theme) ---------------------------------------------------
+   1) Big vertical gap between the tabs and the content (tab wrapper padded 30px
+      on top, modal body another 20px). Pull the content UP by trimming only the
+      VERTICAL padding + the tab row's bottom margin - horizontal inset is left
+      exactly as-is so nothing shifts left.
+   2) The bottom "Close" was a stark full-width white slab pinned to the foot,
+      reading as a separate bar. Blend it in, align it, soften the button.
+   Scoped to .infobar-settings-sidebar so it covers ALL the detail drawers. */
+.infobar-settings-sidebar .infobar-settings-sidebar-body .nav-tabs.mb-3 {
+    margin-bottom: 8px !important;
+}
+/* .custom-mode-setting deliberately carries NO padding rule anywhere - the
+   30px block padding (and the partial overrides patched on top of it) is
+   removed at the source in style.css and _custom-topbar.scss. Do not re-add. */
+.infobar-settings-sidebar .infobar-settings-sidebar-body .custom-layout-setting {
+    padding-top: 6px !important;
+    padding-bottom: 12px !important;
+}
+.infobar-settings-sidebar .slider-modal-body {
+    padding-top: 4px !important;
+}
+.infobar-settings-sidebar .infobar-settings-sidebar-foot {
+    padding: 12px 18px !important;
+    background: transparent !important;
+    border-top: 1px solid rgba(0, 0, 0, 0.06) !important;
+    box-shadow: none !important;
+    text-align: right !important;
+}
+.infobar-settings-sidebar .infobar-settings-sidebar-foot .btn {
+    padding: 7px 22px !important;
+    border-radius: 8px !important;
+    font-weight: 500 !important;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06) !important;
+}
+
+/* Boxed tabs (Price Settings, Kiosk Settings, etc. use .custom-tab-line): the
+   active tab paints a filled box, but the label sat cramped against its edges.
+   Give the tab links comfortable padding so the text has room. Plain tabs that
+   don't use .custom-tab-line are untouched. */
+.nav-tabs.custom-tab-line .nav-link {
+    padding: 8px 18px !important;
+}
+
+/* Sales till: coupon control as a single clean pill - icon, input and a
+   borderless Apply share one 34px height (the old input-group had a separate
+   icon box whose height never matched the input). Theme-agnostic: transparent
+   fill + inherited text so it reads on light and dark alike. */
+#sales_coupon_panel {
+    width: 300px;
+    max-width: 100%;
+}
+#sales_coupon_panel .sales-coupon-box {
+    display: flex;
+    align-items: center;
+    height: 34px;
+    padding: 0 4px 0 12px;
+    border: 1px solid rgba(128, 128, 128, 0.35);
+    border-radius: 8px;
+    background: transparent;
+}
+#sales_coupon_panel .sales-coupon-icon {
+    flex: 0 0 auto;
+    margin-right: 8px;
+    font-size: 14px;
+    color: #8a94a6;
+}
+#sales_coupon_panel .sales-coupon-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: inherit;
+    font-size: 13px;
+}
+#sales_coupon_panel .sales-coupon-input::placeholder {
+    color: #8a94a6;
+}
+#sales_coupon_panel .sales-coupon-apply {
+    flex: 0 0 auto;
+    margin-left: 4px;
+    padding: 0 16px;
+    height: 26px;
+    border: 0;
+    border-radius: 6px;
+    background: rgba(67, 209, 135, 0.16);
+    color: #2ca77b;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+#sales_coupon_panel .sales-coupon-apply:hover {
+    background: #43d187;
+    color: #ffffff;
+}
+#sales_coupon_panel .sales-coupon-clear {
+    flex: 0 0 auto;
+    padding: 0 6px;
+    border: 0;
+    background: transparent;
+    color: #8a94a6;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+}
+#sales_coupon_panel .sales-coupon-clear:hover {
+    color: #f9616d;
+}
+/* Applied state: the input + Apply collapse into this inline green summary
+   chip ("check −₹10 with DOIT"); it grows to fill and ellipsises if long. */
+#sales_coupon_panel .sales-coupon-applied {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #2ca77b;
+    font-size: 13px;
+    font-weight: 600;
+}
+#sales_coupon_panel .sales-coupon-applied .feather {
+    font-size: 13px;
+    vertical-align: middle;
+}
+
+/* Sales customer button: shows who the sale is for. Neutral/muted "Walk-in"
+   when none is set; accent when a customer is attached. Name ellipsises, full
+   name + phone shows on hover (tooltip). Replaces the old ⋮ toggle. */
+.sales-customer-btn {
+    height: 38px;
+    border: 0;
+    border-radius: 0;
+    display: inline-flex !important;
+    align-items: center;
+    gap: 6px;
+    max-width: 200px;
+    background: rgba(128, 128, 128, 0.12) !important;
+    color: #6c757d !important;
+}
+.sales-customer-btn.has-customer {
+    background: rgba(80, 111, 228, 0.12) !important;
+    color: #506fe4 !important;
+}
+.sales-customer-btn .feather {
+    font-size: 16px;
+    flex: 0 0 auto;
+}
+.sales-customer-btn .sales-customer-label {
+    max-width: 130px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+/* Add-customer form: the phone field uses intl-tel-input, whose wrapper is
+   display:inline-block by default - that made the "Phone" label sit beside the
+   field while every other field stacks label-over-field. Force the wrapper (and
+   the inner input) to a full-width block so Phone matches the rest. */
+#customer_add_form .intl-tel-input,
+#customer_add_form .iti {
+    display: block !important;
+    width: 100% !important;
+}
+#customer_add_form .intl-tel-input .form-control,
+#customer_add_form .intl-tel-input input[type="tel"],
+#customer_add_form .iti input[type="tel"] {
+    width: 100% !important;
+}
+
+/* Customer popover: opens under the customer button as a floating card - search
+   by name/phone (live results), add a new customer, or drop to walk-in. Replaces
+   the old full-width toggle row that pushed the whole page down. Theme-aware. */
+#items_view_hide {
+    position: relative;
+}
+.toggle-customer-user.sales-customer-pop {
+    position: absolute;
+    top: 52px;
+    right: 18px;
+    width: 300px;
+    max-width: calc(100% - 24px);
+    z-index: 1050;
+    padding: 10px;
+    background: var(--theme-body-bg, #ffffff);
+    border: 1px solid rgba(128, 128, 128, 0.22);
+    border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
+}
+.sales-customer-pop-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+.sales-customer-pop-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #8a94a6;
+}
+.sales-customer-pop-x {
+    font-size: 18px;
+    line-height: 1;
+    color: #8a94a6;
+    text-decoration: none;
+}
+.sales-customer-pop-x:hover {
+    color: #f9616d;
+    text-decoration: none;
+}
+.sales-customer-search-group {
+    margin-bottom: 8px;
+}
+.sales-customer-search-ic {
+    background: transparent;
+    border-right: 0;
+}
+.sales-customer-pop-action {
+    display: flex;
+    align-items: center;
+    padding: 9px 10px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--theme-text-primary, #16203a);
+    text-decoration: none;
+    cursor: pointer;
+}
+.sales-customer-pop-action:hover {
+    background: rgba(128, 128, 128, 0.10);
+    color: var(--theme-text-primary, #16203a);
+    text-decoration: none;
+}
+.sales-customer-walkin {
+    color: #8a94a6;
+}
+
+/* New Purchase form: Supplier / Date / Payment sat far apart (each field in its
+   own full-width row with default form-group + label margins and roomy card
+   padding), forcing a scroll on an otherwise short form. Tighten the vertical
+   rhythm so it fits without scrolling. Horizontal layout is untouched. */
+#receiving_add .card-body {
+    padding-top: 14px !important;
+    padding-bottom: 14px !important;
+}
+#receiving_add .form-group {
+    margin-bottom: 0.5rem !important;
+}
+#receiving_add .form-group > label,
+#receiving_add label.form-control-placeholder {
+    margin-bottom: 0.2rem !important;
+}
+/* New Purchase Open/Received: cleaner rounded segmented toggle. */
+.receiving-status-toggle .btn {
+    border-radius: 8px !important;
+    font-weight: 600;
+}
+/* Sales item card: subtle stock count under the price (tracked items only). */
+.wsk-cp-stock {
+    font-size: 11px;
+    color: #9aa4b2;
+    margin-top: 2px;
+    line-height: 1.2;
+}
+
+/* Tender/payment modal: the close × sat in a position:fixed head at the top-
+   LEFT, directly under the left vertical menu - so the sidebar swallowed its
+   clicks and hover (it never closed and never highlighted). Keep it pinned
+   top-RIGHT but INSIDE the panel, and let it look like every other popup's
+   close (plain icon, no circle background - the white disc read as a foreign
+   control sitting over the panel edge). Appearance comes from the shared
+   .infobar-tender-close rule in custom.css. */
+#infobar-settings-sidebar-tender-details .infobar-settings-sidebar-head {
+    display: none !important;
+}
+#infobar-settings-sidebar-tender-details.sidebarview .infobar-settings-sidebar-head {
+    display: block !important;
+    position: fixed !important;
+    top: 12px !important;
+    right: 8px !important;
+    left: auto !important;
+    width: auto !important;
+    padding: 0 !important;
+    z-index: 1060 !important;
+    background: transparent !important;
+}
+
+/* Default theme: crisp inputs - a clear border so fields read as distinct
+   surfaces, and an obvious focus ring on the active field (the purchase-page
+   inputs previously looked flat / unhighlighted). */
+html:not([data-theme]) .form-control,
+html:not([data-theme]) .custom-select,
+html:not([data-theme]) .input-group-text {
+    border: 1px solid #e6e9ef !important;
+    background-color: #ffffff !important;
+}
+html:not([data-theme]) .form-control:focus,
+html:not([data-theme]) .custom-select:focus {
+    border-color: #506fe4 !important;
+    box-shadow: 0 0 0 3px rgba(80, 111, 228, 0.12) !important;
+    background-color: #ffffff !important;
+}
+
+/* Default second (detail) menu - mirror Eye Comfort's feel: a light tint on
+   hover, and a darker highlight + bold on the active item. */
+html:not([data-theme]) .vertical-menu > li:hover > a {
+    color: #3f5cd6 !important;
+    background-color: rgba(80, 111, 228, 0.07) !important;
+    border-radius: 8px !important;
+}
+html:not([data-theme]) .vertical-menu > li.active > a,
+html:not([data-theme]) .vertical-menu > li > a.active {
+    color: #2f47b8 !important;
+    background-color: rgba(80, 111, 228, 0.15) !important;
+    font-weight: 600 !important;
+    border-radius: 8px !important;
+}
+
+/* =====================================================================
+   MOTION LAYER  —  subtle, professional micro-interactions
+   ---------------------------------------------------------------------
+   Small, fast, GPU-friendly transitions so hovering, clicking, opening a
+   popup, or moving between tabs feels smooth rather than abrupt. Kept
+   understated (150-250ms, gentle easing) - professional, not flashy.
+   The whole layer is gated behind prefers-reduced-motion so it fully
+   disables for users/OS settings that ask for reduced motion.
+   ===================================================================== */
+@media (prefers-reduced-motion: no-preference) {
+    /* Lean motion: a light colour transition on interactive CONTROLS only.
+       The previous version transitioned transform/opacity on a broad set
+       (a, .badge, table rows, images...) which created compositing layers and
+       made every scroll/resize repaint expensive - the cause of the jank. */
+    .btn,
+    .nav-link,
+    .dropdown-item,
+    .shop_buttons .btn,
+    .infobar-icon a,
+    .vertical-menu > li > a,
+    .nav-tabs .nav-link,
+    .theme-preset-card,
+    .theme-color-box {
+        transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+    }
+    .btn { transition: background-color .15s ease, color .15s ease, border-color .15s ease, box-shadow .15s ease; }
+    .btn:active { transform: translateY(1px); }
+
+    /* Open animations only - these run once, never during scroll. */
+    .modal.fade .modal-dialog {
+        transition: transform .22s cubic-bezier(.2, .8, .2, 1) !important;
+        transform: translateY(-8px) scale(.99);
+    }
+    .modal.show .modal-dialog { transform: none; }
+    /* Fade only - NO transform. Bootstrap/Popper position dropdowns with their
+       own transform, so animating transform here made the menu appear in the
+       wrong corner and snap into place. Opacity is safe. */
+    .dropdown-menu.show { animation: posnicDropIn .14s ease; }
+    @keyframes posnicDropIn {
+        from { opacity: 0; }
+        to   { opacity: 1; }
+    }
+}
+
+/* =====================================================================
+   PROFESSIONAL POLISH  —  soft elevation + cleaner separation
+   ---------------------------------------------------------------------
+   Cards previously sat flat on the grey body with only a hairline border,
+   so nothing distinguished a surface from its background. A subtle, even
+   shadow + slightly larger radius gives cards real depth (the premium
+   SaaS look) without feeling heavy when cards nest. A hairline divider
+   under the topbar separates the chrome from the content. Applies to
+   every theme; dark themes get a deeper shadow so it still reads.
+   ===================================================================== */
+.card {
+    /* Borderless, like Eye Comfort: surfaces separate by TONE (white card on
+       the grey body) + a soft shadow, not a hard "boxy" border line. */
+    border: 0 !important;
+    border-radius: 12px !important;
+    box-shadow: 0 1px 3px rgba(16, 24, 40, 0.05), 0 1px 2px rgba(16, 24, 40, 0.04) !important;
+}
+/* Round the inner surfaces to match the card, so a card's white body/header/
+   footer never shows square corners inside the rounded box. This gives every
+   dashboard box (and the datatable "Showing 1 to N" footer) consistent curves
+   at all four corners - no overflow clipping, so pop-outs still work. */
+.card > .card-header:first-child { border-top-left-radius: 12px !important; border-top-right-radius: 12px !important; }
+.card > .card-body:first-child   { border-top-left-radius: 12px !important; border-top-right-radius: 12px !important; }
+.card > .card-body:last-child    { border-bottom-left-radius: 12px !important; border-bottom-right-radius: 12px !important; }
+.card > .card-footer:last-child  { border-bottom-left-radius: 12px !important; border-bottom-right-radius: 12px !important; }
+.card-header {
+    border-top-left-radius: 12px !important;
+    border-top-right-radius: 12px !important;
+    background-clip: padding-box;
+}
+.topbar {
+    border-bottom: 1px solid var(--theme-border-color, #e9ecef) !important;
+    box-shadow: 0 1px 3px rgba(16, 24, 40, 0.04) !important;
+}
+/* Default: keep the topbar crisply white so it separates from the grey body */
+html:not([data-theme]) .topbar,
+html:not([data-theme]) .topbar .infobar { background-color: #ffffff !important; }
+
+/* Active period buttons (Today / This Week ...): clear on-brand highlight */
+.shop_buttons .btn.active,
+.shop_buttons .btn-light.active {
+    background-color: var(--theme-primary-color, #506fe4) !important;
+    border-color: var(--theme-primary-color, #506fe4) !important;
+    color: #ffffff !important;
+    box-shadow: 0 1px 3px rgba(80, 111, 228, 0.35) !important;
+}
+
+/* Second (detail) vertical menu: unmistakable active item (no left bar, per preference) */
+.vertical-menu > li.active > a,
+.vertical-menu > li > a.active {
+    color: var(--theme-primary-color, #506fe4) !important;
+    background-color: rgba(80, 111, 228, 0.10) !important;
+    font-weight: 600 !important;
+    border-radius: 8px !important;
+}
+
+/* Dark themes: a light shadow is invisible, so deepen it a touch */
+[data-theme="dark"] .card,
+[data-theme="softdark"] .card,
+[data-theme="warmnight"] .card,
+[data-theme="terminal"] .card,
+[data-theme="dosblue"] .card {
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.28) !important;
+}
+
+/* Perf: the leftbar/rightbar shipped with 'transition: all', which animated
+   their HEIGHT on every window resize - the menu appeared to render slowly
+   top-to-bottom while dragging. Restrict to the toggle-collapse properties
+   only (never height). Loaded last, so this wins over the source rules. */
+.leftbar { transition: width .3s ease, left .3s ease, transform .3s ease !important; }
+.rightbar { transition: margin-left .3s ease !important; }
+
+/* Keep second-menu items on one line so the "open in new window" icons on
+   Customer Display / Catalog Display never wrap to the next row. */
+.vertical-menu > li > a { white-space: nowrap; }
+
+/* Empty-state illustrations (nodata.svg, wallet.svg under /general/) shipped as
+   plain <img> - not inside a _norecord block - so the blue artwork stayed blue
+   on every theme. Target them by src and neutralise to greyscale so they blend
+   with any theme; dark themes brighten + dim so the grey reads on a dark panel. */
+[data-theme] img[src*="/general/"] { filter: grayscale(1) !important; }
+[data-theme="dark"] img[src*="/general/"],
+[data-theme="softdark"] img[src*="/general/"],
+[data-theme="warmnight"] img[src*="/general/"],
+[data-theme="terminal"] img[src*="/general/"],
+[data-theme="dosblue"] img[src*="/general/"] { filter: grayscale(1) brightness(1.5) opacity(0.5) !important; }
+
+/* Default popups/panels: soften the hard divider lines (modal header/footer,
+   card header, item-view panel head) so they match the borderless surface
+   look instead of reading as harsh "boxy" lines. */
+html:not([data-theme]) .modal-header,
+html:not([data-theme]) .modal-footer,
+html:not([data-theme]) .card-header,
+html:not([data-theme]) .card-footer,
+html:not([data-theme]) .infobar-settings-sidebar-head {
+    border-color: #eef1f5 !important;
+}
+
+/* =====================================================================
+   GitHub theme (Primer light) - the look & feel of github.com:
+   white canvas + #f6f8fa insets, #d0d7de bordered boxes with 6px corners,
+   GitHub-blue (#0969da) links, accents AND primary buttons - one accent
+   colour rather than github.com's blue-plus-green pair, so green is left to
+   mean "succeeded" - and GitHub's native system-font stack.
+   ===================================================================== */
+[data-theme="github"] {
+    --theme-primary-color: #0969da;
+    --theme-primary-hover: #0860ca;
+    --theme-body-bg: #f6f8fa;
+    --theme-card-bg: #ffffff;
+    --theme-sidebar-bg: #ffffff;
+    --theme-topbar-bg: #ffffff;
+    --theme-text-primary: #1f2328;
+    --theme-text-secondary: #424a53;
+    --theme-text-muted: #656d76;
+    --theme-border-color: #d0d7de;
+    --theme-table-header-bg: #f6f8fa;
+    --theme-table-row-hover: #f6f8fa;
+    --theme-menu-bg: #ffffff;
+    --theme-menu-text: #1f2328;
+    --theme-menu-active-bg: #0969da;
+    --theme-menu-active-text: #ffffff;
+    /* the accent, not the green - see the .btn-primary note further down */
+    --theme-btn-primary-bg: #0969da;
+    --theme-btn-primary-text: #ffffff;
+    --theme-success-color: #1a7f37;
+    --theme-warning-color: #9a6700;
+    --theme-danger-color: #cf222e;
+    --theme-info-color: #0969da;
+    /* Keep the self-hosted DM Sans (works offline) as the default font. */
+    --theme-font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+}
+/* GitHub uses bordered boxes (1px #d0d7de), small 6px radius, no shadow. */
+[data-theme="github"] .card {
+    border: 1px solid #d0d7de !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+}
+
+[data-theme="github"] .card > .card-header:first-child,
+[data-theme="github"] .card > .card-body:first-child { border-top-left-radius: 6px !important; border-top-right-radius: 6px !important; }
+[data-theme="github"] .card > .card-body:last-child,
+[data-theme="github"] .card > .card-footer:last-child { border-bottom-left-radius: 6px !important; border-bottom-right-radius: 6px !important; }
+/*
+ * ...except the master-detail panes, which have no box of their own.
+ *
+ * The rule above and `.master-detail > .md-rail { border: 0 !important }` in
+ * custom.css have the SAME specificity, and custom.css loads first - so the
+ * theme won, and the joined surface came back as two bordered cards inside a
+ * third border. Removing the theme border entirely fixed that screen and took
+ * every other card's border with it (owner: "other pages also removed").
+ *
+ * Naming the panes here is the narrow fix: one more class beats the rule above
+ * on specificity, and it sits in the file that loads last, so it wins twice
+ * over. Scoped to the PATTERN rather than to quotes - any screen adopting
+ * master-detail wants the same thing, and quotes is simply the only one today.
+ *
+ * Placed AFTER the radius rules above on purpose. Those name
+ * `.card > .card-body:first-child` and carry the same specificity as this, so
+ * source order decides - and a pane whose inner body keeps 6px corners inside
+ * a square outer border is the same seam, drawn smaller.
+ */
+[data-theme="github"] .master-detail > .md-rail,
+[data-theme="github"] .master-detail > .md-detail,
+[data-theme="github"] .master-detail > .md-rail > .card-body,
+[data-theme="github"] .master-detail > .md-detail > .card-body,
+[data-theme="github"] .master-detail > .md-rail > .card-body:first-child,
+[data-theme="github"] .master-detail > .md-detail > .card-body:first-child,
+[data-theme="github"] .master-detail > .md-rail > .card-body:last-child,
+[data-theme="github"] .master-detail > .md-detail > .card-body:last-child {
+    border: 0 !important;
+    border-radius: 0 !important;
+}
+/* github.com puts its primary buttons in green while its links stay blue.
+   Copied literally that gives a screen running two accent colours at once,
+   and green ends up meaning BOTH "this is the main action" and "this
+   succeeded" - which is what made a lone green New Sale sitting under a blue
+   heading read as out of place (owner, twice).
+   So: one accent for actions, and green kept for success alone. */
+[data-theme="github"] .btn-primary,
+[data-theme="github"] thead.btn-primary { background-color: #0969da !important; border-color: rgba(27, 31, 36, 0.15) !important; color: #ffffff !important; }
+[data-theme="github"] .btn-primary:hover { background-color: #0860ca !important; }
+/* Default (GitHub) keeps the classic blue icon rail, per preference. */
+[data-theme="github"] .vertical-menu-icon { background-color: #506fe4 !important; }
+/* Active icon: a soft white overlay reads better than the old dark overlay
+   (which looked like a "dark blue" blob) on the blue rail. */
+[data-theme="github"] .vertical-menu-icon .nav-pills .nav-link.active { background-color: rgba(255, 255, 255, 0.20) !important; }
+
+/* Active theme in the picker menu: soft highlight + a check mark on the right. */
+#dropdown-theme .theme-item.theme-active {
+    background-color: rgba(80, 111, 228, 0.10);
+    border-radius: 6px;
+    font-weight: 600;
+}
+#dropdown-theme .theme-item.theme-active::after {
+    content: '\2713';
+    margin-left: auto;
+    padding-left: 8px;
+    color: var(--theme-primary-color, #506fe4);
+    font-weight: 700;
+}
+
+/* Smooth tab switches - a gentle opacity fade instead of an instant flash.
+   Opacity ONLY (no transform), so it can never shift the position of anything
+   inside the pane. Retriggers every time a pane gains .active/.tab-pane-active. */
+@media (prefers-reduced-motion: no-preference) {
+    .tab-pane.active,
+    .tab-pane-active { animation: posnicTabFade .22s ease; }
+    @keyframes posnicTabFade { from { opacity: 0; } to { opacity: 1; } }
+
+    /* Slide-over (item detail) panel: snappier, nicely-eased open (was a slow
+       0.5s linear width tween) + a fading dark backdrop. Kept width-based so it
+       can't add a horizontal scrollbar. */
+    .infobar-settings-sidebar { transition: width .28s cubic-bezier(.2, .8, .2, 1) !important; }
+    .infobar-settings-sidebar-overlay { transition: background-color .28s ease; }
+}
+
+/* Close buttons (modal X + item-detail panel X): soft rounded hover
+   background so closing feels responsive. Minimal - only padding + background,
+   nothing that changes the button's own size/display (that broke the icon). */
+/* Close buttons across EVERY popup - Bootstrap's generic .close, any
+   [data-dismiss] button, and the item/customer panel X. Soft rounded hover
+   background so closing feels responsive, on all themes. Padding gives the
+   background an area; the panel X gets a min-sized centered box (never clipped). */
+.close,
+.infobar-settings-close,
+[data-dismiss="modal"],
+.modal-header .close {
+    transition: background-color .15s ease !important;
+    border-radius: 8px !important;
+    cursor: pointer;
+}
+.close,
+.modal-header .close,
+[data-dismiss="modal"]:not(.btn) { padding: 4px 9px !important; }
+/* The bare panel X (NOT a styled .btn Close button) becomes a centered,
+   min-sized box so its hover background is a clean square that never clips the
+   icon. Styled .btn close buttons keep their own button hover. */
+.infobar-settings-close:not(.btn) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 34px;
+    min-height: 34px;
+    padding: 5px !important;
+    flex: 0 0 auto;
+}
+.close:hover,
+.infobar-settings-close:not(.btn):hover,
+[data-dismiss="modal"]:not(.btn):hover,
+.modal-header .close:hover { background-color: rgba(120, 120, 120, 0.22) !important; }
+
+/* Row alignment (the real fix): data cells (.table td) were vertical-align:
+   middle but the header cells holding the checkbox and # were left at :top, so
+   they sat higher than the row text. Align EVERY table cell to middle so the
+   whole row - checkbox, number, name, values - lines up cleanly. */
+.table th,
+.table td,
+table.dataTable th,
+table.dataTable td { vertical-align: middle !important; }
+
+/* List name cells open the item detail view on click - give them a subtle
+   dotted underline as a "clickable / expandable" affordance instead of a
+   strong bold link, and drop the italic so they read calmer. */
+.table_model_item {
+    font-style: normal;
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1px;
+    cursor: pointer;
+}
+.table_model_item:hover { text-decoration-style: solid; }
+
+/* A .card-body that is ALSO a Bootstrap .row carries -15px side margins that
+   overflow the card and hide its left/right border - very visible now that the
+   GitHub default has bordered cards (the "first box, left/right corners
+   missing" report). Keep the row body inside the card. */
+.card-body.row { margin-left: 0; margin-right: 0; }
+
+/* Default theme loading overlay: themed pages already swap the white GIF for
+   a CSS spinner on a themed surface; Default (no data-theme) was missed, so it
+   still flashed the near-white loading.gif. Give it the same treatment. */
+html:not([data-theme]) .loadingSpinner {
+    background-image: none !important;
+    background-color: var(--theme-body-bg, #f2f3f7) !important;
+    opacity: 0.92 !important;
+}
+html:not([data-theme]) .loadingSpinner::after {
+    content: '';
+    position: absolute;
+    top: 42%;
+    left: 50%;
+    width: 42px;
+    height: 42px;
+    margin: -21px 0 0 -21px;
+    border: 4px solid var(--theme-border-color, #e0e0e0);
+    border-top-color: var(--theme-primary-color, #506fe4);
+    border-radius: 50%;
+    animation: ps-comfort-spin 0.8s linear infinite;
+}
+
+/* =====================================================================
+   PER-THEME TYPOGRAPHY  —  research-backed personalities
+   Inter is the base (:root). These give a few themes a face fit for their
+   purpose. Every stack falls back to the native system font (Segoe UI on
+   Windows) when the web font is unavailable - e.g. the offline desktop build.
+     - Lexend on Eye Comfort  : engineered to reduce reading fatigue.
+     - Source Sans on Coffee / Warm Night : warmer, more human.
+     - IBM Plex Sans on VS Code : technical, engineered feel.
+   macOS keeps the Apple system stack; Terminal / Turbo C keep monospace.
+   ===================================================================== */
+[data-theme="comfort"]   { --theme-font-family: 'Lexend', 'Inter', -apple-system, 'Segoe UI', Roboto, sans-serif; }
+[data-theme="brown"]     { --theme-font-family: 'Source Sans 3', 'Source Sans Pro', -apple-system, 'Segoe UI', Roboto, sans-serif; }
+[data-theme="warmnight"] { --theme-font-family: 'Source Sans 3', 'Source Sans Pro', -apple-system, 'Segoe UI', Roboto, sans-serif; }
+[data-theme="dark"]      { --theme-font-family: 'IBM Plex Sans', -apple-system, 'Segoe UI', Roboto, sans-serif; }

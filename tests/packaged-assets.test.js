@@ -1,0 +1,103 @@
+/*
+ * Every file a packaged window asks for must actually be in the package.
+ *
+ * Written after shipping an installer in which the four settings windows each
+ * carried <script src="window-theme.js"> and the file was not in build.files.
+ * Nothing failed loudly: electron-builder does not read the HTML, the window
+ * still opened, and the missing script only meant the shop's theme was silently
+ * not applied - the exact bug the script existed to fix, reintroduced by the
+ * packaging rather than by the code. Both the source and the tests were green.
+ *
+ * So this reads what the windows reference and checks it against what the build
+ * is told to include. It is the one place that sees both.
+ */
+
+const test = require('node:test');
+const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const ROOT = path.join(__dirname, '..');
+const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+const FILES = pkg.build.files;
+
+/* An entry may be a plain name or a glob; "**\/*" and "!x" both appear. */
+function packaged(asset) {
+  return FILES.some((entry) => {
+    if (typeof entry !== 'string' || entry.startsWith('!')) return false;
+    if (entry === asset) return true;
+    if (!entry.includes('*')) return false;
+    const rx = new RegExp('^' + entry
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*\*\/?/g, '(?:.*/)?')
+      .replace(/\*/g, '[^/]*') + '$');
+    return rx.test(asset);
+  });
+}
+
+/* Local references only: a CDN URL or a data: URI is not ours to package. */
+function localRefs(html) {
+  const out = [];
+  const rx = /(?:src|href)\s*=\s*["']([^"']+)["']/gi;
+  let m;
+  while ((m = rx.exec(html)) !== null) {
+    const ref = m[1].trim();
+    if (!ref || /^(https?:|data:|#|mailto:|\/\/)/i.test(ref)) continue;
+    /* Images too: the loading screen shipped with a logo reference its own
+       move had broken, and this filter was why no test said so. */
+    if (!/\.(js|css|png|svg|ico|jpe?g|gif|webp)$/i.test(ref)) continue;
+    out.push(ref.replace(/^\.\//, '').split(/[?#]/)[0]);
+  }
+  return out;
+}
+
+/* The Electron windows: top-level HTML the main process loads directly. */
+const WINDOWS = fs.readdirSync(path.join(ROOT, 'src'))
+  .filter((f) => f.endsWith('.html'))
+  .map((f) => 'src/' + f)
+  .filter((f) => packaged(f));
+
+test('every window that ships is listed in build.files', () => {
+  assert.ok(WINDOWS.length >= 4, `expected the settings windows, found ${WINDOWS.length}`);
+});
+
+for (const win of WINDOWS) {
+  test(`${win}: its scripts, stylesheets and images are packaged`, () => {
+    const html = fs.readFileSync(path.join(ROOT, win), 'utf8');
+    for (const ref of localRefs(html)) {
+      /* Resolved the way the renderer resolves it - relative to the window's
+         own file. '../builds/x.png' from src/ is builds/x.png in the repo and
+         in the asar alike, so one check covers both. */
+      const resolved = path.posix.normalize(
+        path.posix.join(path.posix.dirname(win.replace(/\\/g, '/')), ref),
+      );
+      assert.ok(!resolved.startsWith('..'),
+        `${win} references ${ref}, which escapes the app root`);
+      assert.ok(fs.existsSync(path.join(ROOT, resolved)),
+        `${win} references ${ref}, which does not exist`);
+      assert.ok(packaged(resolved),
+        `${win} references ${ref} (${resolved}), which is missing from package.json ` +
+        `build.files - the window will open without it and fail quietly`);
+    }
+  });
+}
+
+test('a desk build ships the same api bytes a clean checkout would', () => {
+  /* Found by the packaging smoke, not by review: the Windows release is
+     built on the owner's desk, where api/ carries a live .local-db (the
+     local-dev harness), runtime uploads/, generated public/ exports and -
+     one day - a .env. None of that exists in CI, so CI could never catch
+     it, and each would have shipped inside the installer. */
+  const api = pkg.build.extraResources.find((e) => e && e.from === 'api');
+  for (const guard of ['!.env', '!.env.*', '!.local-db/**', '!uploads/**', '!public/**']) {
+    assert.ok(api.filter.includes(guard), `the api packaging filter lost ${guard}`);
+  }
+});
+
+test('the theming a window asks for is the theming it gets', () => {
+  /* Named explicitly rather than inferred: this pair is the reason the test
+     exists, and a rename that drops one of them should fail here. */
+  for (const asset of ['src/window-theme.js', 'src/window-theme.css']) {
+    assert.ok(packaged(asset), `${asset} must be in build.files`);
+  }
+});

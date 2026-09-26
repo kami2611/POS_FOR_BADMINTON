@@ -1,0 +1,80 @@
+<div class="vertical-layout page_loader" id="branches" style="display: none">
+    <!-- Branches / Outlet, built to LIST_PAGE_UX_STANDARD.md: the current
+         branch switcher and its edit shortcut keep their header seats;
+         the list wears the standard chrome - filter strip, shared rhythm,
+         numbered pagination. A row click peeks the branch in place;
+         switching and editing are the deliberate acts. -->
+    <div id="containerbar">
+        <div class="breadcrumbbar crumbbar_padding">
+            <div class="row align-items-center row_filter">
+                <div class="col-auto">
+                    <h4 class="page-title break_title mb-0"><lang class="lang_branchoutlet_title">Branches / Outlet</lang></h4>
+                </div>
+                <div class="col-auto text-dark">
+                    <lang class="lang_branchoutlet">Current Branch/Outlet</lang>
+                </div>
+                <div class="col-auto">
+                    <div class="single-dropdown d-inline-block align-middle">
+                        <div class="dropdown">
+                            <a class="btn btn-primary dropdown-toggle dropdown-cursor-pointer" href="#" role="button" id="dropdownMenuLink" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
+                                <span class="branch-name"></span>
+                            </a>
+                            <div id="change_branch_list" class="dropdown-menu scroll_branch" aria-labelledby="dropdownMenuLink" x-placement="bottom-start" style="position: absolute; will-change: transform; top: 0px; left: 0px; transform: translate3d(0px, 37px, 0px);">
+
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Straight into editing the branch you are ON - shown
+                         only to branch-write holders (ACL scan). -->
+                    <a href="javascript:void(0)" id="edit_current_branch_btn"
+                        data-module="branch" data-access="write"
+                        class="btn btn-primary-rgba ml-1 align-middle" data-toggle="tooltip" title="Edit current branch" data-t-title="lang_edit_current_branch"
+                        onclick="hasher.setHash('branches/' + PosnicPro.local.get('branch_id_set') + '/edit');">
+                        <i class="feather icon-edit"></i>
+                    </a>
+                </div>
+                <div class="col">
+                    <div class="lf-panel" id="branches_filter_panel" style="display:none;"></div>
+                </div>
+                <div class="col-auto text-right">
+                    <div class="widgetbar" id="branches_controls">
+                        <div class="btn-group">
+                        <button type="button" class="btn btn-primary-rgba dropdown-toggle" data-toggle="dropdown"
+                            aria-haspopup="true" aria-expanded="false" title="Export CSV" data-t-title="lang_export_csv" aria-label="Export CSV" data-t-aria-label="lang_export_csv">
+                            <i class="feather icon-share"></i>
+                        </button>
+                        <div class="dropdown-menu dropdown-menu-right">
+                            <a class="dropdown-item" href="javascript:void(0)" onclick="PosnicPro.branches.exportCsv(); return false;"><lang class="lang_this_page_what_is_shown">This page (what is shown)</lang></a>
+                            <a class="dropdown-item" href="javascript:void(0)" onclick="PosnicPro.branches.exportAllCsv(); return false;"><lang class="lang_everything_matching_the_filter">Everything matching the filter</lang></a>
+                        </div>
+                        </div>
+                        <button type="button" class="btn btn-primary-rgba lf-btn" id="branches_filter_btn"
+                            data-toggle="tooltip" title="Filter branches" data-t-title="lang_filter_branches">
+                            <i class="feather icon-filter mr-2"></i><lang class="lang_filter">Filter</lang>
+                        </button>
+                        <a data-module="branch" data-access="write" href="#/branches/new"
+                            onclick="return PosnicPro.branches.addbranchButton();"
+                            class="btn btn-primary-rgba branch_new_shortcut" data-toggle="tooltip" title="New branch" data-t-title="lang_new_branch">
+                            <i class="feather icon-plus mr-2"></i><lang class="lang_addvariant_title">New</lang>
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="contentbar">
+        <div id="branches_split">
+        <div class="card m-b-30 md-rail" id="branches_list_card">
+            <div class="card-body">
+                <div id="branches_list_rows" class="md-rail-rows text-muted"><lang class="lang_loading_branches">Loading branches ...</lang></div>
+                <div class="q-pager" id="branches_list_paging"></div>
+            </div>
+        </div>
+            <div class="card m-b-30 md-detail" id="branches_detail_card" style="display:none;">
+                <div id="branches_doc"></div>
+            </div>
+        </div>
+    </div>
+</div>
+<!-- End Containerbar -->

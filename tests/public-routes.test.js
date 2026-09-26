@@ -1,0 +1,464 @@
+/*
+ * Which routes an anonymous caller may reach.
+ *
+ * Written before making this repository public, because publishing the source
+ * turns "nobody knows the endpoint exists" into no protection at all.
+ *
+ * A group of sales routes ran behind optionalProtect and nothing else.
+ * optionalProtect tries to authenticate and never refuses, so a caller who
+ * simply did not authenticate carried on as anonymous - and the handlers, with
+ * no session to read the branch from, took it from the request instead:
+ * req.body.branch_id, req.query.branchId, req.body.order_id.
+ *
+ * The effect was that anyone who could reach the API could name any branch of
+ * any shop and read its live tables, its order history, its catalogue and its
+ * printed receipts. updateOrder went further: it accepts items, totals and
+ * discounts, so an anonymous request could rewrite what another shop's order
+ * said it cost.
+ *
+ * These tests fix the list of routes that may be reached without a session, and
+ * require the rest to prove they are the shop's own equipment.
+ */
+
+const test = require('node:test');
+const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const ROUTES_DIR = path.join(__dirname, '..', 'api', 'src', 'routes');
+
+/* Routes declared before a file's router.use(protect), i.e. reachable without
+   a login session. */
+function openRoutes(file) {
+  const src = fs.readFileSync(path.join(ROUTES_DIR, file), 'utf8');
+  const guardAt = (() => {
+    const m = src.match(/router\.use\(\s*(protect|auth\b)/);
+    return m ? m.index : Infinity;
+  })();
+
+  /* Both quote styles. This matched only double quotes for months, and a
+     route file written with single quotes - which is most of them - escaped
+     the sweep entirely. A security test that inspects a dialect nobody
+     writes is a security test in name. Found when a deliberately public
+     route passed without being allowed. */
+  return [...src.matchAll(/router\.(get|post|put|patch|delete)\(\s*["']([^"']+)["']([^;]*)/g)]
+    .filter((m) => m.index < guardAt)
+    .map((m) => ({ method: m[1], route: m[2], middleware: m[3] }));
+}
+
+/*
+ * The only routes that may be reached with no credential of any kind.
+ *
+ * Each is here for a stated reason. Adding to this list is a decision about
+ * what strangers may do to a shop's data, so it should take a code review.
+ */
+const ALLOWED_ANONYMOUS = {
+  'mobile-pos.routes.js': [
+    // Pairing is a rate-limited authentication entry point with an expiring,
+    // one-use secret; cloud grants also require the approved phone and proof.
+    // Discovery proof returns only a nonce MAC for an unexpired random grant,
+    // never account, catalogue or device data. All selling routes use protect.
+    '/pair', '/enrolment-proof',
+  ],
+  'recovery.routes.js': [
+    // Installation-wide capability only, without account lookup; reset proves
+    // ownership with a one-use 128-bit code, with its own persistent limiter.
+    // Code generation/status stay behind protect and owner checks.
+    '/options', '/reset',
+  ],
+  'users.routes.js': [
+    // Invisible to this sweep for months: the file is single-quoted and the
+    // sweep matched only double quotes. Reviewed on discovery - every one
+    // is an auth ENTRY point or carries its own credential.
+    '/register', '/login', '/verify',
+    // self-authenticating logins for the phone and kiosk apps
+    '/mobileLogin', '/kioskMobileLogin',
+    // key+secret travel IN the path - installation credentials
+    '/ssoAuth', '/ssoToken/:key/:secret', '/planUpdate/:key/:secret',
+    // the forgot-password flow: both require the emailed one-time user_key
+    '/getUserKeyDetails', '/updateNewPassword',
+  ],
+  'online-ordering.routes.js': [
+    /*
+     * A shop's storefront and its order door, both anonymous by design: a
+     * customer standing at a table has no credentials and never will.
+     *
+     * The STORE ADDRESS in the path is the opt-in and the whole guard. A
+     * branch that never chose one cannot be reached here at all, and a
+     * branch's raw database id - which appears in every authenticated
+     * response and is no secret - buys nothing. The order door additionally
+     * refuses whenever the shop says it is not accepting: menu mode, paused,
+     * or outside opening hours, all recomputed server-side on every request
+     * regardless of what the page believed when it drew its cart.
+     *
+     * `/:storeId/device` is NOT here: it carries the extra fields only the
+     * shop's own equipment needs, and it sits behind ensureKioskKey.
+     */
+    '/', '/:storeId', '/:storeId/orders',
+    /* The public menu, read-only and anonymous for the same reason: it is the
+       thing a customer reads at a table. It exposes dish names, descriptions
+       and prices - what the shop already prints on paper and hands out. */
+    '/menu', '/:storeId/menu',
+    /* The ordering assistant: a customer asking the shop's own model about the
+       menu, from the same anonymous page. Three doors inside: the address names
+       a shop, the shop has usable AI, and the shop switched the assistant on
+       for this page (off by default, because it spends the shop's money).
+       Rate-limited per client on the route. It reads the menu and proposes;
+       it never writes an order. */
+    '/:storeId/assistant',
+    /* The same assistant with a voice: the page's WebRTC offer in, the
+       provider's answer out; the audio never comes here. Same doors as the
+       assistant plus the shop's live-voice switch; its own limit per client. */
+    '/:storeId/voice',
+    /* The meter on that line: the page reports every half minute that it is
+       still open, and once as it hangs up. The server clocks the seconds
+       itself, prices them against the shop's monthly limit and closes the
+       line past it. Nothing to read, nothing to write but the shop's own
+       meter; its own limit per client. See services/voice-meter.js. */
+    '/:storeId/voice/:session/tick',
+    /*
+     * Whether a discount code is real, and what it offers.
+     *
+     * Anonymous because a customer at a table has no account and never will.
+     * It answers the LEAST it can: the terms of a live coupon - percent or
+     * amount, minimum spend, cap - and never a money figure for a basket,
+     * which would mean pricing one off the order path.
+     *
+     * A code that does not exist and one that has run out get the same shaped
+     * refusal, so the door cannot be used to read a shop's coupon list one
+     * guess at a time, and it sits behind the same flood limiter as the
+     * placed-order routes.
+     */
+    '/:storeId/coupon',
+    /* The customer's own order, held by its id and its token. */
+    '/:storeId/orders/:orderId',
+    /* Several of them at once, each still proved by its OWN id and token -
+       an entry that does not prove itself is simply absent from the answer.
+       POST because a list of tokens does not belong in a URL that lands in
+       logs, history and referrers. */
+    '/:storeId/orders/lookup',
+    '/:storeId/orders/:orderId/items',
+    '/:storeId/orders/:orderId/cancel',
+  ],
+  'client-errors.routes.js': [
+    // The boot watchdog's report: the errors worth hearing about happen
+    // BEFORE auth works. Stores nothing, per-IP budgeted, truncated,
+    // always 204 - see the route file.
+    '/',
+    // TEMPORARY diagnostic window (OWNER_QUEUE row 193): the last 30
+    // already-truncated report lines, readable where no audited log path
+    // exists. Comes out with the boot flight recorder once the mobile
+    // crash is closed.
+    '/recent',
+  ],
+  'auth.routes.js': [
+    '/register', '/login', '/verify', '/forgot-password', '/reset-password/:token',
+  ],
+  'settings.routes.js': [
+    // Static reference data. No shop's information is in any of them.
+    '/getJSONCountry', '/getJSONState', '/getJSONCurrency', '/getJSONTimeZone',
+    '/forgotPassword',
+  ],
+  'items.routes.js': [
+    // The pairing handshake a phone makes before it has a key. /accesskiosk is
+    // NOT here any more: it carries the shop machines' menu and now sits
+    // behind ensureKioskKey. /accessQr is gone entirely - the storefront moved
+    // to the online-ordering resource.
+    '/accessMobileApp',
+  ],
+  'sales.routes.js': [
+    // getNewSale refuses an anonymous caller inside the handler (403 without
+    // sales.write). /qrOrder is gone - anonymous ordering moved to the
+    // online-ordering resource, which is listed above with its reasons.
+    '/getNewSale',
+  ],
+  'pair.routes.js': [
+    // The page a till shows so a staff phone can be pointed at this shop.
+    // It carries an ADDRESS, not a credential - the same thing the till's own
+    // browser address bar shows anybody standing at it. Requiring a login
+    // would mean a handset cannot be paired until somebody signs in on the
+    // till, which is backwards: pairing is what happens before anyone can.
+    '/',
+  ],
+  'base.routes.js': [
+    // Liveness only. "/" says it is running; "/health" reports status, time and
+    // uptime to a stranger and keeps the version, platform and memory figures
+    // for callers who have logged in.
+    '/', '/health',
+  ],
+};
+
+/*
+ * verifyInstallationCredentials belongs here: the install routes are how a
+ * fresh machine registers itself, before any user exists to log in as, and they
+ * check the per-installation key and secret instead.
+ */
+const GUARDS =
+  /(protect|ensureKioskKey|protectOrKioskKey|authenticate|verifyToken|verifyInstallationCredentials)/;
+
+test('the route files are where the test thinks they are', () => {
+  const files = fs.readdirSync(ROUTES_DIR).filter((f) => f.endsWith('.routes.js'));
+  assert.ok(files.length > 15, `only ${files.length} route files found`);
+});
+
+test('nothing reachable without a session is left unguarded', () => {
+  const naked = [];
+
+  for (const file of fs.readdirSync(ROUTES_DIR).filter((f) => f.endsWith('.routes.js'))) {
+    const allowed = ALLOWED_ANONYMOUS[file] || [];
+
+    for (const { method, route, middleware } of openRoutes(file)) {
+      if (allowed.includes(route)) continue;
+      if (GUARDS.test(middleware)) continue;
+      naked.push(`${file}  ${method.toUpperCase()} ${route}`);
+    }
+  }
+
+  assert.deepStrictEqual(naked, [],
+    'these are reachable with no credential at all. Either add a guard ' +
+    '(protectOrKioskKey for kitchen and tablet callers, protect otherwise) or ' +
+    'add them to ALLOWED_ANONYMOUS with the reason:\n  ' + naked.join('\n  '));
+});
+
+test('optionalProtect is never the only thing in front of a route', () => {
+  /* This is the specific mistake that was made. optionalProtect authenticates
+     when it can and lets everyone else through, so on its own it is not a
+     guard - it only looks like one. */
+  const lonely = [];
+
+  for (const file of fs.readdirSync(ROUTES_DIR).filter((f) => f.endsWith('.routes.js'))) {
+    const src = fs.readFileSync(path.join(ROUTES_DIR, file), 'utf8');
+    for (const m of src.matchAll(/router\.\w+\(\s*"([^"]+)"\s*,\s*optionalProtect\s*,\s*(\w+)/g)) {
+      if (!GUARDS.test(m[2])) lonely.push(`${file}  ${m[1]}  -> ${m[2]}`);
+    }
+  }
+
+  assert.deepStrictEqual(lonely, [],
+    'optionalProtect never returns 401, so it must be followed by a real ' +
+    'guard:\n  ' + lonely.join('\n  '));
+});
+
+test('the routes that leaked are specifically closed', () => {
+  /* Named one by one rather than left to the sweep above: these are the actual
+     holes that were open, and each should fail loudly if it reopens. */
+  const src = fs.readFileSync(path.join(ROUTES_DIR, 'sales.routes.js'), 'utf8');
+
+  const MUST_BE_GUARDED = [
+    ['/getTablesWithActiveOrders', 'live unpaid orders for any branch'],
+    ['/getOrderHistory', "any branch's order history"],
+    ['/updateOrder', 'rewrites items, totals and discounts on any order'],
+    ['/searchProducts', "any branch's catalogue and prices"],
+    ['/getFrequentItems', "any branch's popular items"],
+    ['/getListKot', "any branch's kitchen queue"],
+    ['/getCustomerPrint', 'any sale receipt, with the customer on it'],
+  ];
+
+  /*
+   * Read whole registrations, not lines.
+   *
+   * This used to scan for a line containing both `router.` and the
+   * double-quoted path. Two things then broke it at once: Prettier prefers
+   * single quotes, and it wraps a call this long across several lines - so
+   * `router.get(`, the path and the guards each ended up on their own line.
+   * Every route in this list looked as though it had vanished, which is the
+   * most alarming way for a test to be wrong about a security check.
+   *
+   * Splitting on `router.` and taking each call up to its closing `);` reads
+   * the same registration whatever shape the formatter leaves it in.
+   */
+  const calls = src
+    .split(/\brouter\.(?=get|post|put|patch|delete|all)/)
+    .slice(1)
+    .map((chunk) => chunk.slice(0, chunk.indexOf(');') + 2));
+
+  for (const [route, what] of MUST_BE_GUARDED) {
+    const quoted = new RegExp(`['"\`]${route.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"\`]`);
+    const matching = calls.filter((c) => quoted.test(c));
+    assert.ok(matching.length > 0, `${route} has vanished from the routes`);
+    for (const call of matching) {
+      assert.match(call, /protectOrKioskKey|(?<!optional)protect\b/,
+        `${route} is unguarded again - it exposes ${what}`);
+    }
+  }
+});
+
+test('anonymous qrOrder only serves branches that are open to it', () => {
+  /*
+   * qrOrder is anonymous by design - a customer's phone has no credentials -
+   * so the gate lives in the repository: no configured online identity
+   * (kiosk.store_id), no order. Without it, any branch's raw ObjectId (which
+   * appears in every authenticated response and is no secret) was enough for
+   * a stranger to put orders on its kitchen queue. Asserted here because the
+   * repository's own unit file sits in jest's CI ignore list.
+   *
+   * THIS TEST USED TO PIN THE BUG.
+   *
+   * It asserted on the literal source of the old guard,
+   * `!branchDoc.kiosk || !branchDoc.kiosk.store_id`. That expression reads an
+   * ARRAY field as an object - `branch.kiosk` is an array in every write path
+   * in the application - so it was `undefined` every time, the gate fired for
+   * every branch, and qrOrder refused every order. Pinned by source text, the
+   * defect was protected rather than the property.
+   *
+   * So this now asserts the PROPERTY: the gate runs before anything is
+   * created, and it refuses unless the shared state engine says the shop is
+   * accepting. That engine is exercised properly in
+   * api/tests/unit/utils/online-ordering.test.js, including the array shape.
+   */
+  const src = fs.readFileSync(
+    path.join(__dirname, '..', 'api', 'src', 'repositories', 'sale.repository.js'), 'utf8');
+  const start = src.indexOf('async createOnlineOrder');
+  assert.ok(start >= 0, 'createOnlineOrder has gone or been renamed');
+  const insertAt = src.indexOf('insertOne', start);
+  const beforeCreate = src.slice(start, insertAt > start ? insertAt : start + 6000);
+
+  assert.match(beforeCreate, /onlineOrdering\.channelState\(/,
+    'the opt-in gate is gone - any branch id would accept anonymous orders again');
+  assert.match(beforeCreate, /if\s*\(\s*!\s*\w*[sS]tate\.accepting\s*\)/,
+    'qrOrder no longer refuses when the channel says it is not accepting');
+
+  /* And the channel must be read through the one accessor, not by reaching
+     into the branch document and hoping about its shape. */
+  assert.match(beforeCreate, /onlineOrdering\.storefront\(/,
+    'the channel is being read directly again - that is how the array/object bug happened');
+
+  /* Comments stripped first. The code above this gate explains the old bug and
+     names the expression that caused it, and a test that cannot tell code from
+     prose would read that explanation as a relapse. */
+  const code = beforeCreate
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+  assert.ok(!/branchDoc\.kiosk\.store_id/.test(code),
+    'branchDoc.kiosk is an array; reading .store_id off it refuses every order');
+});
+
+test('the kiosk key is compared in constant time', () => {
+  /* A plain !== leaks, through timing, roughly how many leading characters were
+     right. Slow, but a way in, and these endpoints face the shop floor. */
+  const src = fs.readFileSync(
+    path.join(__dirname, '..', 'api', 'src', 'middleware', 'kiosk-key.js'), 'utf8');
+
+  assert.match(src, /timingSafeEqual/, 'the kiosk key comparison is not constant time');
+  assert.ok(!/kioskKey\s*!==\s*expected/.test(src),
+    'the old direct string comparison is back');
+});
+
+test('a length mismatch does not short-circuit the comparison', () => {
+  const { protectOrKioskKey } = require('../api/src/middleware/kiosk-key');
+  assert.strictEqual(typeof protectOrKioskKey, 'function');
+});
+
+/* ---- and the guard itself behaves ------------------------------------- */
+
+const { protectOrKioskKey } = require('../api/src/middleware/kiosk-key');
+
+function run(req) {
+  return new Promise((resolve) => {
+    const res = {
+      statusCode: null,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { resolve({ blocked: true, code: this.statusCode, body }); },
+    };
+    protectOrKioskKey(req, res, () => resolve({ blocked: false }));
+  });
+}
+
+test('a signed-in user passes untouched', async () => {
+  const out = await run({ user: { _id: 'u1' }, headers: {} });
+  assert.strictEqual(out.blocked, false);
+});
+
+test('an anonymous caller with no key is refused', async () => {
+  process.env.KIOSK_API_KEY = 'a'.repeat(64);
+  const out = await run({ headers: {} });
+  assert.strictEqual(out.blocked, true);
+  assert.strictEqual(out.code, 401);
+});
+
+test('an anonymous caller with the wrong key is refused', async () => {
+  process.env.KIOSK_API_KEY = 'a'.repeat(64);
+  const out = await run({ headers: { kioskkey: 'b'.repeat(64) } });
+  assert.strictEqual(out.blocked, true);
+  assert.strictEqual(out.code, 401);
+});
+
+test('a wrong key of a different length is refused, not crashed on', async () => {
+  /* timingSafeEqual throws when the buffers differ in length; an unhandled
+     throw here would be a 500 that says the length was wrong. */
+  process.env.KIOSK_API_KEY = 'a'.repeat(64);
+  const out = await run({ headers: { kioskkey: 'short' } });
+  assert.strictEqual(out.blocked, true);
+  assert.strictEqual(out.code, 401);
+});
+
+test('the shop’s own equipment, holding the key, passes', async () => {
+  process.env.KIOSK_API_KEY = 'a'.repeat(64);
+  const out = await run({ headers: { kioskkey: 'a'.repeat(64) } });
+  assert.strictEqual(out.blocked, false);
+});
+
+test('with no key configured, anonymous access stays shut', async () => {
+  /* Failing open here would expose these endpoints on every install that
+     started without a kiosk key - which is most of them. */
+  delete process.env.KIOSK_API_KEY;
+  const out = await run({ headers: { kioskkey: 'anything' } });
+  assert.strictEqual(out.blocked, true);
+  assert.strictEqual(out.code, 401);
+});
+
+test('the public health answer does not name the runtime', () => {
+  /* An unauthenticated /health used to return process.version, the platform and
+     the environment name - the exact list wanted by someone choosing which
+     published Node vulnerability to try. */
+  const src = fs.readFileSync(path.join(ROUTES_DIR, 'base.routes.js'), 'utf8');
+  const health = src.search(/router\.get\(\s*['"`]\/health['"`]/);
+  assert.ok(health >= 0, 'the /health route has gone or changed shape');
+  const handler = src.slice(health);
+  const body = handler.slice(0, handler.indexOf('\n});'));
+
+  assert.match(body, /if \(req\.user\)/,
+    'the detailed health payload is not gated on being signed in');
+
+  const beforeGate = body.slice(0, body.indexOf('if (req.user)'));
+  for (const leak of ['process.version', 'process.platform', 'NODE_ENV', 'memoryUsage']) {
+    assert.ok(!beforeGate.includes(leak),
+      `/health tells an anonymous caller ${leak}`);
+  }
+});
+
+test('registration cannot be reached, or self-promoted, by a stranger', () => {
+  /*
+   * POST /auth/register sat above router.use(protect), and the handler passed
+   * role straight from the request body into User.create. The schema's role
+   * enum includes "admin" and "super_admin", and hasPermission returns true for
+   * everything when role is "admin" - so an unauthenticated caller could name
+   * themselves super_admin and be signed in as one. The API router is mounted
+   * at both /api and /, so it was reachable twice over.
+   *
+   * Two independent things have to hold, because either alone is enough to be
+   * bitten by: the route must not be anonymous, and the handler must not take a
+   * role from whoever is asking.
+   */
+  const routes = fs.readFileSync(path.join(ROUTES_DIR, 'auth.routes.js'), 'utf8');
+  const line = routes.split('\n').find((l) => /router\.post\(\s*['"`]\/register['"`]/.test(l));
+
+  assert.ok(line, 'the register route has gone or changed shape');
+  assert.match(line, /verifyInstallationCredentials|protect/,
+    'POST /auth/register is anonymous again');
+
+  const handler = fs.readFileSync(
+    path.join(ROUTES_DIR, '..', 'controllers', 'auth.controller.js'), 'utf8');
+  const create = handler.slice(handler.indexOf('exports.register'));
+  const body = create.slice(0, create.indexOf('});'));
+
+  for (const claimed of ['role', 'usertype', 'access', 'license']) {
+    /* Double-escaped on purpose. In a TEMPLATE LITERAL "\\s" collapses to a
+       bare "s" and "\\." to ".", so this pattern used to demand a literal
+       letter s and treat the dot as "any character" - it would sail straight
+       past "role: req.body.role", which is the exact line it exists to catch.
+       A guard that cannot fail is worse than no guard, because it reads as
+       one. */
+    assert.ok(!new RegExp(`${claimed}:\\s*req\\.body\\.`).test(body),
+      `register takes ${claimed} from the request body - privilege is granted, not claimed`);
+  }
+});

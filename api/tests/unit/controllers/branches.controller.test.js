@@ -1,0 +1,1458 @@
+/**
+ * Unit tests for branches.controller.js
+ *
+ * BranchesController extends BaseController and is exported as a SINGLETON.
+ *   ctrl.branchModel    → instance created by mocked BranchModel constructor
+ *   ctrl.branchesService → mocked singleton
+ */
+
+// =============================================================================
+// Mocks (hoisted before any imports)
+// =============================================================================
+
+jest.mock('../../../src/models/branch.model', () => {
+  const instance = {
+    branchPage: jest.fn(),
+    getBranchById: jest.fn(),
+    createBranch: jest.fn(),
+    updateBranch: jest.fn(),
+    deleteBranchCollectionData: jest.fn(),
+    getPaymentGatewaySettings: jest.fn(),
+    getPhonePePaymentGatewaySettings: jest.fn(),
+    getEmailSettings: jest.fn(),
+    getRegisterList: jest.fn(),
+    getBranchDetails: jest.fn(),
+    getBranchRegisterList: jest.fn(),
+    exportBranchOrder: jest.fn(),
+    model: { findById: jest.fn(), findOne: jest.fn() },
+  };
+  return {
+    BranchModel: jest.fn(() => instance),
+    getDataChanges: jest.fn(),
+  };
+});
+
+const mockCopyGroups = jest.fn();
+const mockAccountGroup = jest.fn();
+const mockSaveGroup = jest.fn();
+const mockResolveGroup = jest.fn();
+jest.mock('../../../src/repositories/settings.repository', () => {
+  return class MockSettingsRepo {
+    resolveGroup(...a) {
+      return mockResolveGroup(...a);
+    }
+    copyGroups(...a) {
+      return mockCopyGroups(...a);
+    }
+    accountGroup(...a) {
+      return mockAccountGroup(...a);
+    }
+    saveGroup(...a) {
+      return mockSaveGroup(...a);
+    }
+  };
+});
+
+jest.mock('../../../src/services/branch.service', () => ({
+  getBranchOptions: jest.fn(),
+  getBranchStatistics: jest.fn(),
+  searchBranches: jest.fn(),
+  toggleBranchStatus: jest.fn(),
+  normalizeBranchId: jest.fn(),
+  getFirstBranch: jest.fn(),
+}));
+
+jest.mock('../../../src/models/user.model', () => ({
+  findById: jest.fn(),
+}));
+
+jest.mock('../../../src/models/base.model', () => {
+  function MockBaseModel() {}
+  MockBaseModel.currentBranch = null;
+  MockBaseModel.currentBranchName = '';
+  MockBaseModel.license = null;
+  MockBaseModel.loggedUser = null;
+  MockBaseModel.loggedUserName = '';
+  /* Real static on the model (base.model.js:311). The catalogue copy takes a
+     db handle from it, and a mock missing it fails as "not a function" - which
+     is what a real request would do too if the name were wrong. */
+  MockBaseModel.getDb = jest.fn().mockResolvedValue({ collection: jest.fn() });
+  return MockBaseModel;
+});
+
+jest.mock('mongodb', () => ({
+  ObjectId: Object.assign(
+    jest.fn((id) => ({ id, toString: () => String(id) })),
+    { isValid: jest.fn(() => true) }
+  ),
+}));
+
+jest.mock('../../../src/services/base.service', () => ({
+  getReportAutoSuggestions: jest.fn(),
+  getAutoSuggestions: jest.fn(),
+  getDefaultSuggestions: jest.fn(),
+}));
+
+// =============================================================================
+// Imports
+// =============================================================================
+
+const BranchModule = require('../../../src/models/branch.model');
+const branchesService = require('../../../src/services/branch.service');
+const User = require('../../../src/models/user.model');
+const ctrl = require('../../../src/controllers/branches.controller');
+
+const bm = ctrl.branchModel;
+
+// =============================================================================
+// Test helpers
+// =============================================================================
+
+const mockRes = () => {
+  const res = {};
+  res.status = jest.fn().mockReturnValue(res);
+  res.json = jest.fn().mockReturnValue(res);
+  return res;
+};
+
+const adminUser = {
+  _id: 'user001',
+  role: 'admin',
+  license: 'lic001',
+  name: 'Admin User',
+  branch_id: 'br001',
+  branch_name: 'Main',
+};
+
+const lowUser = { _id: 'user002', role: 'cashier' };
+const noReadUser = { _id: 'user003', role: 'cashier', access: { branch: { read: false } } };
+
+const mockReq = (overrides = {}) => ({
+  body: {},
+  params: {},
+  query: {},
+  headers: {},
+  session: {},
+  user: adminUser,
+  ...overrides,
+});
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  jest.spyOn(console, 'error').mockImplementation(() => {});
+  jest.spyOn(console, 'log').mockImplementation(() => {});
+  jest.spyOn(console, 'warn').mockImplementation(() => {});
+});
+
+// =============================================================================
+// getAll
+// =============================================================================
+
+describe('BranchesController — getAll', () => {
+  test('returns 200 with branch list on success', async () => {
+    bm.branchPage.mockResolvedValue({
+      status: true,
+      message: 'OK',
+      data: { list: [{ _id: 'b1', branch_name: 'Main' }], total: 1 },
+    });
+    const req = mockReq({ query: { limit: '10', page: '1' } });
+    const res = mockRes();
+
+    await ctrl.getAll(req, res);
+
+    expect(bm.branchPage).toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json.mock.calls[0][0].type).toBe('success');
+  });
+
+  /* A LIST is the worst place for a credential to appear: one response
+     carries every branch the user can see. */
+  test('the branch list carries no credentials at all', async () => {
+    bm.branchPage.mockResolvedValue({
+      status: true,
+      message: 'OK',
+      data: {
+        list: [
+          { _id: 'b1', branch_name: 'Main', email_smtp_password: 'hunter2', way2sms_api: 'w2s' },
+          { _id: 'b2', branch_name: 'Second', textlocal_api: 'tl-key' },
+        ],
+        total: 2,
+      },
+    });
+    const res = mockRes();
+    await ctrl.getAll(mockReq({ query: { limit: '10', page: '1' } }), res);
+
+    const body = JSON.stringify(res.json.mock.calls[0][0]);
+    for (const secret of ['hunter2', 'w2s', 'tl-key']) {
+      expect(body).not.toContain(secret);
+    }
+    // and the list still works
+    const { data } = res.json.mock.calls[0][0];
+    expect(data.list).toHaveLength(2);
+    expect(data.list[0].branch_name).toBe('Main');
+    expect(data.total).toBe(2);
+  });
+
+  test('applies default limit=5 and page=1 when query params absent', async () => {
+    bm.branchPage.mockResolvedValue({ status: true, message: 'OK', data: { list: [] } });
+    await ctrl.getAll(mockReq(), mockRes());
+    const [, options] = bm.branchPage.mock.calls[0];
+    expect(options.limit).toBe(5);
+    expect(options.page).toBe(1);
+  });
+
+  test('parses valid JSON filters and passes them to branchPage', async () => {
+    bm.branchPage.mockResolvedValue({ status: true, message: 'OK', data: { list: [] } });
+    const req = mockReq({ query: { filters: '{"status":"active"}' } });
+    await ctrl.getAll(req, mockRes());
+    const [filters] = bm.branchPage.mock.calls[0];
+    expect(filters).toEqual({ status: 'active' });
+  });
+
+  test('returns 404 with filter error when filters JSON is malformed', async () => {
+    const req = mockReq({ query: { filters: '{bad json' } });
+    const res = mockRes();
+    await ctrl.getAll(req, res);
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(bm.branchPage).not.toHaveBeenCalled();
+  });
+
+  test('returns 403 when user lacks read permission', async () => {
+    const res = mockRes();
+    await ctrl.getAll(mockReq({ user: noReadUser }), res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(bm.branchPage).not.toHaveBeenCalled();
+  });
+
+  test('returns 404 when branchPage returns status:false', async () => {
+    bm.branchPage.mockResolvedValue({ status: false, message: 'Not found', data: null });
+    const res = mockRes();
+    await ctrl.getAll(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('returns 500 when branchPage throws', async () => {
+    bm.branchPage.mockRejectedValue(new Error('DB crash'));
+    const res = mockRes();
+    await ctrl.getAll(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// getOptions
+// =============================================================================
+
+describe('BranchesController — getOptions', () => {
+  test('returns 200 with options on success', async () => {
+    branchesService.getBranchOptions.mockResolvedValue({
+      status: true,
+      message: 'OK',
+      data: [{ id: 'b1', name: 'Main' }],
+    });
+    const res = mockRes();
+    await ctrl.getOptions(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json.mock.calls[0][0].type).toBe('success');
+  });
+
+  test('returns 404 when service returns status:false', async () => {
+    branchesService.getBranchOptions.mockResolvedValue({ status: false, message: 'None' });
+    const res = mockRes();
+    await ctrl.getOptions(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('returns 500 when service throws', async () => {
+    branchesService.getBranchOptions.mockRejectedValue(new Error('fail'));
+    const res = mockRes();
+    await ctrl.getOptions(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// getOne
+// =============================================================================
+
+describe('BranchesController — getOne', () => {
+  test('returns 200 with branch data on success', async () => {
+    bm.getBranchById.mockResolvedValue({
+      status: true,
+      data: { _id: 'b1', branch_name: 'Main' },
+      message: 'Found',
+    });
+    const req = mockReq({ params: { id: 'b1' } });
+    const res = mockRes();
+    await ctrl.getOne(req, res);
+    expect(bm.getBranchById).toHaveBeenCalledWith('b1');
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  test('returns 403 when user lacks read permission', async () => {
+    const res = mockRes();
+    await ctrl.getOne(mockReq({ user: noReadUser, params: { id: 'b1' } }), res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(bm.getBranchById).not.toHaveBeenCalled();
+  });
+
+  test('returns 404 when branch not found', async () => {
+    bm.getBranchById.mockResolvedValue({ status: false, message: 'Not found' });
+    const res = mockRes();
+    await ctrl.getOne(mockReq({ params: { id: 'bad' } }), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('uses default message when result.message is absent', async () => {
+    bm.getBranchById.mockResolvedValue({ status: true, data: { _id: 'b1' } });
+    const res = mockRes();
+    await ctrl.getOne(mockReq({ params: { id: 'b1' } }), res);
+    expect(res.json.mock.calls[0][0].message).toBe('Branch retrieved successfully');
+  });
+
+  test('returns 500 when getBranchById throws', async () => {
+    bm.getBranchById.mockRejectedValue(new Error('crash'));
+    const res = mockRes();
+    await ctrl.getOne(mockReq({ params: { id: 'b1' } }), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// add
+// =============================================================================
+
+describe('BranchesController — add', () => {
+  test('returns 200 on successful branch creation', async () => {
+    bm.createBranch.mockResolvedValue({
+      status: true,
+      data: { _id: 'b1' },
+      message: 'Branch created',
+    });
+    const req = mockReq({ body: { branch_name: 'New Branch' } });
+    const res = mockRes();
+    await ctrl.add(req, res);
+    expect(bm.createBranch).toHaveBeenCalledWith({ branch_name: 'New Branch' }, adminUser);
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json.mock.calls[0][0].type).toBe('success');
+  });
+
+  test('returns 403 when user lacks write permission', async () => {
+    const res = mockRes();
+    await ctrl.add(mockReq({ user: lowUser }), res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(bm.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('returns 406 when branch name already exists (status: "exist")', async () => {
+    bm.createBranch.mockResolvedValue({
+      status: 'exist',
+      message: 'Branch already exists',
+      data: null,
+    });
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { branch_name: 'Dup' } }), res);
+    expect(res.status).toHaveBeenCalledWith(406);
+    expect(res.json.mock.calls[0][0].type).toBe('error');
+  });
+
+  test('returns 404 when model returns status:false', async () => {
+    bm.createBranch.mockResolvedValue({ status: false, message: 'Error', data: null });
+    const res = mockRes();
+    await ctrl.add(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('returns 500 when createBranch throws', async () => {
+    bm.createBranch.mockRejectedValue(new Error('DB fail'));
+    const res = mockRes();
+    await ctrl.add(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// edit
+// =============================================================================
+
+describe('BranchesController — edit', () => {
+  test('returns 200 on successful update', async () => {
+    bm.updateBranch.mockResolvedValue({
+      status: true,
+      data: { _id: 'b1', branch_name: 'Updated' },
+      message: 'Branch updated',
+    });
+    const req = mockReq({ params: { id: 'b1' }, body: { branch_name: 'Updated' } });
+    const res = mockRes();
+    await ctrl.edit(req, res);
+    expect(bm.updateBranch).toHaveBeenCalledWith('b1', { branch_name: 'Updated' }, adminUser);
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  test('returns 403 when user lacks write permission', async () => {
+    const res = mockRes();
+    await ctrl.edit(mockReq({ user: lowUser, params: { id: 'b1' } }), res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(bm.updateBranch).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 when id is missing from params', async () => {
+    const res = mockRes();
+    await ctrl.edit(mockReq({ params: {} }), res);
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(bm.updateBranch).not.toHaveBeenCalled();
+  });
+
+  test('returns 404 when branch not found', async () => {
+    bm.updateBranch.mockResolvedValue({ status: false, message: 'Branch not found' });
+    const res = mockRes();
+    await ctrl.edit(mockReq({ params: { id: 'bad' } }), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('returns 500 when updateBranch throws', async () => {
+    bm.updateBranch.mockRejectedValue(new Error('DB err'));
+    const res = mockRes();
+    await ctrl.edit(mockReq({ params: { id: 'b1' } }), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// delete
+// =============================================================================
+
+describe('BranchesController — delete', () => {
+  test('returns 200 on successful delete using params.id', async () => {
+    bm.deleteBranchCollectionData.mockResolvedValue({
+      status: true,
+      data: {},
+      message: 'Branch deleted',
+    });
+    const req = mockReq({ params: { id: 'b1' } });
+    const res = mockRes();
+    await ctrl.delete(req, res);
+    expect(bm.deleteBranchCollectionData).toHaveBeenCalledWith('b1', adminUser);
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  test('falls back to req.body.data when params.id is absent', async () => {
+    bm.deleteBranchCollectionData.mockResolvedValue({ status: true, data: {}, message: 'OK' });
+    const req = mockReq({ params: {}, body: { data: 'b2' } });
+    const res = mockRes();
+    await ctrl.delete(req, res);
+    expect(bm.deleteBranchCollectionData).toHaveBeenCalledWith('b2', adminUser);
+  });
+
+  test('returns 400 when id is missing from both params and body', async () => {
+    const res = mockRes();
+    await ctrl.delete(mockReq({ params: {}, body: {} }), res);
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(bm.deleteBranchCollectionData).not.toHaveBeenCalled();
+  });
+
+  test('returns 403 when user lacks delete permission', async () => {
+    const res = mockRes();
+    await ctrl.delete(mockReq({ user: lowUser, params: { id: 'b1' } }), res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(bm.deleteBranchCollectionData).not.toHaveBeenCalled();
+  });
+
+  test('returns 404 when model returns status:false', async () => {
+    bm.deleteBranchCollectionData.mockResolvedValue({
+      status: false,
+      message: 'Not found',
+      data: null,
+    });
+    const res = mockRes();
+    await ctrl.delete(mockReq({ params: { id: 'b1' } }), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('sets BaseModel context from session when sessionBranchId is present', async () => {
+    bm.deleteBranchCollectionData.mockResolvedValue({ status: true, data: {}, message: 'OK' });
+    const BaseModel = require('../../../src/models/base.model');
+    const req = mockReq({
+      params: { id: 'b1' },
+      session: { selectedBranchId: 'sess_br1' },
+    });
+    await ctrl.delete(req, mockRes());
+    expect(BaseModel.currentBranch).not.toBeUndefined();
+  });
+
+  test('returns 500 when deleteBranchCollectionData throws', async () => {
+    bm.deleteBranchCollectionData.mockRejectedValue(new Error('crash'));
+    const res = mockRes();
+    await ctrl.delete(mockReq({ params: { id: 'b1' } }), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// resetPaymentGateway
+// =============================================================================
+
+describe('BranchesController — resetPaymentGateway', () => {
+  test('returns 200 with gateway settings on success', async () => {
+    bm.getPaymentGatewaySettings.mockResolvedValue({
+      status: true,
+      data: { api_key: 'abc123' },
+      message: 'OK',
+    });
+    const req = mockReq({ query: { id: 'b1' } });
+    const res = mockRes();
+    await ctrl.resetPaymentGateway(req, res);
+    expect(bm.getPaymentGatewaySettings).toHaveBeenCalledWith('b1', 'lic001');
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  test('prefers session.selectedBranchId over query.id', async () => {
+    bm.getPaymentGatewaySettings.mockResolvedValue({ status: true, data: {}, message: 'OK' });
+    const req = mockReq({
+      session: { selectedBranchId: 'sess_b1' },
+      query: { id: 'q_b1' },
+    });
+    await ctrl.resetPaymentGateway(req, mockRes());
+    expect(bm.getPaymentGatewaySettings).toHaveBeenCalledWith('sess_b1', 'lic001');
+  });
+
+  test('returns 400 when branchId cannot be resolved', async () => {
+    const res = mockRes();
+    await ctrl.resetPaymentGateway(mockReq({ query: {} }), res);
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(bm.getPaymentGatewaySettings).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 when licenseId is missing', async () => {
+    const req = mockReq({ query: { id: 'b1' }, user: { role: 'admin' } });
+    const res = mockRes();
+    await ctrl.resetPaymentGateway(req, res);
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  test('returns 404 when model returns status:false', async () => {
+    bm.getPaymentGatewaySettings.mockResolvedValue({ status: false, message: 'Not configured' });
+    const res = mockRes();
+    await ctrl.resetPaymentGateway(mockReq({ query: { id: 'b1' } }), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('returns 500 on thrown error', async () => {
+    bm.getPaymentGatewaySettings.mockRejectedValue(new Error('err'));
+    const res = mockRes();
+    await ctrl.resetPaymentGateway(mockReq({ query: { id: 'b1' } }), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// resetPhonepePaymentGateway
+// =============================================================================
+
+describe('BranchesController — resetPhonepePaymentGateway', () => {
+  test('returns 200 with PhonePe settings on success', async () => {
+    bm.getPhonePePaymentGatewaySettings.mockResolvedValue({
+      status: true,
+      data: { merchant_id: 'M001' },
+      message: 'OK',
+    });
+    const req = mockReq({ query: { id: 'b1' } });
+    const res = mockRes();
+    await ctrl.resetPhonepePaymentGateway(req, res);
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  test('returns 404 when model returns status:false', async () => {
+    bm.getPhonePePaymentGatewaySettings.mockResolvedValue({ status: false, message: 'None' });
+    const res = mockRes();
+    await ctrl.resetPhonepePaymentGateway(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('returns 500 on thrown error', async () => {
+    bm.getPhonePePaymentGatewaySettings.mockRejectedValue(new Error('err'));
+    const res = mockRes();
+    await ctrl.resetPhonepePaymentGateway(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// resetEmailSetting
+// =============================================================================
+
+describe('BranchesController — resetEmailSetting', () => {
+  test('returns 200 with email settings on success', async () => {
+    bm.getEmailSettings.mockResolvedValue({
+      status: true,
+      data: { smtp_host: 'smtp.example.com' },
+      message: 'OK',
+    });
+    const req = mockReq({ query: { id: 'b1' } });
+    const res = mockRes();
+    await ctrl.resetEmailSetting(req, res);
+    expect(bm.getEmailSettings).toHaveBeenCalledWith('b1', 'lic001');
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  test('returns 400 when branchId cannot be resolved', async () => {
+    const res = mockRes();
+    await ctrl.resetEmailSetting(mockReq({ query: {} }), res);
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  test('returns 400 when licenseId is missing', async () => {
+    const req = mockReq({ query: { id: 'b1' }, user: { role: 'admin' } });
+    const res = mockRes();
+    await ctrl.resetEmailSetting(req, res);
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  test('returns 404 when model returns status:false', async () => {
+    bm.getEmailSettings.mockResolvedValue({ status: false, message: 'Not configured' });
+    const res = mockRes();
+    await ctrl.resetEmailSetting(mockReq({ query: { id: 'b1' } }), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('returns 500 on thrown error', async () => {
+    bm.getEmailSettings.mockRejectedValue(new Error('err'));
+    const res = mockRes();
+    await ctrl.resetEmailSetting(mockReq({ query: { id: 'b1' } }), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// getBranchList
+// =============================================================================
+
+describe('BranchesController — getBranchList', () => {
+  const chainSelectLean = (data) => ({
+    select: jest.fn().mockReturnValue({
+      lean: jest.fn().mockResolvedValue(data),
+    }),
+  });
+
+  test('returns 200 with mapped branch list', async () => {
+    User.findById.mockReturnValue(
+      chainSelectLean({
+        branch_access: [
+          { branch_id: { toString: () => 'b1' }, branch_name: 'Main', branch_image: 'main.png' },
+        ],
+      })
+    );
+    const res = mockRes();
+    await ctrl.getBranchList(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = res.json.mock.calls[0][0];
+    expect(body.type).toBe('success');
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]).toMatchObject({ id: 'b1', branch_name: 'Main', branch_image: 'main.png' });
+  });
+
+  test('returns 401 when req.user._id is absent', async () => {
+    const res = mockRes();
+    await ctrl.getBranchList(mockReq({ user: {} }), res);
+    // 401, not 403: no user id on the request is missing AUTHENTICATION,
+    // not a missing permission.
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(User.findById).not.toHaveBeenCalled();
+  });
+
+  test('returns empty branch list when user.branch_access is null', async () => {
+    User.findById.mockReturnValue(chainSelectLean({ branch_access: null }));
+    const res = mockRes();
+    await ctrl.getBranchList(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json.mock.calls[0][0].data).toEqual([]);
+  });
+
+  test('defaults branch_image to "store.png" when entry has no branch_image', async () => {
+    User.findById.mockReturnValue(
+      chainSelectLean({
+        branch_access: [{ branch_id: 'b1', branch_name: 'X' }],
+      })
+    );
+    const res = mockRes();
+    await ctrl.getBranchList(mockReq(), res);
+    expect(res.json.mock.calls[0][0].data[0].branch_image).toBe('store.png');
+  });
+
+  test('returns 500 on thrown error', async () => {
+    User.findById.mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockRejectedValue(new Error('DB')),
+      }),
+    });
+    const res = mockRes();
+    await ctrl.getBranchList(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// userRegisterBranchSelect
+// =============================================================================
+
+describe('BranchesController — userRegisterBranchSelect', () => {
+  test('returns 200 with register list when branch ID resolved', async () => {
+    branchesService.normalizeBranchId.mockReturnValue('b1');
+    bm.getRegisterList.mockResolvedValue({ status: true, data: [{ id: 'r1' }], message: 'OK' });
+    const req = mockReq({ query: { id: 'b1' }, headers: { 'x-device-id': 'stable-till' } });
+    const res = mockRes();
+    await ctrl.userRegisterBranchSelect(req, res);
+    const deviceId = require('../../../src/utils/device-id.util').getRequestDeviceId(req);
+    expect(bm.getRegisterList).toHaveBeenCalledWith('b1', adminUser, deviceId);
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json.mock.calls[0][0].type).toBe('success');
+  });
+
+  test('falls back to getFirstBranch when normalizeBranchId returns null', async () => {
+    branchesService.normalizeBranchId.mockReturnValue(null);
+    branchesService.getFirstBranch.mockResolvedValue({ _id: { toString: () => 'fb1' } });
+    bm.getRegisterList.mockResolvedValue({ status: true, data: [], message: 'OK' });
+    const res = mockRes();
+    await ctrl.userRegisterBranchSelect(mockReq(), res);
+    expect(branchesService.getFirstBranch).toHaveBeenCalled();
+    expect(bm.getRegisterList).toHaveBeenCalledWith(
+      'fb1',
+      adminUser,
+      expect.stringMatching(/^[a-f0-9]{32}$/)
+    );
+  });
+
+  test('returns 400 when no branch ID can be resolved at all', async () => {
+    branchesService.normalizeBranchId.mockReturnValue(null);
+    branchesService.getFirstBranch.mockResolvedValue(null);
+    const res = mockRes();
+    await ctrl.userRegisterBranchSelect(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  test('returns 404 when getRegisterList returns status:false', async () => {
+    branchesService.normalizeBranchId.mockReturnValue('b1');
+    bm.getRegisterList.mockResolvedValue({ status: false, message: 'Not found', data: null });
+    const res = mockRes();
+    await ctrl.userRegisterBranchSelect(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('returns 400 status when message is "Branch id is required"', async () => {
+    branchesService.normalizeBranchId.mockReturnValue('b1');
+    bm.getRegisterList.mockResolvedValue({
+      status: false,
+      message: 'Branch id is required',
+      data: null,
+    });
+    const res = mockRes();
+    await ctrl.userRegisterBranchSelect(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  test('returns 500 on thrown error', async () => {
+    branchesService.normalizeBranchId.mockImplementation(() => {
+      throw new Error('err');
+    });
+    const res = mockRes();
+    await ctrl.userRegisterBranchSelect(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// getOneStore
+// =============================================================================
+
+describe('BranchesController — getOneStore', () => {
+  test('returns 200 with store data on success', async () => {
+    branchesService.normalizeBranchId.mockReturnValue('b1');
+    bm.getBranchDetails.mockResolvedValue({ status: true, data: { branch_name: 'Main' } });
+    const req = mockReq({ query: { id: 'b1' } });
+    const res = mockRes();
+    await ctrl.getOneStore(req, res);
+    expect(bm.getBranchDetails).toHaveBeenCalledWith('b1');
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json.mock.calls[0][0].type).toBe('success');
+  });
+
+  test('falls back to getFirstBranch when normalizeBranchId returns null', async () => {
+    branchesService.normalizeBranchId.mockReturnValue(null);
+    branchesService.getFirstBranch.mockResolvedValue({ _id: { toString: () => 'fb1' } });
+    bm.getBranchDetails.mockResolvedValue({ status: true, data: {} });
+    await ctrl.getOneStore(mockReq(), mockRes());
+    expect(bm.getBranchDetails).toHaveBeenCalledWith('fb1');
+  });
+
+  test('returns 400 when no branch ID can be resolved', async () => {
+    branchesService.normalizeBranchId.mockReturnValue(null);
+    branchesService.getFirstBranch.mockResolvedValue(null);
+    const res = mockRes();
+    await ctrl.getOneStore(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  test('returns 404 when getBranchDetails returns status:false', async () => {
+    branchesService.normalizeBranchId.mockReturnValue('b1');
+    bm.getBranchDetails.mockResolvedValue({ status: false, message: 'Store Not found' });
+    const res = mockRes();
+    await ctrl.getOneStore(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json.mock.calls[0][0].type).toBe('error');
+  });
+
+  test('returns 400 status when result.message is "Branch id is required"', async () => {
+    branchesService.normalizeBranchId.mockReturnValue('b1');
+    bm.getBranchDetails.mockResolvedValue({ status: false, message: 'Branch id is required' });
+    const res = mockRes();
+    await ctrl.getOneStore(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  test('returns 500 on thrown error', async () => {
+    branchesService.normalizeBranchId.mockImplementation(() => {
+      throw new Error('err');
+    });
+    const res = mockRes();
+    await ctrl.getOneStore(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+
+  /*
+   * S4. This endpoint returns the whole branch document and the settings
+   * screen reads its email and SMS cards from it - so an SMTP password, an
+   * SMS gateway password and two API keys were being handed to the browser
+   * of anyone who could open Settings, and cached in that response.
+   */
+  test('no credential value leaves the server', async () => {
+    branchesService.normalizeBranchId.mockReturnValue('b1');
+    bm.getBranchDetails.mockResolvedValue({
+      status: true,
+      data: {
+        branch_name: 'Main',
+        email_smtp_username: 'billing@shop.in',
+        email_smtp_password: 'hunter2',
+        smtp_password: 'legacy-pass',
+        way2sms_password: 'sms-pass',
+        way2sms_api: 'w2s-key',
+        textlocal_api: 'tl-key',
+      },
+    });
+    const res = mockRes();
+    await ctrl.getOneStore(mockReq({ query: { id: 'b1' } }), res);
+
+    const body = JSON.stringify(res.json.mock.calls[0][0]);
+    for (const secret of ['hunter2', 'legacy-pass', 'sms-pass', 'w2s-key', 'tl-key']) {
+      expect(body).not.toContain(secret);
+    }
+    const { data } = res.json.mock.calls[0][0];
+    // the card still knows what to show, and the username is not a credential
+    expect(data.secrets_configured.email_smtp_password).toBe(true);
+    expect(data.email_smtp_username).toBe('billing@shop.in');
+    expect(data.branch_name).toBe('Main');
+  });
+});
+
+// =============================================================================
+// getBranchDetails
+// =============================================================================
+
+describe('BranchesController — getBranchDetails', () => {
+  test('returns 200 with branch on success', async () => {
+    bm.model.findById.mockReturnValue({
+      lean: jest.fn().mockResolvedValue({ _id: 'b1', branch_name: 'Main' }),
+    });
+    const req = mockReq({ params: { id: 'b1' } });
+    const res = mockRes();
+    await ctrl.getBranchDetails(req, res);
+    expect(bm.model.findById).toHaveBeenCalledWith('b1');
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  test('uses query.id when params.id is absent', async () => {
+    bm.model.findById.mockReturnValue({
+      lean: jest.fn().mockResolvedValue({ _id: 'b1' }),
+    });
+    const req = mockReq({ query: { id: 'b1' }, params: {} });
+    await ctrl.getBranchDetails(req, mockRes());
+    expect(bm.model.findById).toHaveBeenCalledWith('b1');
+  });
+
+  test('returns 400 when id is absent from both params and query', async () => {
+    const res = mockRes();
+    await ctrl.getBranchDetails(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(bm.model.findById).not.toHaveBeenCalled();
+  });
+
+  test('returns 404 when branch document is null', async () => {
+    bm.model.findById.mockReturnValue({
+      lean: jest.fn().mockResolvedValue(null),
+    });
+    const res = mockRes();
+    await ctrl.getBranchDetails(mockReq({ params: { id: 'bad' } }), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('returns 500 on thrown error', async () => {
+    bm.model.findById.mockReturnValue({
+      lean: jest.fn().mockRejectedValue(new Error('err')),
+    });
+    const res = mockRes();
+    await ctrl.getBranchDetails(mockReq({ params: { id: 'b1' } }), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// getDataChanges
+// =============================================================================
+
+describe('BranchesController — getDataChanges', () => {
+  test('returns 200 with data on success', async () => {
+    BranchModule.getDataChanges.mockResolvedValue({ status: true, data: [], message: 'OK' });
+    const req = mockReq({ query: { from: '2024-01-01' } });
+    const res = mockRes();
+    await ctrl.getDataChanges(req, res);
+    expect(BranchModule.getDataChanges).toHaveBeenCalledWith('branches', '2024-01-01');
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json.mock.calls[0][0].type).toBe('success');
+  });
+
+  test('defaults from to "" when query.from is absent', async () => {
+    BranchModule.getDataChanges.mockResolvedValue({ status: true, data: [], message: 'OK' });
+    await ctrl.getDataChanges(mockReq(), mockRes());
+    expect(BranchModule.getDataChanges).toHaveBeenCalledWith('branches', '');
+  });
+
+  test('returns 200 with error type when status is false', async () => {
+    BranchModule.getDataChanges.mockResolvedValue({ status: false, data: null });
+    const res = mockRes();
+    await ctrl.getDataChanges(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json.mock.calls[0][0].type).toBe('error');
+  });
+
+  test('returns 500 on thrown error', async () => {
+    BranchModule.getDataChanges.mockRejectedValue(new Error('fail'));
+    const res = mockRes();
+    await ctrl.getDataChanges(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// exportBranches
+// =============================================================================
+
+describe('BranchesController — exportBranches', () => {
+  test('returns 200 on successful export', async () => {
+    bm.exportBranchOrder.mockResolvedValue({
+      status: true,
+      data: [{ _id: 'b1' }],
+      message: 'Exported',
+    });
+    const req = mockReq({ body: ['id1', 'id2'] });
+    const res = mockRes();
+    await ctrl.exportBranches(req, res);
+    expect(bm.exportBranchOrder).toHaveBeenCalledWith(['id1', 'id2'], 'lic001');
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  test('returns 403 when user lacks read permission', async () => {
+    const res = mockRes();
+    await ctrl.exportBranches(mockReq({ user: noReadUser }), res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(bm.exportBranchOrder).not.toHaveBeenCalled();
+  });
+
+  test('returns 404 when export returns status:false', async () => {
+    bm.exportBranchOrder.mockResolvedValue({ status: false, message: 'Failed' });
+    const res = mockRes();
+    await ctrl.exportBranches(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('returns 500 on thrown error', async () => {
+    bm.exportBranchOrder.mockRejectedValue(new Error('err'));
+    const res = mockRes();
+    await ctrl.exportBranches(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// getBranchRegisterList
+// =============================================================================
+
+describe('BranchesController — getBranchRegisterList', () => {
+  test('returns 200 with register list using query.branch', async () => {
+    bm.getBranchRegisterList.mockResolvedValue({
+      status: true,
+      data: [{ id: 'r1' }],
+      message: 'OK',
+    });
+    const req = mockReq({ query: { branch: 'b1' } });
+    const res = mockRes();
+    await ctrl.getBranchRegisterList(req, res);
+    expect(bm.getBranchRegisterList).toHaveBeenCalledWith('b1');
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  test('uses params.branchId when query.branch is absent', async () => {
+    bm.getBranchRegisterList.mockResolvedValue({ status: true, data: [], message: 'OK' });
+    const req = mockReq({ params: { branchId: 'b2' }, query: {} });
+    await ctrl.getBranchRegisterList(req, mockRes());
+    expect(bm.getBranchRegisterList).toHaveBeenCalledWith('b2');
+  });
+
+  test('returns 404 when status is false', async () => {
+    bm.getBranchRegisterList.mockResolvedValue({ status: false, message: 'Not found' });
+    const res = mockRes();
+    await ctrl.getBranchRegisterList(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('returns 500 on thrown error', async () => {
+    bm.getBranchRegisterList.mockRejectedValue(new Error('err'));
+    const res = mockRes();
+    await ctrl.getBranchRegisterList(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// getStats
+// =============================================================================
+
+describe('BranchesController — getStats', () => {
+  test('returns 200 with stats on success', async () => {
+    branchesService.getBranchStatistics.mockResolvedValue({
+      status: true,
+      data: { total: 5, active: 4 },
+      message: 'OK',
+    });
+    const res = mockRes();
+    await ctrl.getStats(mockReq(), res);
+    expect(branchesService.getBranchStatistics).toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json.mock.calls[0][0].type).toBe('success');
+  });
+
+  test('returns 403 when user lacks read permission', async () => {
+    const res = mockRes();
+    await ctrl.getStats(mockReq({ user: noReadUser }), res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(branchesService.getBranchStatistics).not.toHaveBeenCalled();
+  });
+
+  test('returns 404 when service returns status:false', async () => {
+    branchesService.getBranchStatistics.mockResolvedValue({ status: false, message: 'None' });
+    const res = mockRes();
+    await ctrl.getStats(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('returns 500 on thrown error', async () => {
+    branchesService.getBranchStatistics.mockRejectedValue(new Error('fail'));
+    const res = mockRes();
+    await ctrl.getStats(mockReq(), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// search
+// =============================================================================
+
+describe('BranchesController — search', () => {
+  test('returns 200 with search results', async () => {
+    branchesService.searchBranches.mockResolvedValue({
+      status: true,
+      data: [{ _id: 'b1', branch_name: 'Main' }],
+      message: 'OK',
+    });
+    const req = mockReq({ query: { q: 'Main' } });
+    const res = mockRes();
+    await ctrl.search(req, res);
+    expect(branchesService.searchBranches).toHaveBeenCalledWith('Main', 10);
+    expect(res.status).toHaveBeenCalledWith(200);
+  });
+
+  test('returns 403 when user lacks read permission', async () => {
+    const res = mockRes();
+    await ctrl.search(mockReq({ user: noReadUser }), res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(branchesService.searchBranches).not.toHaveBeenCalled();
+  });
+
+  test('defaults q to "" when not provided', async () => {
+    branchesService.searchBranches.mockResolvedValue({ status: true, data: [], message: 'OK' });
+    await ctrl.search(mockReq(), mockRes());
+    expect(branchesService.searchBranches).toHaveBeenCalledWith('', 10);
+  });
+
+  test('returns 400 when search returns status:false (query too short)', async () => {
+    branchesService.searchBranches.mockResolvedValue({
+      status: false,
+      message: 'Search query must be at least 2 characters',
+    });
+    const res = mockRes();
+    await ctrl.search(mockReq({ query: { q: 'x' } }), res);
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  test('returns 500 on thrown error', async () => {
+    branchesService.searchBranches.mockRejectedValue(new Error('err'));
+    const res = mockRes();
+    await ctrl.search(mockReq({ query: { q: 'Main' } }), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+// =============================================================================
+// toggleStatus
+// =============================================================================
+
+describe('BranchesController — toggleStatus', () => {
+  test('returns 200 on successful status toggle', async () => {
+    branchesService.toggleBranchStatus.mockResolvedValue({
+      status: true,
+      data: { _id: 'b1', status: 'inactive' },
+      message: 'Status toggled',
+    });
+    const req = mockReq({ params: { id: 'b1' } });
+    const res = mockRes();
+    await ctrl.toggleStatus(req, res);
+    expect(branchesService.toggleBranchStatus).toHaveBeenCalledWith('b1');
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json.mock.calls[0][0].type).toBe('success');
+  });
+
+  test('returns 403 when user lacks write permission', async () => {
+    const res = mockRes();
+    await ctrl.toggleStatus(mockReq({ user: lowUser, params: { id: 'b1' } }), res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(branchesService.toggleBranchStatus).not.toHaveBeenCalled();
+  });
+
+  test('returns 404 when branch not found', async () => {
+    branchesService.toggleBranchStatus.mockResolvedValue({ status: false, message: 'Not found' });
+    const res = mockRes();
+    await ctrl.toggleStatus(mockReq({ params: { id: 'bad' } }), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('returns 500 on thrown error', async () => {
+    branchesService.toggleBranchStatus.mockRejectedValue(new Error('err'));
+    const res = mockRes();
+    await ctrl.toggleStatus(mockReq({ params: { id: 'b1' } }), res);
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
+});
+
+/*
+ * S6 (D4) - starting a new shop from an existing one.
+ *
+ * The copy OVERLAYS createBranch's defaults rather than replacing them: those
+ * defaults also seed print templates and currency, and a source branch that
+ * lacks one would otherwise leave the new shop with nothing there. A create
+ * without the option must behave exactly as it always has.
+ */
+describe('BranchesController — copy settings at branch creation', () => {
+  beforeEach(() => {
+    mockCopyGroups.mockReset();
+    mockCopyGroups.mockResolvedValue({
+      status: true,
+      data: { copied: { features: ['quotes_enable'] } },
+    });
+  });
+
+  test('no option means no copy - creation is untouched', async () => {
+    bm.createBranch.mockResolvedValue({ status: true, message: 'ok', data: { _id: 'new1' } });
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Second shop' } }), res);
+    expect(mockCopyGroups).not.toHaveBeenCalled();
+    expect(res.json.mock.calls[0][0].type).toBe('success');
+  });
+
+  test('with a source it copies onto the NEW branch', async () => {
+    bm.createBranch.mockResolvedValue({ status: true, message: 'ok', data: { _id: 'new1' } });
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Second shop', copy_settings_from: 'src1' } }), res);
+    const [groups, from, to] = mockCopyGroups.mock.calls[0];
+    expect(from).toBe('src1');
+    expect(to).toBe('new1');
+    // secrets are not in the default set - credentials never travel
+    expect(groups).toEqual(['features', 'preferences', 'documents']);
+    expect(groups).not.toContain('secrets');
+  });
+
+  test('a failed copy never fails the branch that was created', async () => {
+    bm.createBranch.mockResolvedValue({ status: true, message: 'ok', data: { _id: 'new1' } });
+    mockCopyGroups.mockRejectedValue(new Error('mongo is having a day'));
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Second shop', copy_settings_from: 'src1' } }), res);
+    // the branch exists and is reported as created; the reason rides along
+    expect(res.json.mock.calls[0][0].type).toBe('success');
+    expect(res.json.mock.calls[0][0].data.settings_copy_error).toMatch(/having a day/);
+  });
+
+  test('a refused copy is reported, not swallowed', async () => {
+    bm.createBranch.mockResolvedValue({ status: true, message: 'ok', data: { _id: 'new1' } });
+    mockCopyGroups.mockResolvedValue({
+      status: false,
+      message: 'Credentials are never copied between branches',
+    });
+    const res = mockRes();
+    await ctrl.add(
+      mockReq({
+        body: { name: 'Second shop', copy_settings_from: 'src1', copy_groups: ['secrets'] },
+      }),
+      res
+    );
+    expect(res.json.mock.calls[0][0].data.settings_copy_error).toMatch(/never copied/i);
+  });
+});
+
+/*
+ * Owner ask #85 - the other half of "mandatory information needs to be auto
+ * filled": who the new shop can SEE.
+ *
+ * createBranch already seeds the default customer, supplier and tax. This
+ * decides sharing, at the one moment a person is actually thinking about it -
+ * they are creating a second shop.
+ */
+describe('BranchesController — sharing defaults at branch creation', () => {
+  beforeEach(() => {
+    mockCopyGroups.mockReset();
+    mockAccountGroup.mockReset();
+    mockSaveGroup.mockReset();
+    mockAccountGroup.mockResolvedValue({ status: true, data: { set: [] } });
+    mockSaveGroup.mockResolvedValue({ status: true, data: { written: [] } });
+    bm.createBranch.mockResolvedValue({ status: true, message: 'ok', data: { _id: 'new1' } });
+  });
+
+  test('customers and suppliers arrive shared', async () => {
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Second shop' } }), res);
+    const [group, values, , options] = mockSaveGroup.mock.calls[0];
+    expect(group).toBe('sharing');
+    expect(values).toEqual({ share_customers: true, share_suppliers: true });
+    expect(options).toEqual({ level: 'account' });
+  });
+
+  test('it is written at ACCOUNT level, not onto the new branch', async () => {
+    /* "Can this shop see that shop's customers" is not a fact about one shop.
+       A branch can still override it afterwards - that is what S5 is for. */
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Second shop' } }), res);
+    expect(mockSaveGroup.mock.calls[0][3]).toEqual({ level: 'account' });
+  });
+
+  test('unticking a box on the form is honoured', async () => {
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Second shop', share_customers: false } }), res);
+    expect(mockSaveGroup.mock.calls[0][1].share_customers).toBe(false);
+  });
+
+  test('a "false" string from a form is FALSE', async () => {
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Second shop', share_customers: 'false' } }), res);
+    expect(mockSaveGroup.mock.calls[0][1].share_customers).toBe(false);
+  });
+
+  test('creating a THIRD shop does not re-impose the default', async () => {
+    /* Somebody deliberately turned customer sharing off when the second shop
+       was created. Creating a third must not quietly turn it back on. */
+    mockAccountGroup.mockResolvedValue({ status: true, data: { set: ['share_customers'] } });
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Third shop' } }), res);
+    const values = mockSaveGroup.mock.calls[0][1];
+    expect(values).not.toHaveProperty('share_customers');
+    expect(values.share_suppliers).toBe(true);
+  });
+
+  test('with every key already decided, nothing is written at all', async () => {
+    mockAccountGroup.mockResolvedValue({
+      status: true,
+      data: { set: ['share_customers', 'share_suppliers'] },
+    });
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Fourth shop' } }), res);
+    expect(mockSaveGroup).not.toHaveBeenCalled();
+  });
+
+  test('a failed seed never fails the branch that was created', async () => {
+    mockSaveGroup.mockRejectedValue(new Error('mongo is having a day'));
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Second shop' } }), res);
+    expect(res.json.mock.calls[0][0].type).toBe('success');
+    expect(res.json.mock.calls[0][0].data.sharing_error).toMatch(/having a day/);
+  });
+
+  test('a create that failed seeds nothing', async () => {
+    bm.createBranch.mockResolvedValue({ status: false, message: 'nope', data: null });
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Second shop' } }), res);
+    expect(mockSaveGroup).not.toHaveBeenCalled();
+  });
+
+  test('the read cache is cleared so the new shop sees the rule immediately', async () => {
+    const dataSharing = require('../../../src/services/data-sharing');
+    const spy = jest.spyOn(dataSharing, 'invalidate');
+    try {
+      const res = mockRes();
+      await ctrl.add(mockReq({ body: { name: 'Second shop' } }), res);
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+/*
+ * Owner ask #85, the "inventory copy" half.
+ *
+ * Deliberately a copy and not a switch: stock lives on the item document and
+ * each branch owns its own items, so a shared item read would show a cashier N
+ * copies of every product with N different counts, and selling the wrong row
+ * would decrement another shop's stock.
+ */
+describe('BranchesController — copying the catalogue at branch creation', () => {
+  let copySpy;
+  beforeEach(() => {
+    mockAccountGroup.mockResolvedValue({ status: true, data: { set: [] } });
+    mockSaveGroup.mockResolvedValue({ status: true, data: { written: [] } });
+    bm.createBranch.mockResolvedValue({
+      status: true,
+      message: 'ok',
+      data: { _id: 'new1', name: 'Second shop' },
+    });
+    const catalogueCopy = require('../../../src/services/catalogue-copy');
+    copySpy = jest
+      .spyOn(catalogueCopy, 'copyCatalogue')
+      .mockResolvedValue({ status: true, data: { items: 42 } });
+  });
+  afterEach(() => copySpy.mockRestore());
+
+  test('no source means no copy - creation is untouched', async () => {
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Second shop' } }), res);
+    expect(copySpy).not.toHaveBeenCalled();
+  });
+
+  test('with a source it copies onto the NEW branch', async () => {
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Second shop', copy_items_from: 'src1' } }), res);
+    const [, opts] = copySpy.mock.calls[0];
+    expect(opts.sourceBranchId).toBe('src1');
+    expect(opts.targetBranchId).toBe('new1');
+    expect(opts.targetBranchName).toBe('Second shop');
+    expect(res.json.mock.calls[0][0].data.items_copied).toEqual({ items: 42 });
+  });
+
+  test('a failed copy never fails the branch that was created', async () => {
+    copySpy.mockRejectedValue(new Error('mongo is having a day'));
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Second shop', copy_items_from: 'src1' } }), res);
+    expect(res.json.mock.calls[0][0].type).toBe('success');
+    expect(res.json.mock.calls[0][0].data.items_copy_error).toMatch(/having a day/);
+  });
+
+  test('a refused copy is reported, not swallowed', async () => {
+    copySpy.mockResolvedValue({ status: false, message: 'That branch already has items' });
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Second shop', copy_items_from: 'src1' } }), res);
+    expect(res.json.mock.calls[0][0].data.items_copy_error).toMatch(/already has items/);
+  });
+
+  test('the licence travels, so a copy cannot cross accounts', async () => {
+    const res = mockRes();
+    await ctrl.add(mockReq({ body: { name: 'Second shop', copy_items_from: 'src1' } }), res);
+    expect(copySpy.mock.calls[0][1].licenseId).toBe(mockReq().user.license);
+  });
+});
+
+describe('shared branch signature', () => {
+  const image = 'data:image/png;base64,AAAA';
+  const branchId = '64b000000000000000000001';
+  const licenseId = '64b000000000000000000002';
+  const reqFor = (body = { signature: image }) =>
+    mockReq({
+      params: { id: branchId },
+      body,
+      user: { role: 'owner', license: licenseId, branch_id: '64b000000000000000000003' },
+    });
+  beforeEach(() => {
+    bm.model.findOne.mockReturnValue({ lean: jest.fn().mockResolvedValue({ _id: branchId }) });
+    mockSaveGroup.mockResolvedValue({ status: true });
+    mockResolveGroup.mockResolvedValue({
+      status: true,
+      data: { values: { quote_default_signature: image } },
+    });
+  });
+  test('owner can edit another branch in the same licence without changing the selected branch', async () => {
+    const res = mockRes();
+    await ctrl.saveSignature(reqFor(), res);
+    expect(bm.model.findOne.mock.calls[0][0]._id.toString()).toBe(branchId);
+    expect(bm.model.findOne.mock.calls[0][0].license.toString()).toBe(licenseId);
+    expect(mockSaveGroup).toHaveBeenCalledWith(
+      'documents',
+      { quote_default_signature: image },
+      { branchId, licenseId },
+      { level: 'branch' }
+    );
+    expect(res.json.mock.calls[0][0].data).toEqual({ branch_id: branchId, signature: image });
+  });
+  test('reads the resolved shared document value', async () => {
+    const res = mockRes();
+    await ctrl.getSignature(reqFor(), res);
+    expect(mockResolveGroup).toHaveBeenCalledWith('documents', { branchId, licenseId });
+    expect(res.json.mock.calls[0][0].data.signature).toBe(image);
+  });
+  test('explicit empty value clears the signature', async () => {
+    await ctrl.saveSignature(reqFor({ signature: '' }), mockRes());
+    expect(mockSaveGroup.mock.calls[0][1]).toEqual({ quote_default_signature: '' });
+  });
+  test.each([
+    undefined,
+    null,
+    'https://example.com/a.png',
+    'data:image/svg+xml;base64,AAAA',
+    'data:image/png;base64,' + 'A'.repeat(400000),
+  ])('rejects invalid image input without writing', async (signature) => {
+    const res = mockRes();
+    await ctrl.saveSignature(reqFor({ signature }), res);
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(mockSaveGroup).not.toHaveBeenCalled();
+  });
+  test('does not cross a licence boundary even for an owner', async () => {
+    bm.model.findOne.mockReturnValue({ lean: jest.fn().mockResolvedValue(null) });
+    const res = mockRes();
+    await ctrl.saveSignature(reqFor(), res);
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(mockSaveGroup).not.toHaveBeenCalled();
+  });
+  test('staff cannot target an unassigned branch', async () => {
+    const req = reqFor();
+    req.user = { ...req.user, role: 'manager', branch_access: [{ branch_id: req.user.branch_id }] };
+    const res = mockRes();
+    await ctrl.saveSignature(req, res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(mockSaveGroup).not.toHaveBeenCalled();
+  });
+  test('staff without write permission cannot replace the signature', async () => {
+    const req = reqFor();
+    req.user = {
+      role: 'cashier',
+      branch_id: branchId,
+      license: licenseId,
+      access: { branch: { write: false }, setting: { write: false } },
+    };
+    const res = mockRes();
+    await ctrl.saveSignature(req, res);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(mockSaveGroup).not.toHaveBeenCalled();
+  });
+});
