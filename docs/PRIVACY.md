@@ -24,11 +24,11 @@ it sends where.
 
 Everything lives in a database on your own computer, in your user profile:
 
-| System | Location |
-|---|---|
-| Windows | `%APPDATA%\Posnic\` |
-| macOS | `~/Library/Application Support/Posnic/` |
-| Linux | `~/.config/Posnic/` |
+| System  | Location                                |
+| ------- | --------------------------------------- |
+| Windows | `%APPDATA%\Posnic\`                     |
+| macOS   | `~/Library/Application Support/Posnic/` |
+| Linux   | `~/.config/Posnic/`                     |
 
 That includes your items, sales, customers, suppliers, staff accounts, settings
 and logs. Nobody else has a copy unless you make one.
@@ -45,7 +45,7 @@ Three things, on a stock install where you have configured nothing:
 **Update checks.** The app asks GitHub whether a newer release exists. That
 request necessarily reveals your IP address and the version you are running, the
 same as visiting a web page. It carries no shop data and no identifier we
-assign. Disable it in *Config → Settings*.
+assign. Disable it in _Config → Settings_.
 
 **The bundled database, on first run.** A one-time download of MongoDB from
 `mongodb.com` if the installer did not include it.
@@ -69,15 +69,45 @@ analytics: if you switch Google Analytics on, you are the controller of what
 it collects about your visitors, and until you do, the page's own security
 policy refuses Google's domains outright.
 
-| Feature | Off by default | What it sends | To whom | Turn it off by |
-|---|---|---|---|---|
-| Email receipts and reports | Yes | Customer email, invoice PDF, sale total, payment mode | The SMTP server you configure | Clearing the SMTP settings |
-| SMS receipts and alerts | Yes | Customer phone number, message text, delivery status | Brevo, or the SMS provider you configure | Clearing the SMS settings |
-| WhatsApp receipts | Yes | Phone number and message content; the session lives on your machine | WhatsApp / Meta | Disconnecting WhatsApp |
-| Online payments | Yes | Payment amount, order reference, payment status | Razorpay, using your own merchant keys | Removing the gateway keys |
-| Google Analytics | Yes | Page views and usage events from this shop's pages, under Google's own collection | Google, into the Analytics account whose measurement id you enter | Switching the toggle off (Settings → Integrations → Analytics) |
-| S3 file storage | Yes | Item and user images you upload | The S3 bucket you own | Leaving storage set to local |
-| Posnic Cloud sync | Yes | Your shop data, as described below | Us | Not subscribing, or disconnecting |
+| Feature                                | Off by default                           | What it sends                                                                                               | To whom                                                           | Turn it off by                                                 |
+| -------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | -------------------------------------------------------------- |
+| Email receipts and reports             | Yes                                      | Customer email, invoice PDF, sale total, payment mode                                                       | The SMTP server you configure                                     | Clearing the SMTP settings                                     |
+| SMS receipts and alerts                | Yes                                      | Customer phone number, message text, delivery status                                                        | Brevo, or the SMS provider you configure                          | Clearing the SMS settings                                      |
+| WhatsApp receipts                      | Yes                                      | Phone number and message content; the session lives on your machine                                         | WhatsApp / Meta                                                   | Disconnecting WhatsApp                                         |
+| Online payments                        | Yes                                      | Payment amount, order reference, payment status                                                             | Razorpay, using your own merchant keys                            | Removing the gateway keys                                      |
+| Google Analytics                       | Yes                                      | Page views and usage events from this shop's pages, under Google's own collection                           | Google, into the Analytics account whose measurement id you enter | Switching the toggle off (Settings → Integrations → Analytics) |
+| S3 file storage                        | Yes                                      | Item and user images you upload                                                                             | The S3 bucket you own                                             | Leaving storage set to local                                   |
+| Posnic Cloud sync                      | Yes                                      | Your shop data, as described below                                                                          | Us                                                                | Not subscribing, or disconnecting                              |
+| Website publishing (paired build only) | Yes, if the installer was built that way | Catalogue reads and product image requests travel through Cloudflare's network on their way to your website | Cloudflare, and the website operator                              | Not applicable — decided when the installer was built          |
+
+The last row is different from every other row and does not belong in a list of
+things _you_ switch on, so it is stated separately below.
+
+## A paired build: publishing to a website
+
+A stock Posnic has no relationship with any website. Some installers are built
+for one specific shop so its catalogue appears on a website the shop runs — and
+in that case the arrangement was decided **before** the installer was built, by
+whoever built it. You did not choose it, and there is no setting to change it.
+
+What that means in practice:
+
+- The till's catalogue and product photos can be **read** by that website through
+  a credential granting `item: read` and `category: read` and nothing else. It
+  cannot write to your shop: it cannot change stock, prices or sales.
+- To let the website reach the till, the installer carries Cloudflare's
+  `cloudflared` client. It connects outbound to Cloudflare and gives the till a
+  stable hostname. Reads pass through Cloudflare's network, where TLS terminates,
+  but **no shop data is stored at Cloudflare's edge**.
+- Only `/api/v1/*` and `/uploads/*` are reachable this way. Every other part of
+  the till's API answers 404, so the management API is not exposed.
+- Your customers' data is **not** part of this. The published credential cannot
+  read `customers`, `sales` or `suppliers`.
+
+If you did not expect your till to be publishing to a website, that is worth
+raising with whoever supplied it rather than something to fix on the machine.
+See [SUBPROCESSORS.md](SUBPROCESSORS.md) for the full picture of who is in the
+path.
 
 If none of these is configured — which is how the app installs — then apart from
 the three checks above, nothing your shop does reaches the network at all. Pull
@@ -156,12 +186,12 @@ you, and we do not pretend to.
 
 ### What we hold, and for how long
 
-| | |
-|---|---|
-| **Shop records** | Sales, items, stock, customers, staff activity — for as long as you subscribe |
+|                         |                                                                                                               |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------- |
+| **Shop records**        | Sales, items, stock, customers, staff activity — for as long as you subscribe                                 |
 | **Account and billing** | Name, business name, email, phone, invoices — kept while you are a customer, then as long as tax law requires |
-| **Backups** | Encrypted, kept **90 days**, then expire |
-| **Server logs** | Connection and error records, **30 days** |
+| **Backups**             | Encrypted, kept **90 days**, then expire                                                                      |
+| **Server logs**         | Connection and error records, **30 days**                                                                     |
 
 **Deletion.** Ask at info@posnic.com and we delete your cloud data within
 **30 days**, keeping only what a law requires us to. Deleted data can persist in

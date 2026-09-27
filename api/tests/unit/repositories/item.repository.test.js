@@ -11,6 +11,7 @@ jest.mock('../../../src/constants/items.constants', () => ({
   DEFAULTS: { IMAGE: 'item.svg' },
   ITEM_STATUS: { REGULAR: 'regular', INSTANT: 'instant' },
   SUCCESS_MESSAGES: { ITEM_CREATED: 'Created', ITEM_UPDATED: 'Updated' },
+  FIELD_LIMITS: { NAME_MAX: 200, DESCRIPTION_MAX: 2000 },
   ERROR_MESSAGES: {
     ITEM_NOT_FOUND: 'Not found',
     BRANCH_LICENSE_REQUIRED: 'Required',
@@ -281,6 +282,92 @@ describe('ItemRepository', () => {
       const barcodeQueries = col.findOne.mock.calls.filter(([f]) => f && f.$or);
       expect(barcodeQueries).toHaveLength(0);
     });
+
+    /*
+     * The description contract (ShuttleZone integration ask, and a bug in its
+     * own right). It was written unconditionally from `data.description ||''`,
+     * so every save that did not carry the key ERASED it - and the sale
+     * screen's inline edit is a save that carries only what it patches.
+     */
+    test('create stores a description, trimmed', async () => {
+      col.findOne.mockResolvedValue(null);
+      await repo.upsertItem({ ...data, description: '  A blue pen.  ' }, '', ctx);
+      expect(col.insertOne.mock.calls[0][0].description).toBe('A blue pen.');
+    });
+
+    test('create without the key still carries an empty description (shape kept)', async () => {
+      col.findOne.mockResolvedValue(null);
+      await repo.upsertItem(data, '', ctx);
+      expect(col.insertOne.mock.calls[0][0].description).toBe('');
+    });
+
+    test('an edit that omits the description leaves the stored one alone', async () => {
+      col.findOne
+        .mockResolvedValueOnce(null) // identity duplicate check
+        .mockResolvedValueOnce(null) // barcode uniqueness check
+        .mockResolvedValueOnce({ track_inventory: false, name: 'Pen', description: 'A blue pen.' });
+      // The inline-edit shape: only the field being patched.
+      await repo.upsertItem({ selling_price: '9' }, FAKE_ID, ctx);
+      expect('description' in col.updateOne.mock.calls[0][1].$set).toBe(false);
+    });
+
+    test('an explicit empty description still clears it', async () => {
+      col.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ track_inventory: false, name: 'Pen', description: 'A blue pen.' });
+      await repo.upsertItem({ ...data, description: '' }, FAKE_ID, ctx);
+      expect(col.updateOne.mock.calls[0][1].$set.description).toBe('');
+    });
+
+    test('an edit stores a changed description', async () => {
+      col.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ track_inventory: false, name: 'Pen', description: 'old' });
+      await repo.upsertItem({ ...data, description: 'new' }, FAKE_ID, ctx);
+      expect(col.updateOne.mock.calls[0][1].$set.description).toBe('new');
+    });
+
+    /*
+     * Brand is written on BOTH paths, and on create it is written by the same
+     * presence-gated block the edit path uses - worth pinning, because the
+     * create literal does not carry it and a future reader could easily
+     * conclude (as one did) that creates drop it.
+     */
+    test('brand is written on create as well as on edit', async () => {
+      col.findOne.mockResolvedValue(null);
+      await repo.upsertItem({ ...data, brand: ' Yonex ' }, '', ctx);
+      expect(col.insertOne.mock.calls[0][0].brand).toBe('Yonex');
+    });
+
+    /*
+     * The taxonomy's second level (I4.7). Its own test because the stakes are
+     * different in kind: a partial edit that omitted it would not blank a
+     * field, it would quietly move a product off the shelf it was arranged on.
+     */
+    test('sub_category is presence-gated: sent sets it, omitted leaves the shelf alone', async () => {
+      col.findOne.mockResolvedValue(null);
+      await repo.upsertItem({ ...data, sub_category: '  advanced-badminton-rackets  ' }, '', ctx);
+      expect(col.insertOne.mock.calls[0][0].sub_category).toBe('advanced-badminton-rackets');
+
+      col.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ track_inventory: false, name: 'Pen', sub_category: 'shirts' });
+      await repo.upsertItem({ selling_price: '9' }, FAKE_ID, ctx);
+      expect('sub_category' in col.updateOne.mock.calls[0][1].$set).toBe(false);
+    });
+
+    test('an empty sub_category clears it deliberately', async () => {
+      col.findOne
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ track_inventory: false, name: 'Pen', sub_category: 'shirts' });
+      await repo.upsertItem({ ...data, sub_category: '' }, FAKE_ID, ctx);
+      expect(col.updateOne.mock.calls[0][1].$set.sub_category).toBe('');
+    });
+
     test('returns error without branch/license', async () => {
       const r = await repo.upsertItem(data, '', {});
       expect(r.status).toBe(false);

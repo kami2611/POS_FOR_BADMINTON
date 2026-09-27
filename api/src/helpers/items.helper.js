@@ -38,7 +38,9 @@ const sanitizeItemData = (data = {}) => {
     'barcode_id',
     'sku',
     'description',
+    'brand',
     'category_name',
+    'sub_category',
     'supplier_name',
     'unit',
   ];

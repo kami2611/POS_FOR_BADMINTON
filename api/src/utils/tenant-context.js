@@ -156,20 +156,41 @@ async function attachTenantContext(req, user) {
   }
 
   const userId = toObjectId(user._id || user.id);
+  /*
+   * A scoped integration token is not a person.
+   *
+   * `resolveScopedToken` shapes its principal like a lean user document, which
+   * is what lets every downstream consumer treat it as one - but its `_id` is
+   * the TOKEN row's id, and there is no such document in `users`. Requiring one
+   * here therefore refused every request made with a scoped token: the API's own
+   * documented authentication for /api/v1 ("Authenticate with a scoped API token
+   * via the Authorization: Bearer header") answered
+   * "The selected branch is not available for the current user and license",
+   * so a website could not read a catalogue at all.
+   *
+   * The check exists to stop a credential being USED for a shop it does not
+   * belong to, and for a token that check has already happened: the row was
+   * found by the hash of the token presented, it is `active`, and its licence
+   * and branch_access are what the mint read off the person who created it. The
+   * branch below is still validated against the live `branches` collection, so
+   * the tenant scoping that matters is unchanged - a token for a deleted branch
+   * still gets nothing.
+   */
+  const isScopedToken = user.api_token === true;
   const [branch, persistedUser] = await Promise.all([
     db
       .collection('branches')
       .findOne({ _id: branchId, license: licenseId }, { projection: { branch_name: 1 } }),
-    userId
-      ? db.collection('users').findOne(
+    isScopedToken || !userId
+      ? Promise.resolve(true)
+      : db.collection('users').findOne(
           {
             _id: userId,
             license: licenseId,
             'branch_access.branch_id': branchId,
           },
           { projection: { _id: 1 } }
-        )
-      : null,
+        ),
   ]);
 
   if (!branch || !persistedUser) {

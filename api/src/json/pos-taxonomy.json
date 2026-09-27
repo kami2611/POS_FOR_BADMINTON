@@ -1,0 +1,42 @@
+[
+  {
+    "category": "rackets",
+    "subCategories": []
+  },
+  {
+    "category": "shoes",
+    "subCategories": []
+  },
+  {
+    "category": "shuttles",
+    "subCategories": []
+  },
+  {
+    "category": "Bags & Kits",
+    "subCategories": []
+  },
+  {
+    "category": "apparel",
+    "subCategories": [
+      "shirts",
+      "shorts",
+      "tracksuits"
+    ]
+  },
+  {
+    "category": "strings",
+    "subCategories": []
+  },
+  {
+    "category": "accessories",
+    "subCategories": [
+      "grip",
+      "socks",
+      "headband",
+      "wrist band",
+      "over-grips",
+      "towel-grips",
+      "badminton-grips"
+    ]
+  }
+]

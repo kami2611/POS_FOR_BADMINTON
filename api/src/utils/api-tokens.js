@@ -96,6 +96,120 @@ async function createToken(db, { name, scopes, creator }) {
   return { ok: true, id: r.insertedId, token, hint: row.token_hint };
 }
 
+/*
+ * A token the SHOP was shipped with, rather than one a person clicked for.
+ *
+ * `createToken` above always invents its own plaintext, which is right for the
+ * Integrations screen and useless for an installer: the website has to know the
+ * value before the shop exists, and the shop has to accept the value the
+ * website already holds. So this takes the plaintext as an argument.
+ *
+ * Everything else is deliberately identical - the same hash, the same scope
+ * whitelist, the same ACL matrix shape - so a provisioned token is not a
+ * second kind of credential with its own rules. It is an ordinary token that
+ * happened to be minted at build time.
+ *
+ * RE-PAIRING REPLACES, AND REVOKES. `source` identifies the provisioning
+ * channel, so there is at most one live token per channel and per shop. When
+ * the same channel provisions a DIFFERENT value - a rebuilt installer with a
+ * rotated secret - the new row is inserted first and every other live row for
+ * that channel is then revoked. Insert-before-revoke, not the reverse: a
+ * failure between the two steps leaves a shop with a working token rather than
+ * with none. The old value stops authenticating the moment the revoke lands,
+ * which is the point - a leaked installer must not keep pulling the catalogue
+ * after you have issued a replacement.
+ *
+ * Idempotent by design: provisioning the same value twice is a read and
+ * nothing else. That matters because the caller is a timer, not a person.
+ */
+const MIN_PROVISIONED_CHARS = 32;
+
+async function provisionToken(
+  db,
+  {
+    plaintext,
+    name,
+    scopes,
+    license,
+    branchAccess = [],
+    createdBy = '',
+    source = 'provisioned',
+  } = {}
+) {
+  if (!db) return { ok: false, reason: 'no_database' };
+
+  const value = String(plaintext || '').trim();
+  if (!value) return { ok: false, reason: 'no token value' };
+  /* `resolveScopedToken` only ever looks at prefixed values, so an unprefixed
+     one would be stored, listed, and silently unable to authenticate. Refuse
+     it here where the build can still be fixed. */
+  if (!value.startsWith(PREFIX))
+    return { ok: false, reason: `the token must start with ${PREFIX}` };
+  if (value.length < PREFIX.length + MIN_PROVISIONED_CHARS) {
+    return {
+      ok: false,
+      reason: `the token is shorter than ${PREFIX.length + MIN_PROVISIONED_CHARS} characters`,
+    };
+  }
+
+  const clean = sanitizeScopes(scopes);
+  if (!clean) return { ok: false, reason: 'scopes must grant at least one permission' };
+
+  const { ObjectId } = require('mongodb');
+  const licenseId =
+    license instanceof ObjectId
+      ? license
+      : ObjectId.isValid(String(license || ''))
+        ? new ObjectId(String(license))
+        : null;
+  if (!licenseId) return { ok: false, reason: 'no shop context' };
+
+  const access = (Array.isArray(branchAccess) ? branchAccess : []).filter((b) => b && b.branch_id);
+
+  const col = db.collection(COLLECTION);
+  const hash = hashToken(value);
+  const hint = tokenHint(value);
+
+  const current = await col.findOne(
+    { source, active: true },
+    { projection: { _id: 1, token_hash: 1 } }
+  );
+  if (current && current.token_hash === hash) {
+    return { ok: true, unchanged: true, id: current._id, hint, revoked: 0 };
+  }
+
+  const inserted = await col.insertOne({
+    name: String(name || 'Provisioned token').slice(0, 80),
+    token_hash: hash,
+    token_hint: hint,
+    access: clean,
+    usertype: 'api',
+    license: licenseId,
+    branch_access: access,
+    created_by: String(createdBy || ''),
+    createdAt: new Date(),
+    last_used_at: null,
+    active: true,
+    source,
+  });
+
+  /* Revoke every other live row for this channel at once, not just the one we
+     read: a database that has been restored or hand-edited can hold more than
+     one, and leaving any of them live defeats the rotation. */
+  const revoked = await col.updateMany(
+    { source, active: true, _id: { $ne: inserted.insertedId } },
+    { $set: { active: false, revokedAt: new Date(), revokedReason: 'replaced' } }
+  );
+
+  return {
+    ok: true,
+    created: true,
+    id: inserted.insertedId,
+    hint,
+    revoked: revoked.modifiedCount || 0,
+  };
+}
+
 async function listTokens(db) {
   return db
     .collection(COLLECTION)
@@ -156,11 +270,13 @@ module.exports = {
   PREFIX,
   MODULES,
   PERMS,
+  MIN_PROVISIONED_CHARS,
   generateToken,
   hashToken,
   tokenHint,
   sanitizeScopes,
   createToken,
+  provisionToken,
   listTokens,
   revokeToken,
   resolveScopedToken,

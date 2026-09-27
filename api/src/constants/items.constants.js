@@ -96,6 +96,9 @@ const FIELD_LIMITS = {
   SKU_MAX: 100,
   BARCODE_MAX: 100,
   DESCRIPTION_MAX: 2000,
+  /* One primary image plus seven more. The item screen shows eight, and a
+     website mirroring the catalogue mirrors what the shop can see. */
+  IMAGES_MAX: 8,
 };
 
 module.exports = {

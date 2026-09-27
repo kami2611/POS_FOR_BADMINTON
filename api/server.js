@@ -120,6 +120,23 @@ const startServer = async () => {
         /* A shop still takes orders without it. Never fatal at boot. */
         console.warn('[unanswered-orders] not started:', e && e.message);
       }
+
+      /*
+       * CHANGE SIGNALS LEAVING THE BUILDING BY THEMSELVES.
+       *
+       * Webhook retries used to drain only when somebody used the till, so a
+       * shop that edited its catalogue and then closed for the night left its
+       * website stale - and nothing on either side looked broken. Runs beside
+       * the other boot timers; see src/realtime/scheduler.js for what it does
+       * and, more importantly, what it deliberately does not.
+       */
+      try {
+        require('./src/realtime/scheduler').start();
+        console.log('✅ Webhook delivery scheduler running');
+      } catch (e) {
+        /* A shop still sells without it. Never fatal at boot. */
+        console.warn('[webhooks] scheduler not started:', e && e.message);
+      }
     });
 
     // Handle unhandled promise rejections

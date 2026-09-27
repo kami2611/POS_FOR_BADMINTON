@@ -107,4 +107,70 @@ describe('tenant context', () => {
 
     await expect(attachTenantContext(req, user)).rejects.toBeInstanceOf(TenantContextError);
   });
+
+  /*
+   * A scoped integration token is not a person (found by the end-to-end run).
+   *
+   * resolveScopedToken shapes its principal like a lean user document, but its
+   * `_id` is the TOKEN row's id - and there is no such row in `users`. The
+   * persisted-user check therefore refused every request made with one, so the
+   * API's own documented authentication for /api/v1
+   * ("Authenticate with a scoped API token via the Authorization: Bearer
+   * header") answered "The selected branch is not available for the current
+   * user and license" to every call. A website could not read a catalogue at
+   * all.
+   *
+   * The check still has to mean something, so what replaces it is the branch
+   * lookup: a token whose branch does not exist, or belongs to another licence,
+   * is refused exactly as before.
+   */
+  test('accepts a scoped token, whose id belongs to no user row', async () => {
+    const db = makeDb({ user: false });
+    mongoose.connection.db = db;
+    const req = { body: {}, query: {}, headers: {} };
+    const principal = {
+      _id: USER, // the token row's id, not a person's
+      id: USER,
+      usertype: 'api',
+      api_token: true,
+      license: LICENSE,
+      branch_access: [{ branch_id: BRANCH }],
+      access: { item: { read: true } },
+    };
+
+    const context = await attachTenantContext(req, principal);
+
+    expect(context.branchId.toString()).toBe(BRANCH);
+    expect(context.licenseId.toString()).toBe(LICENSE);
+    expect(context.branchName).toBe('Main Branch');
+    // The check is genuinely skipped, not merely tolerated: nothing looked for
+    // a user at all.
+    expect(db.collection.mock.calls.map(([name]) => name)).not.toContain('users');
+  });
+
+  test('a scoped token is still refused when its branch does not exist', async () => {
+    mongoose.connection.db = makeDb({ branch: false });
+    const req = { body: {}, query: {}, headers: {} };
+    const principal = {
+      _id: USER,
+      api_token: true,
+      license: LICENSE,
+      branch_access: [{ branch_id: BRANCH }],
+    };
+
+    await expect(attachTenantContext(req, principal)).rejects.toBeInstanceOf(TenantContextError);
+  });
+
+  test('a token with no branch access gets no tenant at all', async () => {
+    mongoose.connection.db = makeDb();
+    const req = { body: {}, query: {}, headers: {} };
+    const principal = { _id: USER, api_token: true, license: LICENSE, branch_access: [] };
+
+    /* No branch to validate means no tenant context - and a request with no
+       tenant has no database attached, so /api/v1 answers `503 no_tenant`.
+       Refused, by a different door: this is not the token path being waved
+       through, and asserting the null is what keeps that distinction visible. */
+    await expect(attachTenantContext(req, principal)).resolves.toBe(null);
+    expect(req.tenantContext).toBe(null);
+  });
 });

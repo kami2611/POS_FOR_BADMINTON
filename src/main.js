@@ -134,6 +134,7 @@ const { OrderAlert } = require('./order-alert');
    of them has the speaker. See src/kitchen-announce.js. */
 const kitchenAnnounce = require('./kitchen-announce');
 const SyncAgentManager = require('./sync-agent-manager');
+const { ShuttlezoneTunnel } = require('./shuttlezone-tunnel');
 const { cloudServerUrl, validateActivation } = require('./cloud-activation');
 const { AssetUpdater } = require('./asset-updater');
 
@@ -546,6 +547,12 @@ let backupWindow;
 let mongoDBManager;
 let syncAgentManager = null;
 let connectorSupervisor = null;
+/*
+ * The pairing values this installer was built with, and the tunnel that makes
+ * the shop reachable if it was built with one. Both are null for a stock build.
+ */
+let pairingSeed = null;
+let shuttlezoneTunnel = null;
 let pendingSecondInstanceFocus = false;
 let shutdownInProgress = false;
 /*
@@ -818,6 +825,14 @@ function shutdownSteps() {
       says:  'Stopping connectors...',
       ms:    SHUTDOWN_TIMEOUTS.backupScheduler,
       run:   () => { if (connectorSupervisor) connectorSupervisor.stopAll(); },
+    },
+    {
+      /* Nothing to flush and nothing to save, but a cloudflared left running
+         would hold the public hostname pointed at a till that has gone away. */
+      label: 'Website tunnel',
+      says:  'Closing the website connection...',
+      ms:    SHUTDOWN_TIMEOUTS.backupScheduler,
+      run:   () => { if (shuttlezoneTunnel) shuttlezoneTunnel.stop(); },
     },
     {
       label: 'API server',
@@ -5098,6 +5113,79 @@ function getLocalSecrets() {
   return secrets;
 }
 
+/*
+ * The ShuttleZone pairing values, when this installer was built for one shop.
+ *
+ * The API reads three things from its environment for that integration
+ * (api/src/realtime/webhooks.js): the webhook URL to call, the secret to sign
+ * with, and which entities to send. On a packaged build THIS process is what
+ * sets the API's environment - so this is the only place an operator's values
+ * can enter, and the values cannot live in the API's own .env because
+ * packaging deliberately excludes it.
+ *
+ * They arrive the same way a white-label brand does: a file dropped into
+ * `builds/shuttlezone-seed/` before packaging, copied to
+ * `resources/shuttlezone-seed/`. Absent is the normal case for a stock build -
+ * no file, so no subscription is provisioned and the till is an ordinary
+ * Posnic.
+ *
+ * An environment variable that is already set always wins, so support can
+ * point one machine at a different website without rebuilding its installer.
+ *
+ * Never fatal: an unreadable seed means a till that is not paired, not a till
+ * that will not start.
+ */
+function applyShuttlezonePairing() {
+  try {
+    const seedFile = app.isPackaged
+      ? path.join(process.resourcesPath, 'shuttlezone-seed', 'shuttlezone.json')
+      : path.join(__dirname, '..', 'builds', 'shuttlezone-seed', 'shuttlezone.json');
+    if (!fs.existsSync(seedFile)) return null;
+
+    const seed = JSON.parse(fs.readFileSync(seedFile, 'utf8'));
+    const wanted = {
+      SHUTTLEZONE_WEBHOOK_URL: seed.webhookUrl,
+      SHUTTLEZONE_WEBHOOK_SECRET: seed.webhookSecret,
+      // Written as an array in the file and read as a list by the API; the
+      // comma string is the form its own configuration documents.
+      SHUTTLEZONE_WEBHOOK_EVENTS: Array.isArray(seed.events)
+        ? seed.events.join(',')
+        : seed.events,
+      /*
+       * What the website reads the catalogue WITH.
+       *
+       * The other direction from the webhook secret: this value is chosen by
+       * whoever built the installer, given to the website as it is being
+       * paired, and handed to the API here so it can be turned into a real
+       * scoped token once the shop has a licence and a branch to bind it to.
+       * The API never sends it anywhere - it hashes it and keeps the hash, the
+       * same as for a token somebody clicked.
+       */
+      SHUTTLEZONE_API_TOKEN: seed.apiToken,
+    };
+
+    let applied = 0;
+    for (const name of Object.keys(wanted)) {
+      const value = wanted[name];
+      if (!value) continue;
+      if (process.env[name]) continue; // an explicit value wins over the seed
+      process.env[name] = String(value);
+      applied += 1;
+    }
+    if (applied > 0) {
+      console.log(
+        `[shuttlezone] pairing seed applied (${applied} value${applied === 1 ? '' : 's'})` +
+          (seed.seller ? ` for ${seed.seller}` : ''),
+      );
+    }
+    /** @type {object} returned so the shell can start the tunnel from it */
+    return seed;
+  } catch (e) {
+    console.warn('[shuttlezone] could not read the pairing seed:', e && e.message);
+    return null;
+  }
+}
+
 function startServer() {
   // process.env.PORT already holds the port resolveLocalPorts derived and wrote
   // to .ports.json. It used to be overwritten here with a constant captured at
@@ -5138,6 +5226,8 @@ function startServer() {
   // before the API reads it, so the very first page load is already branded.
   seedBrandFromBuild();
   process.env.POSNIC_BRAND_DIR = BRAND_DIR;
+
+  pairingSeed = applyShuttlezonePairing();
 
   /*
    * Record urgent sync work as it happens.
@@ -5337,6 +5427,39 @@ function startServer() {
         );
       } catch (syncErr) {
         console.warn('[SyncAgent] failed to start:', syncErr.message);
+      }
+
+      /*
+       * The tunnel, if this installer was built for a shop with a website.
+       *
+       * Started here, after the API is listening, because its configuration
+       * names the port the API actually bound - and the tunnel is useless
+       * before there is something to forward to. A stock build has no seed, so
+       * there is nothing to start and this is skipped entirely.
+       *
+       * The status is written to the health file rather than shown: from the
+       * shop's side a dead tunnel and a working one look identical (the till
+       * is fine, the website is quietly stale), so it belongs where support
+       * looks and not in the shopkeeper's way.
+       */
+      try {
+        if (pairingSeed) {
+          shuttlezoneTunnel = new ShuttlezoneTunnel({
+            app,
+            seed: pairingSeed,
+            apiPort: () => apiPort(),
+            onStatus: (status) => updateHealthStatus({ shuttlezoneTunnel: status }),
+          });
+          Promise.resolve(shuttlezoneTunnel.start())
+            .then((result) => {
+              if (!result.ok && result.reason !== 'not_configured') {
+                console.warn('[shuttlezone-tunnel] not started:', result.reason);
+              }
+            })
+            .catch((e) => console.warn('[shuttlezone-tunnel] failed to start:', e.message));
+        }
+      } catch (tunnelErr) {
+        console.warn('[shuttlezone-tunnel] failed to start:', tunnelErr.message);
       }
 
       /*

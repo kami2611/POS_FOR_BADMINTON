@@ -31,6 +31,18 @@ A till on a shop LAN behind NAT needs a reverse proxy or a tunnel; the webhook
 endpoint itself must be HTTPS too (plain `http` is accepted only for
 `localhost` / `127.0.0.1`, for local development).
 
+A **paired build supplies the tunnel itself**, which is why a shop that is
+paired needs no router configuration. It runs `cloudflared` as a child process
+and writes its own config at every launch, so the tunnel always points at the
+port the API actually bound — the API asks for 5555 and moves to a derived port
+when that is taken.
+
+The tunnel's ingress is deliberately narrow: **`/api/v1/*` and `/uploads/*`
+only**, with a catch-all that answers 404. The management API — `/api-tokens`,
+`/items`, `/settings` — is therefore not reachable from the public internet even
+when the tunnel is up. Product images are served from `/uploads` as static files
+and need no token; that is why the website can mirror them with a bare GET.
+
 ---
 
 ## 1. In the POS: a token, then a webhook
@@ -39,12 +51,30 @@ Both live under **Settings → Integrations**. The signed-in user needs
 `branch: write` for either — a token is a standing credential for the whole
 shop, and a webhook address decides where the shop's change signals go.
 
+> **If this till was shipped already paired**, both halves may already be here
+> and are marked as such: the token is named `ShuttleZone website` and the
+> webhook is read-only, because the operator decided them before the installer
+> was built. Nothing below needs doing by hand in that case — and that is the
+> point of the arrangement. Read on only for a self-managed setup, or to
+> understand what those rows are.
+>
+> A paired build also ships a tunnel client, so the shop is reachable without
+> anyone configuring a router. The rest of this document assumes you are
+> managing both halves yourself, which is the general case.
+
 ### The token (what your website reads with)
 
 1. **API tokens → new token.** Name it after the website (`shop-website`).
 2. Grant exactly one scope: **`item: read`**. Add **`category: read`** only if
    you also want the category records.
 3. Copy the token. It is shown **once**; only its SHA-256 hash is stored.
+
+A provisioned token is minted the same way and stored the same way — same hash,
+same scope whitelist. The only difference is where the value came from: an
+installer decides it in advance so the website can be told the same string
+before the shop exists. If a paired build is ever re-issued with a new value,
+the old token is revoked in the same step, so the superseded credential stops
+working rather than lingering as a second way in.
 
 ### The webhook (what wakes your website up)
 

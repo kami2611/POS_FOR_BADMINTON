@@ -54,7 +54,24 @@ function changeEvents(req, res, next) {
             /* Same signal, outward: registered webhook endpoints hear what
                the shop's own tills hear. Fire-and-forget both halves. */
             const webhooks = require('./webhooks');
-            webhooks.publish(req.db, req.db.databaseName, event).catch(() => {});
+            /*
+             * Named, so the receiver can verify the sender.
+             *
+             * seller_id is the licence: it already scopes every document in
+             * this shop's database, so it is stable across reinstalls and is
+             * the same value /api/v1/shop hands out when a website pairs with
+             * the install. seller_name is the shop's own display name, read
+             * from the request context rather than looked up, because this runs
+             * on the response path of every write in the shop.
+             */
+            const tenant = req.tenantContext || {};
+            webhooks
+              .publish(req.db, req.db.databaseName, {
+                ...event,
+                seller_id: tenant.licenseId || (req.user && req.user.license) || '',
+                seller_name: tenant.branchName || '',
+              })
+              .catch(() => {});
             webhooks.drainDue(req.db, req.db.databaseName).catch(() => {});
             /* Stock moved? Maybe tell subscribed devices the shop is running
                low. Throttled hard inside; fire-and-forget like the rest. */

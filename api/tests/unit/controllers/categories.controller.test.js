@@ -886,6 +886,9 @@ describe('getCategoryAjaxList', () => {
       discount_amount: 5,
       discount_percentage: 0,
       description: 'Tasty',
+      /* Null means a top-level category. The item form builds its
+         sub-category picker from these ids. */
+      parent_id: null,
     });
   });
 });

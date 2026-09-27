@@ -44,6 +44,7 @@ const {
   ITEM_STATUS,
   SUCCESS_MESSAGES,
   ERROR_MESSAGES,
+  FIELD_LIMITS,
 } = require('../constants/items.constants');
 
 /* One definition of "not deleted", shared by every item query. It used to
@@ -1865,7 +1866,6 @@ class ItemRepository extends BaseModel {
         image: (data.cover_image || '').trim(),
         multi_image: multiImage,
         sort_order: parseInt(data.position, 10) || 0,
-        description: (data.description || '').trim(),
         track_inventory: Boolean(data.inventory),
         ecommerce: Boolean(data.ecommerce),
         /* Absent means shown. A menu whose default is "hidden" starts empty
@@ -2011,6 +2011,45 @@ class ItemRepository extends BaseModel {
       }
 
       /*
+       * The item's description, presence-gated.
+       *
+       * It used to be written unconditionally, from `data.description || ''`,
+       * in the shared literal above - which meant every save that did not
+       * carry the key ERASED it. The till has several such saves: the sale
+       * screen's inline edit sends only the field it is patching, the bulk
+       * price and stock screens send a subset, the mobile client sends what
+       * its screen holds, and an import deliberately omits columns the file
+       * does not carry. A shop that typed a description once must not lose it
+       * to an unrelated price change - and to a customer reading the product
+       * page, a vanished description is indistinguishable from one that was
+       * never written.
+       *
+       * So it follows the rule the rest of this block already follows: sent
+       * (even empty) sets, omitted changes nothing. The item form always sends
+       * the field, so clearing a description still works exactly as before.
+       * The cap is the validator's own, so the two cannot disagree.
+       */
+      if (data.description !== undefined) {
+        updateData.description = String(data.description || '')
+          .trim()
+          .slice(0, FIELD_LIMITS.DESCRIPTION_MAX);
+      }
+
+      /*
+       * The taxonomy's second level, by name.
+       *
+       * Presence-gated like everything else in this block: an edit that does
+       * not carry the leaf leaves the item where it was filed. That matters
+       * more here than elsewhere, because the alternative is not a blank field
+       * but a product quietly dropping off the shelf it was arranged on.
+       */
+      if (data.sub_category !== undefined) {
+        updateData.sub_category = String(data.sub_category || '')
+          .trim()
+          .slice(0, 100);
+      }
+
+      /*
        * Lightspeed study LS1 trio, all presence-gated: brand (a name, for
        * filtering and the future community catalog), tags (free keywords),
        * reorder_point (this item's own low-stock threshold - overrides the
@@ -2098,9 +2137,16 @@ class ItemRepository extends BaseModel {
       }
 
       if (!id) {
-        // Insert new item
+        /*
+         * A new item always carries the description key, even when the caller
+         * sent none: the item screen and the legacy reports test
+         * `description !== ''`, so an absent field would print the word
+         * "undefined" on the details pane. Only the WRITE rule above is
+         * presence-gated - the shape of a new document is not.
+         */
         const insertData = {
           ...updateData,
+          description: updateData.description || '',
           created_date: now,
           created_by: loggedUserName || 'System',
           created_by_id: loggedUserId || null,

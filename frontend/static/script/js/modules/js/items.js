@@ -947,6 +947,10 @@ PosnicPro.items = {
                beside it already had a length check. Category is optional, so an
                item saved without one threw here. */
             category_name: PosnicPro.items.selectAttr('#items_category', 'data-category-name'),
+            /* The taxonomy's second level, by name, sent ALWAYS - an empty
+               value is how a leaf is cleared, and the server keeps the stored
+               one when the key is absent. */
+            sub_category: $('#items_sub_category').val() || '',
             cover_image: $('#item_logo').val(),
             inventory: $('#item_track_inventory').is(':checked'),
             ecommerce: $('#item_ecommerce').is(':checked'),
@@ -1232,6 +1236,7 @@ PosnicPro.items = {
                     supplier_name: $('#items_supplier').val(),
                     category_id: PosnicPro.items.selectAttr('#items_category', 'data-category-id'),
                     category_name: PosnicPro.items.selectAttr('#items_category', 'data-category-name'),
+                    sub_category: $('#items_sub_category').val() || '',
                     cover_image: $('#item_logo').val(),
                     inventory: $('#item_track_inventory').is(':checked'),
                     ecommerce: $('#item_ecommerce').is(':checked'),
@@ -1751,6 +1756,9 @@ PosnicPro.items = {
                    back rather than letting an edit silently clear the field. */
                 PosnicPro.items.loadSelectSupplier(data.supplier_id, data.supplier_name);
                 $("#items_category").val(data.category_id).trigger("change");
+                /* AFTER the category, deliberately: changing it rebuilds the
+                   sub-category picker, so setting this first would be wiped. */
+                PosnicPro.items.loadSelectSubCategories(data.category_id, data.sub_category || '');
                 $('#items_discount_amount').val(data.discount_amount);
                 $('#items_discount_percentage').val(data.discount_percentage);
                 $('#items_mrp_price').val(data.mrp_price);
@@ -2619,6 +2627,8 @@ PosnicPro.items = {
                    back rather than letting an edit silently clear the field. */
                 PosnicPro.items.loadSelectSupplier(data.supplier_id, data.supplier_name);
                 $("#items_category").val(data.category_id).trigger("change");
+                /* AFTER the category - see the other edit-fill path. */
+                PosnicPro.items.loadSelectSubCategories(data.category_id, data.sub_category || '');
                 $('#items_discount_amount').val(data.discount_amount);
                 $('#items_discount_percentage').val(data.discount_percentage);
                 $('#items_mrp_price').val(data.mrp_price);
@@ -3883,14 +3893,79 @@ PosnicPro.items = {
             });
             categorySelect.append(options);
             categorySelect.select2({ placeholder: "Choose a Category" });
+
+            /*
+             * The second level, indexed from the SAME response.
+             *
+             * parent_id is null for a top-level category and an id otherwise,
+             * so this is the whole tree in one pass - no second request, and
+             * no chance of the two lists disagreeing about which leaves belong
+             * to which parent.
+             */
+            var leaves = {};
+            $.each(response.suggestions || [], function (i, cat) {
+                if (!cat.parent_id) { return; }
+                var key = String(cat.parent_id);
+                if (!leaves[key]) { leaves[key] = []; }
+                leaves[key].push(cat.name);
+            });
+            PosnicPro.items._subCategoryLeaves = leaves;
+
+            /* .off(...) first: this loader can run again (a failed save, a
+               re-opened form) and stacking handlers would rebuild the picker
+               several times per change. */
+            categorySelect.off('change.itemsSub').on('change.itemsSub', function () {
+                PosnicPro.items.loadSelectSubCategories($(this).val(), '');
+            });
+
             /* AFTER init - firing change.select2 at a select that is not a
                select2 yet is the other half of the same crash. */
             categorySelect.val('').trigger('change.select2');
+            PosnicPro.items.loadSelectSubCategories('', '');
         }, function (xhr) {
             var response = jQuery.parseJSON(xhr.responseText);
             PosnicPro.alert(response.type, response.message);
         });
     },
+
+    /* Which leaves belong to which parent, keyed by parent id. Filled by
+       loadSelectCategory from the same response that built the category list. */
+    _subCategoryLeaves: {},
+
+    /*
+     * Fill the sub-category picker for one category.
+     *
+     * The VALUE is the leaf's name, not its id, because that is what an item
+     * stores (sub_category), exactly as category_name sits beside category_id.
+     * A name survives a category being renamed or re-created; an id does not
+     * survive either being deleted.
+     *
+     * `selectedLeaf` is kept selectable even when the list we hold does not
+     * carry it: the category list loads asynchronously and an edit can be
+     * filled before it arrives, and opening an item must never silently move
+     * it off the shelf it was arranged on.
+     */
+    loadSelectSubCategories: function (parentId, selectedLeaf) {
+        var $sub = $('#items_sub_category');
+        if (!$sub.length) { return; }
+        var leaves = ((parentId && PosnicPro.items._subCategoryLeaves[String(parentId)]) || []).slice();
+        var wanted = String(selectedLeaf || '');
+        if (wanted && leaves.indexOf(wanted) < 0) { leaves.push(wanted); }
+
+        if ($sub.hasClass('select2-hidden-accessible')) { $sub.select2('destroy'); }
+        $sub.empty().append('<option value=""></option>');
+        $.each(leaves, function (i, name) {
+            $sub.append($('<option>').attr('value', name).text(name));
+        });
+        $sub.select2({
+            placeholder: leaves.length
+                ? PosnicPro.i18n.t('lang_choose_a_sub_category', 'Choose a Sub Category')
+                : PosnicPro.i18n.t('lang_no_sub_categories_here', 'No sub-categories in this category'),
+            allowClear: true
+        });
+        $sub.val(wanted).trigger('change.select2');
+    },
+
     loadSelectVariant: function () {
 
         var variantSelect = $('#items_variant');

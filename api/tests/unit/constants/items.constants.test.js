@@ -101,6 +101,10 @@ describe('items.constants', () => {
       SKU_MAX: 100,
       BARCODE_MAX: 100,
       DESCRIPTION_MAX: 2000,
+      /* One primary image plus seven more: the item screen shows eight, and the
+         website mirrors what the shop can see. Named rather than counted, so a
+         cap that quietly changes is a red test rather than a surprise. */
+      IMAGES_MAX: 8,
     });
   });
 });

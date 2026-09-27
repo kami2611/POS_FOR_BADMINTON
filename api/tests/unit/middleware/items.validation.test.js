@@ -6,6 +6,7 @@ jest.mock('../../../src/constants/items.constants', () => ({
     NAME_MAX: 50,
     BARCODE_MAX: 30,
     DESCRIPTION_MAX: 200,
+    IMAGES_MAX: 8,
   },
   ERROR_MESSAGES: {
     ITEM_NAME_REQUIRED: 'name required',
@@ -41,6 +42,8 @@ jest.mock('express-validator', () => {
     bail: jest.fn().mockReturnThis(),
     custom: jest.fn().mockReturnThis(),
     exists: jest.fn().mockReturnThis(),
+    /* `.if()` arrived with the required-price/stock/image rules. */
+    if: jest.fn().mockReturnThis(),
   });
   return { body: jest.fn(() => chain()), param: jest.fn(() => chain()) };
 });

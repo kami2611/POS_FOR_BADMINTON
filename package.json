@@ -18,6 +18,10 @@
     "prepare:bundle": "node scripts/enable-installer-extraction-details.js && npm run prepare:vc-runtime && npm run prepare:frontend && npm run prepare:api-runtime && npm run prepare:sync-agent",
     "prebuild": "npm run clear:brand-seed && npm run check:mongodb && npm run prepare:bundle",
     "build": "electron-builder --win --x64",
+    "prebuild:paired": "npm run check:pairing && npm run check:mongodb && npm run prepare:bundle",
+    "build:paired": "electron-builder --win --x64",
+    "check:pairing": "node scripts/verify-pairing.js",
+    "fetch:cloudflared": "node scripts/fetch-cloudflared.js --win",
     "prebuild:fast": "npm run clear:brand-seed && npm run check:mongodb && npm run prepare:bundle",
     "build:fast": "electron-builder --win --x64 --dir",
     "prebuild:quick": "npm run clear:brand-seed && npm run check:mongodb && npm run prepare:bundle",
@@ -195,6 +199,20 @@
       "src/pin-lock-ipc.js"
     ],
     "extraResources": [
+      {
+        "from": "builds/shuttlezone-seed",
+        "to": "shuttlezone-seed",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "builds/cloudflared",
+        "to": "cloudflared",
+        "filter": [
+          "**/*"
+        ]
+      },
       {
         "from": "builds/app.ico",
         "to": "app.ico"

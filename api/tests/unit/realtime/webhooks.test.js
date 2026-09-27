@@ -80,6 +80,77 @@ afterEach(() => {
   global.fetch = realFetch;
 });
 
+/*
+ * The wire contract, pinned.
+ *
+ * A receiver on the other side of the internet verifies the signature over the
+ * RAW body and routes on these exact header names. Renaming a header or
+ * reshaping the body is a one-line change here and a total outage there, with
+ * no shared compiler to catch it - so the shapes are asserted, not assumed.
+ */
+describe('the wire contract', () => {
+  test('one request carries exactly what a receiver was promised', async () => {
+    const db = fakeDb();
+    const added = await wh.addSubscription(db, {
+      url: 'https://example.com/hook',
+      events: ['items'],
+    });
+    const seen = [];
+    global.fetch = jest.fn(async (url, init) => {
+      seen.push({ url, init });
+      return { status: 202 };
+    });
+
+    await wh.publish(db, 'shop_ab12', {
+      entity: 'items',
+      at: '2026-09-27T09:14:03.221Z',
+      seller_id: 'lic_1',
+      seller_name: 'Kamran Sports',
+    });
+    await flush();
+
+    const { url, init } = seen[0];
+    expect(url).toBe('https://example.com/hook');
+    expect(init.method).toBe('POST');
+    expect(init.headers['content-type']).toBe('application/json');
+
+    /* The body, exactly. It carries no business data at all - the receiver
+       fetches with its own scoped credentials, so a leaked webhook secret
+       alone leaks nothing. That is deliberate, and it is load-bearing. */
+    expect(JSON.parse(init.body)).toEqual({
+      event: 'change',
+      entity: 'items',
+      at: '2026-09-27T09:14:03.221Z',
+      shop: 'shop_ab12',
+      seller_id: 'lic_1',
+      seller_name: 'Kamran Sports',
+    });
+
+    expect(init.headers['x-posnic-event']).toBe('change');
+    expect(init.headers['x-posnic-delivery']).toBe(
+      String(db.collection(wh.DELIVERIES).rows[0]._id)
+    );
+    /* HMAC-SHA256 over the exact bytes sent, prefixed `sha256=`. */
+    expect(init.headers['x-posnic-signature']).toBe(
+      'sha256=' + crypto.createHmac('sha256', added.secret).update(init.body).digest('hex')
+    );
+  });
+
+  test('a receiver only ever gets https, or loopback for development', () => {
+    expect(wh.urlAllowed('https://shuttlezone.app/api/pos/webhook/k')).toBe(true);
+    expect(wh.urlAllowed('http://shuttlezone.app/api/pos/webhook/k')).toBe(false);
+    expect(wh.urlAllowed('http://127.0.0.1:3000/api/pos/webhook/k')).toBe(true);
+    expect(wh.urlAllowed('http://localhost:3000/api/pos/webhook/k')).toBe(true);
+    expect(wh.urlAllowed('ftp://example.com')).toBe(false);
+  });
+
+  test('the retry ladder is what the docs say it is', () => {
+    /* 1m, 5m, 25m, ~2h, ~10h, then dead. A receiver that goes down for an
+       hour must expect a retry after it comes back, not a hole. */
+    expect(wh.MAX_ATTEMPTS).toBe(5);
+  });
+});
+
 describe('urlAllowed', () => {
   test('https yes, plain http no, loopback http yes (dev)', () => {
     expect(wh.urlAllowed('https://hooks.example.com/x')).toBe(true);
@@ -141,7 +212,43 @@ describe('publish', () => {
       entity: 'sales',
       at: 'T',
       shop: 'shop_one',
+      /* Always present, even when the publisher did not know them: a receiver
+         can assert on the shape. */
+      seller_id: '',
+      seller_name: '',
     });
+  });
+
+  test('the body names the shop that sent it', async () => {
+    const db = fakeDb();
+    await wh.addSubscription(db, { url: 'https://example.com/hook', events: ['items'] });
+    const seen = [];
+    global.fetch = jest.fn(async (url, init) => {
+      seen.push({ url, init });
+      return { status: 200 };
+    });
+
+    await wh.publish(db, 'shop_one', {
+      entity: 'items',
+      at: 'T',
+      seller_id: 'lic_123',
+      seller_name: 'Kamran Sports',
+    });
+    await flush();
+
+    const body = JSON.parse(seen[0].init.body);
+    expect(body.seller_id).toBe('lic_123');
+    expect(body.seller_name).toBe('Kamran Sports');
+    expect(body.shop).toBe('shop_one');
+    // The signature covers the whole body, so these fields are authenticated
+    // like everything else rather than trusted.
+    expect(seen[0].init.headers['x-posnic-signature']).toBe(
+      'sha256=' +
+        crypto
+          .createHmac('sha256', db.collection(wh.SUBS).rows[0].secret)
+          .update(seen[0].init.body)
+          .digest('hex')
+    );
   });
 
   test('only subscriptions listening to the entity fire', async () => {
@@ -306,5 +413,191 @@ describe('retry and dead-letter contract (#75, parent #34)', () => {
     expect(row.deadLetteredAt).toBeInstanceOf(Date);
     expect(row.payload).toEqual({ event: 'change', entity: 'sales' });
     expect(row).not.toHaveProperty('lastError');
+  });
+});
+
+/*
+ * The provisioned ShuttleZone subscription.
+ *
+ * What must hold: the INJECTED secret is used and never replaced by a minted
+ * one (a secret generated on this machine is one the website can never verify);
+ * the row is marked so the shop cannot remove it; drift of every kind is
+ * repaired rather than tolerated; and a hand-added row for the same endpoint is
+ * adopted instead of duplicated.
+ */
+const SHZ = {
+  SHUTTLEZONE_WEBHOOK_URL: 'https://shuttlezone.app/api/pos/webhook/key_abc',
+  SHUTTLEZONE_WEBHOOK_SECRET: 'secret-from-the-website',
+  SHUTTLEZONE_WEBHOOK_EVENTS: 'items,categories,sales,receivings',
+};
+const quiet = { warn: () => {}, error: () => {}, log: () => {} };
+
+describe('ensureProvisionedSubscription', () => {
+  test('does nothing at all when this build was not provisioned', async () => {
+    const db = fakeDb();
+    const r = await wh.ensureProvisionedSubscription(db, { env: {}, log: quiet });
+    expect(r).toEqual({ ok: false, reason: 'not_configured' });
+    expect(db.collection(wh.SUBS).rows).toHaveLength(0);
+  });
+
+  test('inserts the row with the injected secret, never a generated one', async () => {
+    const db = fakeDb();
+    const r = await wh.ensureProvisionedSubscription(db, { env: SHZ, log: quiet });
+    expect(r).toEqual({ ok: true, action: 'created' });
+    const row = db.collection(wh.SUBS).rows[0];
+    expect(row.secret).toBe('secret-from-the-website');
+    expect(row.url).toBe(SHZ.SHUTTLEZONE_WEBHOOK_URL);
+    expect(row.events).toEqual(['items', 'categories', 'sales', 'receivings']);
+    expect(row.active).toBe(true);
+    expect(row.locked).toBe(true);
+    expect(row.provider).toBe(wh.PROVIDER);
+  });
+
+  test('config: events default, and junk is not honoured', async () => {
+    expect(
+      wh.provisionedConfig({ SHUTTLEZONE_WEBHOOK_URL: 'u', SHUTTLEZONE_WEBHOOK_SECRET: 's' }).events
+    ).toEqual(['items', 'categories', 'sales', 'receivings']);
+    expect(
+      wh.provisionedConfig({
+        SHUTTLEZONE_WEBHOOK_URL: 'u',
+        SHUTTLEZONE_WEBHOOK_SECRET: 's',
+        SHUTTLEZONE_WEBHOOK_EVENTS: 'items,  SALES ,,;drop',
+      }).events
+    ).toEqual(['items', 'sales']);
+  });
+
+  test('a plain http endpoint is refused outright', async () => {
+    const db = fakeDb();
+    const r = await wh.ensureProvisionedSubscription(db, {
+      env: { ...SHZ, SHUTTLEZONE_WEBHOOK_URL: 'http://shuttlezone.app/hook' },
+      log: quiet,
+    });
+    expect(r.ok).toBe(false);
+    expect(db.collection(wh.SUBS).rows).toHaveLength(0);
+  });
+
+  test('is idempotent: the second call is a no-op, not a second row', async () => {
+    const db = fakeDb();
+    await wh.ensureProvisionedSubscription(db, { env: SHZ, log: quiet });
+    const again = await wh.ensureProvisionedSubscription(db, { env: SHZ, log: quiet });
+    expect(again).toEqual({ ok: true, action: 'ok' });
+    expect(db.collection(wh.SUBS).rows).toHaveLength(1);
+  });
+
+  test('repairs every kind of drift - the DB reset, the restore, the hand edit', async () => {
+    const db = fakeDb();
+    await wh.ensureProvisionedSubscription(db, { env: SHZ, log: quiet });
+    const row = db.collection(wh.SUBS).rows[0];
+
+    row.active = false;
+    row.url = 'https://somewhere.else/hook';
+    row.events = ['sales'];
+    row.locked = false;
+    row.secret = 'a-secret-somebody-else-made-up';
+
+    const r = await wh.ensureProvisionedSubscription(db, { env: SHZ, log: quiet });
+    expect(r.ok).toBe(true);
+    expect(r.action).toBe('repaired');
+    expect(r.fields.sort()).toEqual(['active', 'events', 'locked', 'secret', 'url']);
+    expect(row).toMatchObject({
+      active: true,
+      url: SHZ.SHUTTLEZONE_WEBHOOK_URL,
+      events: ['items', 'categories', 'sales', 'receivings'],
+      locked: true,
+      provider: wh.PROVIDER,
+      // The website holds this value; anything else makes every delivery 401.
+      secret: 'secret-from-the-website',
+    });
+    // Still one row - repaired in place, not replaced.
+    expect(db.collection(wh.SUBS).rows).toHaveLength(1);
+  });
+
+  test('a row stripped of every marker is unidentifiable, so a correct one is made', async () => {
+    const db = fakeDb();
+    await wh.ensureProvisionedSubscription(db, { env: SHZ, log: quiet });
+    const row = db.collection(wh.SUBS).rows[0];
+    /* Nothing left to recognise it by: no marker, and not the endpoint we
+       call. It cannot be assumed to be ours, and leaving the shop without a
+       working feed while we guess is the worse error - so a correct row is
+       added beside it. */
+    delete row.provider;
+    row.url = 'https://not-ours.example.com/hook';
+
+    const r = await wh.ensureProvisionedSubscription(db, { env: SHZ, log: quiet });
+    expect(r.action).toBe('created');
+    const rows = db.collection(wh.SUBS).rows;
+    expect(rows).toHaveLength(2);
+    const ours = rows.find((x) => x.provider === wh.PROVIDER);
+    expect(ours).toMatchObject({
+      url: SHZ.SHUTTLEZONE_WEBHOOK_URL,
+      locked: true,
+      secret: 'secret-from-the-website',
+    });
+  });
+
+  test('event order is not drift', async () => {
+    const db = fakeDb();
+    await wh.ensureProvisionedSubscription(db, { env: SHZ, log: quiet });
+    const row = db.collection(wh.SUBS).rows[0];
+    row.events = ['receivings', 'sales', 'categories', 'items'];
+    const r = await wh.ensureProvisionedSubscription(db, { env: SHZ, log: quiet });
+    expect(r.action).toBe('ok');
+  });
+
+  test('a row somebody added by hand for the same endpoint is adopted, not duplicated', async () => {
+    const db = fakeDb();
+    await db.collection(wh.SUBS).insertOne({
+      url: SHZ.SHUTTLEZONE_WEBHOOK_URL,
+      secret: 'typed-by-hand',
+      events: ['items'],
+      active: true,
+      description: '',
+      createdAt: new Date(),
+    });
+
+    await wh.ensureProvisionedSubscription(db, { env: SHZ, log: quiet });
+
+    expect(db.collection(wh.SUBS).rows).toHaveLength(1);
+    expect(db.collection(wh.SUBS).rows[0]).toMatchObject({
+      locked: true,
+      provider: wh.PROVIDER,
+      events: ['items', 'categories', 'sales', 'receivings'],
+    });
+  });
+
+  test('the locked row cannot be deleted, and a shop-created one still can', async () => {
+    const db = fakeDb();
+    await wh.ensureProvisionedSubscription(db, { env: SHZ, log: quiet });
+    const locked = db.collection(wh.SUBS).rows[0];
+
+    expect(await wh.removeSubscription(db, String(locked._id))).toEqual({
+      ok: false,
+      reason: 'locked',
+    });
+    expect(db.collection(wh.SUBS).rows).toHaveLength(1);
+
+    const own = await wh.addSubscription(db, {
+      url: 'https://shop.example.com/hook',
+      events: ['sales'],
+    });
+    expect(own.ok).toBe(true);
+    expect((await wh.removeSubscription(db, String(own.id))).ok).toBe(true);
+    expect(db.collection(wh.SUBS).rows).toHaveLength(1);
+    expect(db.collection(wh.SUBS).rows[0].locked).toBe(true);
+  });
+
+  test('a locked row still receives its events, and a disabled one does not', async () => {
+    const db = fakeDb();
+    await wh.ensureProvisionedSubscription(db, { env: SHZ, log: quiet });
+    const row = db.collection(wh.SUBS).rows[0];
+    global.fetch = jest.fn(async () => ({ status: 202 }));
+
+    expect(await wh.publish(db, 'shop', { entity: 'items', at: 'now' })).toBe(1);
+    await flush();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    db.collection(wh.DELIVERIES).rows.length = 0;
+    row.active = false;
+    expect(await wh.publish(db, 'shop', { entity: 'items', at: 'now' })).toBe(0);
   });
 });

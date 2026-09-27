@@ -30,6 +30,29 @@
 
 const crypto = require('crypto');
 
+/*
+ * Delivered-signal listeners (realtime/scheduler.js). A set of callbacks rather
+ * than a direct require, so this module stays unaware of the scheduler that
+ * requires IT. A listener is a courtesy like everything else here: one that
+ * throws is swallowed, never carried back into the delivery. */
+const deliveredListeners = new Set();
+
+function onDeliverySuccess(fn) {
+  if (typeof fn !== 'function') return () => {};
+  deliveredListeners.add(fn);
+  return () => deliveredListeners.delete(fn);
+}
+
+function notifyDelivered(db) {
+  for (const fn of deliveredListeners) {
+    try {
+      fn(db);
+    } catch (e) {
+      /* never let a listener break a delivery */
+    }
+  }
+}
+
 const SUBS = 'webhook_subscriptions';
 const DELIVERIES = 'webhook_deliveries';
 const MAX_ATTEMPTS = 5;
@@ -37,6 +60,51 @@ const BACKOFF_MS = [60e3, 300e3, 1500e3, 7500e3, 37500e3];
 const TIMEOUT_MS = 10_000;
 const DRAIN_EVERY_MS = 60_000; // how often lazy draining may run, per process
 const drainLast = new Map(); // dbName -> ts
+
+/*
+ * THE PLATFORM SUBSCRIPTION.
+ *
+ * A shop installs this build and never touches the website's admin panel, so
+ * the site's change signals have to leave the building on their own - and the
+ * shop must not be able to switch them off, by accident or otherwise. The
+ * three values below are injected when the seller's installer is assembled:
+ *
+ *   SHUTTLEZONE_WEBHOOK_URL    https://shuttlezone.app/api/pos/webhook/<key>
+ *   SHUTTLEZONE_WEBHOOK_SECRET the secret the website already holds
+ *   SHUTTLEZONE_WEBHOOK_EVENTS items,categories,sales,receivings
+ *
+ * The secret is USED, never generated. addSubscription mints one with
+ * crypto.randomBytes - which is right for a shop adding its own endpoint and
+ * useless here, because a secret created on this machine is a secret the
+ * website's verifier can never learn.
+ *
+ * The row is marked `provider` + `locked`: the shop can still add, edit and
+ * remove its OWN webhooks, and cannot touch this one.
+ */
+const PROVIDER = 'shuttlezone';
+const DEFAULT_PROVIDER_EVENTS = ['items', 'categories', 'sales', 'receivings'];
+const PROVIDER_DESCRIPTION = 'ShuttleZone - keeps this shop up to date on its website';
+
+/** The injected configuration, or nulls when this build was not provisioned. */
+function provisionedConfig(env = process.env) {
+  const url = String(env.SHUTTLEZONE_WEBHOOK_URL || '').trim();
+  const secret = String(env.SHUTTLEZONE_WEBHOOK_SECRET || '').trim();
+  const raw = String(env.SHUTTLEZONE_WEBHOOK_EVENTS || '').trim();
+  const events = raw
+    ? raw
+        .split(',')
+        .map((e) => e.trim().toLowerCase())
+        .filter((e) => /^[a-z_]{1,32}$/.test(e))
+    : DEFAULT_PROVIDER_EVENTS;
+  return { url, secret, events: events.length ? events : DEFAULT_PROVIDER_EVENTS };
+}
+
+/** Are two event lists the same set, whatever order they were written in? */
+function sameEvents(a, b) {
+  const left = [...new Set((Array.isArray(a) ? a : []).map(String))].sort();
+  const right = [...new Set((Array.isArray(b) ? b : []).map(String))].sort();
+  return left.length === right.length && left.every((v, i) => v === right[i]);
+}
 
 /* Store only stable, non-sensitive failure categories. Raw exception messages can
  * contain hostnames, query strings, credentials or payload fragments and do not
@@ -94,8 +162,77 @@ async function addSubscription(db, { url, events, description }) {
 async function removeSubscription(db, id) {
   const { ObjectId } = require('mongodb');
   if (!ObjectId.isValid(String(id))) return { ok: false };
+  /* The platform row is not the shop's to remove. Deleting it would stop the
+     website updating with nothing looking broken at the till - the exact
+     silent failure the lock exists to prevent. The management screen never
+     offers the control; this is the second line of defence, because a route is
+     an endpoint anybody with a token can call. */
+  const row = await db.collection(SUBS).findOne({ _id: new ObjectId(String(id)) });
+  if (row && row.locked === true) return { ok: false, reason: 'locked' };
   const r = await db.collection(SUBS).deleteOne({ _id: new ObjectId(String(id)) });
   return { ok: r.deletedCount === 1 };
+}
+
+/**
+ * Make sure this shop has the provisioned ShuttleZone subscription, exactly
+ * as the injected configuration describes it.
+ *
+ * Idempotent, and safe to call on every drain tick - which is the point: a
+ * database reset, a restore from backup, a reinstall, or somebody editing the
+ * collection by hand would otherwise stop a shop's website updating silently,
+ * and nothing at the till would look wrong.
+ *
+ * @param {object} db
+ * @param {{env?: object, log?: Console, now?: Function}} [opts]
+ * @returns {Promise<{ok: boolean, action?: string, reason?: string, fields?: string[]}>}
+ */
+async function ensureProvisionedSubscription(db, { env = process.env, log = console, now } = {}) {
+  const clock = typeof now === 'function' ? now : () => new Date();
+  const cfg = provisionedConfig(env);
+  if (!cfg.url || !cfg.secret) return { ok: false, reason: 'not_configured' };
+  if (!urlAllowed(cfg.url)) return { ok: false, reason: 'url must be https' };
+  if (!db) return { ok: false, reason: 'no_database' };
+
+  const col = db.collection(SUBS);
+  /* Ours by marker, or by being the endpoint we are configured to call - a
+     shop that added it by hand before an upgrade should be adopted, not
+     duplicated. */
+  const existing =
+    (await col.findOne({ provider: PROVIDER })) || (await col.findOne({ url: cfg.url }));
+
+  if (!existing) {
+    await col.insertOne({
+      url: cfg.url,
+      /* The INJECTED secret. Never generated here - see the note above. */
+      secret: cfg.secret,
+      events: cfg.events,
+      description: PROVIDER_DESCRIPTION,
+      active: true,
+      provider: PROVIDER,
+      locked: true,
+      createdAt: clock(),
+      provisionedAt: clock(),
+    });
+    return { ok: true, action: 'created' };
+  }
+
+  const drift = {};
+  if (existing.url !== cfg.url) drift.url = cfg.url;
+  if (existing.active !== true) drift.active = true;
+  if (!sameEvents(existing.events, cfg.events)) drift.events = cfg.events;
+  if (existing.provider !== PROVIDER) drift.provider = PROVIDER;
+  if (existing.locked !== true) drift.locked = true;
+  /* A row whose secret is not the injected one signs everything with a value
+     the website cannot verify: every delivery would be answered 401 and the
+     shop's website would quietly stop updating. We hold the right value, so
+     restoring it is the repair - it is not a new secret. */
+  if (existing.secret !== cfg.secret) drift.secret = cfg.secret;
+
+  const fields = Object.keys(drift);
+  if (!fields.length) return { ok: true, action: 'ok' };
+  await col.updateOne({ _id: existing._id }, { $set: { ...drift, provisionedAt: clock() } });
+  log.warn('[webhooks] repaired the ShuttleZone subscription:', fields.join(', '));
+  return { ok: true, action: 'repaired', fields };
 }
 
 async function attempt(db, delivery, sub) {
@@ -132,6 +269,10 @@ async function attempt(db, delivery, sub) {
         },
       }
     );
+    /* The line is up. Tell whoever is listening (realtime/scheduler.js), so a
+       queue that built up during an outage flushes now rather than at the next
+       minute boundary. */
+    notifyDelivered(db);
   } else if (!failure.retryable || attempts >= MAX_ATTEMPTS) {
     await db.collection(DELIVERIES).updateOne(
       { _id: delivery._id },
@@ -143,7 +284,17 @@ async function attempt(db, delivery, sub) {
           lastErrorCode: failure.code,
           deadLetteredAt: new Date(),
         },
-        $unset: { lastError: '', 'payload.at': '', 'payload.shop': '' },
+        /* The corpse keeps no shop identity: this row already lives in that
+           shop's own database, so the fields were only ever duplication - and
+           a dead row is the one place duplication has no use. Same rule
+           payload.at and payload.shop already follow. */
+        $unset: {
+          lastError: '',
+          'payload.at': '',
+          'payload.shop': '',
+          'payload.seller_id': '',
+          'payload.seller_name': '',
+        },
       }
     );
   } else {
@@ -187,7 +338,28 @@ async function publish(db, shopName, event) {
 
       const delivery = {
         subscription_id: sub._id,
-        payload: { event: 'change', entity: event.entity, at: event.at, shop: shopName || '' },
+        payload: {
+          event: 'change',
+          entity: event.entity,
+          at: event.at,
+          shop: shopName || '',
+          /*
+           * WHO IS SPEAKING (ShuttleZone integration ask I4.4).
+           *
+           * Without these a receiver cannot check that the till posting a
+           * change is the one it is paired with, so pointing a shop at the
+           * wrong storefront would publish one shop's stock on another shop's
+           * website - silently, and looking perfectly healthy.
+           *
+           * Always present, possibly empty: a receiver can then assert on the
+           * shape, and an install that genuinely cannot identify itself says so
+           * instead of looking like a build that predates the field. The whole
+           * body is covered by the signature, so these are authenticated like
+           * everything else. `shop` is unchanged.
+           */
+          seller_id: String(event.seller_id || ''),
+          seller_name: String(event.seller_name || ''),
+        },
         status: 'pending',
         attempts: 0,
         createdAt: new Date(),
@@ -208,10 +380,16 @@ async function publish(db, shopName, event) {
  * Lazy retry drain: piggybacks on the shop's own traffic at most once a
  * minute per process, so a shard needs no per-tenant scheduler and an idle
  * shop costs nothing.
+ *
+ * `force` is for the scheduler's two deliberate exceptions to that throttle: a
+ * delivery that just succeeded (the line is back, so the rest of the queue
+ * should go), and the periodic pass, which is itself the guarantee for a shop
+ * nobody is touching. Callers that force are expected to rate-limit
+ * themselves - see realtime/scheduler.js.
  */
-async function drainDue(db, dbName) {
+async function drainDue(db, dbName, { force = false } = {}) {
   const last = drainLast.get(dbName) || 0;
-  if (Date.now() - last < DRAIN_EVERY_MS) return 0;
+  if (!force && Date.now() - last < DRAIN_EVERY_MS) return 0;
   drainLast.set(dbName, Date.now());
   try {
     const due = await db
@@ -233,7 +411,13 @@ async function drainDue(db, dbName) {
               lastErrorCode: 'subscription_removed',
               deadLetteredAt: new Date(),
             },
-            $unset: { lastError: '', 'payload.at': '', 'payload.shop': '' },
+            $unset: {
+              lastError: '',
+              'payload.at': '',
+              'payload.shop': '',
+              'payload.seller_id': '',
+              'payload.seller_name': '',
+            },
           }
         );
         continue;
@@ -274,9 +458,12 @@ async function recentDeliveries(db, limit = 50) {
 module.exports = {
   publish,
   drainDue,
+  onDeliverySuccess,
   listSubscriptions,
   addSubscription,
   removeSubscription,
+  ensureProvisionedSubscription,
+  provisionedConfig,
   recentDeliveries,
   sign,
   urlAllowed,
@@ -284,4 +471,5 @@ module.exports = {
   SUBS,
   DELIVERIES,
   MAX_ATTEMPTS,
+  PROVIDER,
 };

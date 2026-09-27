@@ -27,20 +27,46 @@ These use **your own accounts and your own credentials**. We are not in the
 path — your till talks to the provider directly. They are subprocessors of
 yours, not of ours, and you choose whether they exist at all.
 
-| Provider | Used for | What reaches it | Turn it off by |
-|---|---|---|---|
-| Your SMTP server | Emailing receipts, reports and invoices | Recipient address, document contents | Clearing the SMTP settings |
-| Brevo | Transactional email, if chosen instead of SMTP | Recipient address, message contents | Clearing the Brevo settings |
-| MSG91 | SMS to customers | Phone number, message text | Clearing the SMS settings |
-| Way2SMS | SMS to customers | Phone number, message text | Clearing the SMS settings |
-| WhatsApp | Sending receipts over WhatsApp | Phone number, document | Not connecting WhatsApp |
-| Razorpay | Taking card and online payments | Transaction amount, order reference | Clearing the gateway settings |
-| PhonePe | Taking UPI payments | Transaction amount, order reference | Clearing the gateway settings |
-| Amazon S3 | Storing uploaded images, if configured | Item and branch images | Leaving S3 unconfigured |
+| Provider         | Used for                                       | What reaches it                      | Turn it off by                |
+| ---------------- | ---------------------------------------------- | ------------------------------------ | ----------------------------- |
+| Your SMTP server | Emailing receipts, reports and invoices        | Recipient address, document contents | Clearing the SMTP settings    |
+| Brevo            | Transactional email, if chosen instead of SMTP | Recipient address, message contents  | Clearing the Brevo settings   |
+| MSG91            | SMS to customers                               | Phone number, message text           | Clearing the SMS settings     |
+| Way2SMS          | SMS to customers                               | Phone number, message text           | Clearing the SMS settings     |
+| WhatsApp         | Sending receipts over WhatsApp                 | Phone number, document               | Not connecting WhatsApp       |
+| Razorpay         | Taking card and online payments                | Transaction amount, order reference  | Clearing the gateway settings |
+| PhonePe          | Taking UPI payments                            | Transaction amount, order reference  | Clearing the gateway settings |
+| Amazon S3        | Storing uploaded images, if configured         | Item and branch images               | Leaving S3 unconfigured       |
 
 **We never see the credentials for these.** They are held on your machine,
 encrypted, and are marked cloud-only in the field policy so they are not synced
 in plain form. See [SECURITY.md](../.github/SECURITY.md).
+
+### Website reachability, in a paired installer
+
+A shop whose till we shipped already paired with a website is a special case of
+the table above, and worth calling out because it is the one arrangement where
+**we**, not the shopkeeper, decided the parties involved.
+
+The website has to be able to reach the till, and a till sits on a shop LAN
+behind a router. The installer carries Cloudflare's `cloudflared` client, which
+connects outbound to Cloudflare and gives the till a stable hostname so the
+website can call in.
+
+| Provider            | Used for                                 | What reaches it                                                                                                                                                        |
+| ------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cloudflare (Tunnel) | Giving the till a stable public hostname | Catalogue reads and product image requests pass through Cloudflare's network in the clear at their edge (TLS terminates there); **no shop data is stored at the edge** |
+
+Two things keep this narrow, and both are worth knowing:
+
+- **Only two paths are exposed** — `/api/v1/*` and `/uploads/*`. Everything else
+  in the till's API answers 404 through the tunnel. The management API is not on
+  the public internet.
+- **Reads only, and read-scoped.** The website's credential grants `item: read`
+  and `category: read` and nothing else. It cannot write to the shop.
+
+A stock Posnic contains no tunnel client and starts none. If you bought an
+installer without a website pairing, none of this applies to you.
 
 ---
 
@@ -49,14 +75,14 @@ in plain form. See [SECURITY.md](../.github/SECURITY.md).
 Only if you subscribe. Everything here is in India unless stated otherwise, and
 we give **30 days' notice** before adding or changing any of them.
 
-| Provider | Used for | Location |
-|---|---|---|
-| Amazon Web Services | Running the sync gateway and the web dashboard | Mumbai (ap-south-1) |
-| MongoDB Atlas | Storing synced shop data, one database per shop | Mumbai (ap-south-1) |
-| Amazon S3 | Off-site backups and uploaded images | Mumbai (ap-south-1) |
-| Cloudflare | DNS and TLS in front of the gateway | Global edge; no shop data is stored at the edge |
-| Razorpay | Subscription billing | India |
-| Brevo | Account, billing and support email | EU, for email delivery only |
+| Provider            | Used for                                        | Location                                        |
+| ------------------- | ----------------------------------------------- | ----------------------------------------------- |
+| Amazon Web Services | Running the sync gateway and the web dashboard  | Mumbai (ap-south-1)                             |
+| MongoDB Atlas       | Storing synced shop data, one database per shop | Mumbai (ap-south-1)                             |
+| Amazon S3           | Off-site backups and uploaded images            | Mumbai (ap-south-1)                             |
+| Cloudflare          | DNS and TLS in front of the gateway             | Global edge; no shop data is stored at the edge |
+| Razorpay            | Subscription billing                            | India                                           |
+| Brevo               | Account, billing and support email              | EU, for email delivery only                     |
 
 **Data residency.** Shop records — sales, stock, customers, staff — stay in
 India. Cloudflare terminates TLS and passes requests through without storing

@@ -43,6 +43,22 @@
                             <span class="text-danger">*</span> 
                         </label>
                         <input type="text" class="form-control border-control" name="name" id="category_name" minlength="3" maxlength="50" placeholder="Enter the name" data-t-placeholder="lang_enter_the_name"  autocomplete="off" required>
+                        <!-- Sub-category (ShuttleZone ask I4.7). A category with a
+                             parent IS that parent's sub-category, one level deep -
+                             this is how a shop adds its own shelves under the
+                             categories the installer gave it. Left empty, the
+                             category is a top level.
+
+                             One level, deliberately: the website addresses
+                             /shop/<category>/<sub>, so a third level would be a
+                             shelf nothing can link to. -->
+                        <label class="form-control-placeholder d-block m-t-10" for="category_parent">
+                            <lang class="lang_category_parent">Parent category</lang>
+                            <small class="text-muted"><lang class="lang_category_parent_hint">- leave empty for a top-level category</lang></small>
+                        </label>
+                        <select class="form-control border-control" name="parent_id" id="category_parent">
+                            <option value=""></option>
+                        </select>
                         <label class="form-control-placeholder d-block m-t-10">
                             <lang class="lang_tile_color">Colour on the sale screen</lang>
                         </label>

@@ -88,9 +88,17 @@ function writeBranchId(user) {
 }
 
 /* Cursor = base64url of "isoDate|id". Compound so equal timestamps can
-   neither skip nor repeat - the same rule the sync checkpoints use. */
+   neither skip nor repeat - the same rule the sync checkpoints use.
+
+   A row with no usable updated_date must still yield a cursor this API
+   accepts. It used to emit an EMPTY timestamp, which decodeCursor rejects - so
+   the caller's next page answered `400 bad_cursor` and the walk stopped dead
+   with no way to resume except by hand. Such rows sort before every dated one,
+   so the epoch is the honest stand-in: "everything from the beginning of". */
 function encodeCursor(doc) {
-  const ts = doc.updated_date instanceof Date ? doc.updated_date.toISOString() : '';
+  const when = doc && doc.updated_date;
+  const usable = when instanceof Date && !isNaN(when.getTime());
+  const ts = usable ? when.toISOString() : new Date(0).toISOString();
   return Buffer.from(ts + '|' + String(doc._id)).toString('base64url');
 }
 
@@ -107,6 +115,67 @@ function decodeCursor(raw) {
   const ts = new Date(text.slice(0, i));
   if (isNaN(ts.getTime())) return null;
   return { ts, id: text.slice(i + 1) };
+}
+
+/*
+ * Rows written before every write path stamped a date - legacy imports, the
+ * PHP-era collections, a hand-edited database - carry no updated_date at all.
+ *
+ * Such a row can never satisfy `updated_date > <cursor>`, so it is INVISIBLE
+ * to every paginated walk: an integrator mirroring the catalogue would never
+ * see it and would never be told. The cursor guard above stops that from
+ * breaking the walk outright, but it cannot make the row reachable. So the
+ * repair is the real fix and the guard is the safety net - both, deliberately.
+ *
+ * Once per process per collection: a shop's items are written by paths that
+ * all stamp a date, so after one sweep there is normally nothing left to find
+ * and the cost is a single indexed query. */
+const repairedInProcess = new Set();
+
+async function repairUpdatedDates(db, collectionName) {
+  if (!db || !collectionName) return 0;
+  const collection = db.collection(collectionName);
+  const rows = await collection
+    .find({ updated_date: { $exists: false } }, { projection: { _id: 1, created_date: 1 } })
+    .limit(5000)
+    .toArray();
+  if (!rows.length) return 0;
+  const now = new Date();
+  await collection.bulkWrite(
+    rows.map((row) => ({
+      updateOne: {
+        filter: { _id: row._id },
+        /* created_date is the truth when it exists - the row has not changed
+           since then. Only a row with neither gets "now", which costs it one
+           extra visit in the caller's next walk and nothing more. */
+        update: {
+          $set: { updated_date: row.created_date instanceof Date ? row.created_date : now },
+        },
+      },
+    })),
+    { ordered: false }
+  );
+  return rows.length;
+}
+
+/** The once-per-process guard around repairUpdatedDates. */
+async function ensureUpdatedDates(db, collectionName) {
+  const key = (db && (db.databaseName || db.namespace)) + ':' + collectionName;
+  if (repairedInProcess.has(key)) return 0;
+  repairedInProcess.add(key);
+  try {
+    return await repairUpdatedDates(db, collectionName);
+  } catch (e) {
+    /* A repair that fails must never fail the read - the cursor guard already
+       stops the 400. Release the key so a transient failure is retried on the
+       next request rather than leaving the collection broken forever. */
+    repairedInProcess.delete(key);
+    return 0;
+  }
+}
+
+function resetUpdatedDateRepairs() {
+  repairedInProcess.clear();
 }
 
 /*
@@ -220,6 +289,30 @@ function openapiSpec() {
     },
     security: [{ token: [] }],
     paths: {
+      '/shop': {
+        get: {
+          summary: 'This shop\u2019s identity',
+          responses: {
+            200: {
+              description: 'shop, shop_name, seller_id and seller_name',
+              content: { 'application/json': { schema: { type: 'object' } } },
+            },
+            401: { description: 'No token' },
+          },
+        },
+      },
+      '/taxonomy': {
+        get: {
+          summary: 'The seeded category tree, parent and leaves',
+          responses: {
+            200: {
+              description: 'An array of {category, subCategories}',
+              content: { 'application/json': { schema: { type: 'object' } } },
+            },
+            403: { description: 'Token lacks the category:read scope' },
+          },
+        },
+      },
       '/{entity}': {
         get: {
           summary: 'List records, oldest change first',
@@ -332,6 +425,97 @@ function registerV1({ app, protect }) {
     next();
   });
 
+  /*
+   * Both of the literal paths below MUST be declared before /:entity, or the
+   * parameterised route reads "shop" and "taxonomy" as entity names and
+   * answers 404 unknown_entity. The same rule the public openapi.json follows.
+   */
+
+  /*
+   * Who this shop is (ShuttleZone integration ask I4.9).
+   *
+   * Pairing a website with a shop needs to confirm the token belongs to the
+   * shop it is being paired with. Without this the site infers it from
+   * whatever the first webhook happens to say, which is the wrong order: the
+   * verification should be possible BEFORE any data is mirrored.
+   *
+   * seller_id is the licence - it scopes every document in this database, so
+   * it survives a reinstall of the till and matches what the webhook body
+   * reports.
+   */
+  router.get('/shop', async (req, res) => {
+    if (!req.db) return err(res, 503, 'no_tenant', 'Tenant context unavailable.');
+    try {
+      const tenant = req.tenantContext || {};
+      let displayName = String(tenant.branchName || '').trim();
+      if (!displayName) {
+        /* A new shop may have no settings document yet, which is not an
+           error - the database name still identifies it. */
+        const doc = await req.db
+          .collection('settings')
+          .findOne({}, { projection: { store_name: 1 } });
+        displayName = String((doc && doc.store_name) || '').trim();
+      }
+      res.json({
+        data: {
+          shop: req.db.databaseName,
+          shop_name: displayName,
+          seller_id: String(tenant.licenseId || (req.user && req.user.license) || ''),
+          seller_name: displayName,
+        },
+      });
+    } catch (e) {
+      err(res, 500, 'internal', 'Could not read the shop identity.');
+    }
+  });
+
+  /*
+   * The category tree this install seeds (ShuttleZone integration ask I4.10).
+   *
+   * Two levels, because the website's own browsing is two levels. Reading it
+   * over the API beats parsing the packaged install document: the answer is
+   * what THIS shop actually has, including anything the shopkeeper added.
+   * Parentless categories are top level; a category whose parent_id points at
+   * another is that parent's leaf.
+   */
+  router.get('/taxonomy', async (req, res) => {
+    if (!canRead(req.user, 'category'))
+      return err(res, 403, 'forbidden', 'This token has no category:read scope.');
+    if (!req.db) return err(res, 503, 'no_tenant', 'Tenant context unavailable.');
+    try {
+      const rows = await req.db
+        .collection('categories')
+        .find({}, { projection: { name: 1, parent_id: 1 } })
+        .sort({ name: 1 })
+        .toArray();
+      const byId = new Map(rows.map((r) => [String(r._id), r]));
+      const leaves = new Map();
+      const tops = [];
+      for (const row of rows) {
+        const parentId = row.parent_id == null ? '' : String(row.parent_id);
+        /* A category cannot be its own parent. If one somehow is, it is
+           treated as a top rather than disappearing from the tree - a
+           category nobody can see is worse than one at the wrong level. */
+        const parent = parentId && parentId !== String(row._id) ? byId.get(parentId) : null;
+        if (parent) {
+          const key = String(parent._id);
+          if (!leaves.has(key)) leaves.set(key, []);
+          leaves.get(key).push(String(row.name || ''));
+        } else {
+          tops.push(row);
+        }
+      }
+      res.json({
+        data: tops.map((t) => ({
+          category: String(t.name || ''),
+          subCategories: (leaves.get(String(t._id)) || []).sort(),
+        })),
+      });
+    } catch (e) {
+      err(res, 500, 'internal', 'Could not read the category tree.');
+    }
+  });
+
   router.get('/:entity', async (req, res) => {
     const def = ENTITIES[req.params.entity];
     if (!def) return err(res, 404, 'unknown_entity', 'No such collection in v1.');
@@ -343,6 +527,10 @@ function registerV1({ app, protect }) {
       const cursor = decodeCursor(req.query.cursor);
       if (req.query.cursor && !cursor)
         return err(res, 400, 'bad_cursor', 'The cursor is not one this API issued.');
+      /* Repairing the collection being listed, once, is cheaper than either
+         explanation: a date-less row would be invisible to this walk, and the
+         integrator would never know it was missing. */
+      await ensureUpdatedDates(req.db, def.collection);
       const docs = await req.db
         .collection(def.collection)
         .find(buildListQuery(req.user, cursor), { projection: INTERNAL_FIELDS })
@@ -480,4 +668,7 @@ module.exports = {
   canWrite,
   pickWritable,
   writeBranchId,
+  repairUpdatedDates,
+  ensureUpdatedDates,
+  resetUpdatedDateRepairs,
 };

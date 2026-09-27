@@ -322,6 +322,11 @@ class ItemModel {
     service_unit: { type: 'String', select: true },
     // Lightspeed study LS1: brand, tags, per-item reorder point.
     brand: { type: 'String', select: true },
+    /* The taxonomy's second level, by NAME - the same denormalisation
+       category_name already uses beside category_id. A reader (the shop's own
+       screens, or a website mirroring the catalogue) gets parent and leaf in
+       one document, with no join and no orphan if the category is renamed. */
+    sub_category: { type: 'String', select: true },
     tags: { type: 'Array', select: true },
     reorder_point: { type: 'Number', select: true },
     branch_access: { type: 'Array', select: false },

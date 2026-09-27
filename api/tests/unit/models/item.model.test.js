@@ -791,7 +791,11 @@ describe('Item.LegacyItemModel › class identity', () => {
     // deliberately NOT fields, so a dish can never store one).
     // + nutrition_source (who said so: a person, or a machine that guessed;
     //   dish-facts publishes nothing derived from an estimate).
-    expect(Object.keys(LegacyItemModel.fields)).toHaveLength(78);
+    // + sub_category (I4.7: the taxonomy's second level, by name - named
+    //   below as well as counted, because a website mirroring the catalogue
+    //   reads it to decide which shelf a product belongs on, and a field
+    //   dropped from this map goes missing there silently).
+    expect(Object.keys(LegacyItemModel.fields)).toHaveLength(79);
     expect(LegacyItemModel.fields).toEqual(
       expect.objectContaining({
         /* Named as well as counted: a count alone passes if one field is
@@ -818,6 +822,14 @@ describe('Item.LegacyItemModel › class identity', () => {
         nutrition_source: expect.any(Object),
         food_tags: expect.any(Object),
         menu_marks: expect.any(Object),
+        /* The taxonomy's second level (I4.7). Named for the same reason as the
+           three above: the storefront and the public menu project through
+           this map, and a field dropped from it disappears from both without
+           a single test turning red. */
+        sub_category: expect.any(Object),
+        /* Brand is what the storefront's brand pages filter on, and the
+           website matches it case-insensitively against a curated list. */
+        brand: expect.any(Object),
       })
     );
   });

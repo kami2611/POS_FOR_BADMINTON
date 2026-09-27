@@ -4,6 +4,7 @@
  */
 
 const { VALIDATION_PATTERNS } = require('../constants/categories.constants');
+const { ObjectId } = require('mongodb');
 
 /**
  * Validate category name format
@@ -36,6 +37,18 @@ const sanitizeCategoryData = (data) => {
   if (sanitized.name) sanitized.name = sanitized.name.trim();
   if (sanitized.description) sanitized.description = sanitized.description.trim();
   if (sanitized.image) sanitized.image = sanitized.image.trim();
+
+  /*
+   * The second level (ShuttleZone ask I4.7). Absent or empty means "top
+   * level", and anything that is not a real id becomes null rather than being
+   * passed on: an invalid string would surface as a mongoose CastError with a
+   * message about ObjectId, when what actually happened is that somebody
+   * typed a parent that does not exist.
+   */
+  if (sanitized.parent_id !== undefined) {
+    const raw = String(sanitized.parent_id || '').trim();
+    sanitized.parent_id = ObjectId.isValid(raw) ? new ObjectId(raw) : null;
+  }
 
   // Ensure numeric fields are numbers
   if (sanitized.discount_amount !== undefined) {
@@ -70,6 +83,9 @@ const formatCategoryResponse = (category) => {
     sort_order: category.sort_order || 0,
     branch_id: category.branch_id,
     branch_name: category.branch_name || '',
+    /* The second level (ShuttleZone ask I4.7): null means this category is a
+       top level, anything else is the id of the category it belongs to. */
+    parent_id: category.parent_id ? category.parent_id.toString() : null,
     created_date: category.created_date,
     updated_date: category.updated_date,
   };

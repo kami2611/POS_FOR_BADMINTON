@@ -2258,6 +2258,9 @@
   "This user details already exist in our system": [
     "src/models/user.model.js"
   ],
+  "This webhook is managed by ShuttleZone and cannot be removed.": [
+    "app.js"
+  ],
   "Token created. Store it now - it is not shown again.": [
     "app.js"
   ],

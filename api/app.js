@@ -1212,6 +1212,13 @@ app.get(['/webhooks', '/api/webhooks'], sseProtect, requireBranchWrite, async (r
         description: r.description,
         active: r.active,
         createdAt: r.createdAt,
+        /* Set by the platform, not the shop. The screen renders these rows
+           read-only - the URL is shown, the entity boxes are checked and
+           disabled, and there is no delete control, because switching the
+           website's feed off is not a shop-side decision. The secret is still
+           never returned. */
+        locked: r.locked === true,
+        provider: r.provider || null,
       })),
     });
   } catch (e) {
@@ -1238,6 +1245,13 @@ app.delete(
   async (req, res) => {
     try {
       const result = await webhookInfra.removeSubscription(req.db, req.params.id);
+      if (result.reason === 'locked') {
+        return res.status(403).json({
+          type: 'error',
+          data: null,
+          message: 'This webhook is managed by ShuttleZone and cannot be removed.',
+        });
+      }
       res.json({
         type: result.ok ? 'success' : 'error',
         data: null,

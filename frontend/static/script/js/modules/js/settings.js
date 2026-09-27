@@ -5471,11 +5471,41 @@ PosnicPro.integrations = {
             } else {
                 var html = '';
                 rows.forEach(function (h) {
+                    /*
+                     * A row the platform provisioned is shown, never offered.
+                     *
+                     * The shop should be able to SEE that its website is being
+                     * kept up to date - that is the whole reason it is on this
+                     * screen rather than hidden - and must not be able to switch
+                     * it off, by accident or otherwise. So: the URL is visible,
+                     * the entities appear as checked and disabled boxes, and
+                     * there is no Remove control. The server refuses the delete
+                     * too; this is only the half the user can see.
+                     *
+                     * The shop's OWN webhooks are untouched by any of this.
+                     */
+                    var locked = h.locked === true;
+                    var events = h.events || [];
+                    var eventsCell = locked
+                        ? events.map(function (e) {
+                            return '<label class="d-block mb-0" style="font-weight:400;">' +
+                                '<input type="checkbox" checked disabled> ' + esc(e) + '</label>';
+                        }).join('')
+                        : esc(events.join(', ') || 'all');
+                    var note = locked
+                        ? '<div class="mt-1"><small class="text-muted"><i class="feather icon-lock mr-1"></i>' +
+                          esc(PosnicPro.i18n.t('lang_int_managed_by_shuttlezone', 'Managed by ShuttleZone - this keeps your shop up to date on your website')) +
+                          '</small></div>'
+                        : '';
+                    var action = locked
+                        ? '<small class="text-muted">' + esc(PosnicPro.i18n.t('lang_int_locked', 'Locked')) + '</small>'
+                        : '<button type="button" class="btn btn-outline-danger btn-sm int-removehook-btn" data-id="' + esc(h.id) + '">' +
+                          esc(PosnicPro.i18n.t('lang_remove', 'Remove')) + '</button>';
                     html += '<tr>' +
-                        '<td style="max-width:280px; word-break:break-all;"><small>' + esc(h.url) + '</small></td>' +
-                        '<td><small>' + esc((h.events || []).join(', ') || 'all') + '</small></td>' +
+                        '<td style="max-width:280px; word-break:break-all;"><small>' + esc(h.url) + '</small>' + note + '</td>' +
+                        '<td><small>' + eventsCell + '</small></td>' +
                         '<td>' + (h.active === false ? '<span class="badge badge-secondary-inverse">off</span>' : '<span class="badge badge-success-inverse">active</span>') + '</td>' +
-                        '<td class="text-right"><button type="button" class="btn btn-outline-danger btn-sm int-removehook-btn" data-id="' + esc(h.id) + '">Remove</button></td>' +
+                        '<td class="text-right">' + action + '</td>' +
                         '</tr>';
                 });
                 $('#int_hooks_body').html(html);

@@ -742,6 +742,10 @@ class CategoriesController extends BaseController {
         discount_amount: cat.discount_amount || 0,
         discount_percentage: cat.discount_percentage || 0,
         description: cat.description || '',
+        /* The second level (ShuttleZone ask I4.7). The item form builds its
+           sub-category picker from this: pick a category, and the list offers
+           that category's leaves. Null means top level. */
+        parent_id: cat.parent_id ? cat.parent_id.toString() : null,
       }));
 
       return res.status(200).json({

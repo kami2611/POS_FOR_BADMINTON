@@ -1,0 +1,212 @@
+# Build one seller's paired installer, on a Windows runner.
+#
+# WHY THIS EXISTS. A paired installer cannot be produced on a Mac, and not for
+# the reason people assume (Wine). Two of its inputs only exist on Windows:
+#
+#   * mongodb/bin/mongod.exe - a Windows binary; the macOS tree has a Mach-O
+#     arm64 dev copy instead.
+#   * msvcp140.dll, vcruntime140.dll, vcruntime140_1.dll - mongod links against
+#     these, and `bundle-vc-runtime.js` collects them from the build machine.
+#     On macOS it prints "not Windows; nothing to bundle" and exits 0.
+#
+# The second one is the dangerous half, because the local build does NOT stop
+# you. check-mongodb-binaries.js only demands mongod.exe (the DLLs are "supplied
+# by the build"), so on a Mac the packaging step finishes and hands you an
+# installer missing the runtime - which installs perfectly and then dies on the
+# shop's counter with 0xC0000135 the first time it starts its database.
+#
+# A Windows runner has all of it, and the recipe below is the one beta.yml has
+# been using for its Windows matrix. release.yml deliberately builds only macOS
+# and Linux because its installers must be signed on a hardware card; betas and
+# seller builds are unsigned, so a runner can do them.
+#
+# WHAT IT PRODUCES, AND WHAT IT CANNOT. An UNSIGNED installer.
+#
+# That is a real limitation, not a footnote. This repository already has a policy
+# about it (tests/windows-release-separately.test.js, and the comment at the top
+# of release.yml): the Windows signing key lives on a Certum card, CA/Browser
+# Forum rules have required certified hardware since June 2023, and a
+# GitHub-hosted runner has no card reader. So a Windows installer built here can
+# only ever be unsigned - which is "worse than no build at all: it looks finished
+# and tells every customer the publisher is unknown".
+#
+# Everything in that policy still holds, and this workflow does not change it:
+#
+#   * it never publishes. It uploads a workflow artifact, nothing else. There is
+#     no `--publish always`, and `permissions:` is read-only, so it cannot attach
+#     anything to a release even by accident.
+#   * the stock Posnic installer that shops download is still built and signed at
+#     a desk, by release-windows.js.
+#
+# What this is FOR: producing a paired installer to test with. A seller's build
+# has to be exercised end to end somehow - installed, paired, watched - and that
+# is a job for an unsigned artifact with a 14-day life, not for the signed
+# pipeline. When it is time to hand a seller a real installer, build it on the
+# desk machine where the card is, from the same seed.
+#
+# Windows SmartScreen will warn on first run. Expected, dismissible.
+#
+# BEFORE THE FIRST RUN, set these repository secrets (Settings -> Secrets and
+# variables -> Actions):
+#
+#   SHUTTLEZONE_WEBHOOK_URL               https://<site>/api/pos/webhook/<key>
+#   SHUTTLEZONE_WEBHOOK_SECRET            from the connection page, shown once
+#   SHUTTLEZONE_API_TOKEN                 posnic_... - the value in the same connection
+#   SHUTTLEZONE_TUNNEL_HOSTNAME           the hostname routed to that seller's tunnel
+#   SHUTTLEZONE_TUNNEL_ID                 the UUID from `cloudflared tunnel create`
+#   SHUTTLEZONE_TUNNEL_CREDENTIALS_B64    base64 of ~/.cloudflared/<that uuid>.json
+#
+# Generate the last one with (macOS):
+#   base64 -i ~/.cloudflared/<uuid>.json | tr -d '\n'
+# or (Linux):
+#   base64 -w0 ~/.cloudflared/<uuid>.json
+#
+# The workflow refuses to start if any is absent, and names the ones it wants,
+# rather than building something that cannot pair.
+#
+# SWITCHING SELLERS means updating those secrets. That is deliberate: one build
+# equals one seller's credentials, and the alternative - per-seller seed files
+# lying around - is the exact stale-seed hazard the local clear step exists to
+# prevent. (GitHub Environments would let several sellers coexist; that is the
+# upgrade path if this ever becomes routine.)
+name: Build a seller installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      seller:
+        description: "Seller label for this build. Names the artifact; must match the connection."
+        required: true
+        # No default on purpose. This repository is public and carries no
+        # customer's name (tests/no-customer-branding.test.js) - a default here
+        # would commit one, and it would be the wrong one the moment a
+        # different seller is built.
+      dry_run:
+        description: "Stop after the pairing check - validates the secrets without building"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows x64 installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with: { node-version: 22 }
+
+      - name: Install
+        run: npm ci
+
+      # prepare:bundle runs the frontend's gulp build from frontend/node_modules,
+      # so a checkout without this fails inside prepare:bundle rather than here.
+      - name: Install the frontend build toolchain
+        working-directory: frontend
+        run: npm ci
+
+      # prepare:api-runtime zips the API's dependencies into the installer.
+      - name: Install the API dependencies
+        working-directory: api
+        run: npm ci
+
+      # mongod.exe is not in git - 90 MB of somebody else's build output - and a
+      # runner has to fetch it. A Windows runner also has the three VC++ DLLs in
+      # System32, which is the part a Mac cannot supply. The version comes from
+      # the same place the download script keeps it, so the two cannot drift.
+      - name: Fetch the bundled MongoDB
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -oE 'set MONGODB_VERSION=[0-9.]+' src/download-mongodb.bat | cut -d= -f2)
+          echo "MongoDB $VERSION, the version src/download-mongodb.bat pins"
+
+          curl -fsSL -o mongodb.zip "https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-${VERSION}.zip"
+          7z x -bso0 mongodb.zip -omongodb-temp
+          mkdir -p mongodb/bin
+          cp "mongodb-temp/mongodb-win32-x86_64-windows-${VERSION}/bin/mongod.exe" mongodb/bin/
+          for dll in msvcp140.dll vcruntime140.dll vcruntime140_1.dll; do
+            cp "/c/Windows/System32/$dll" mongodb/bin/
+          done
+          rm -rf mongodb.zip mongodb-temp
+          node scripts/check-mongodb-binaries.js
+
+      # The tunnel client the installer carries. Fetched fresh on every run and
+      # verified against the committed lock file, so a hash that changed under a
+      # version that was supposed to be immutable fails here instead of reaching
+      # a shop. --win is what makes it fetch the x64 binary rather than this
+      # runner's own architecture.
+      - name: Fetch the bundled cloudflared
+        run: node scripts/fetch-cloudflared.js --win
+
+      # Clears any leftover per-seller seed, checks the MongoDB binaries and
+      # builds everything the installer bundles. Run BEFORE the seed is written,
+      # because it clears builds/shuttlezone-seed/ - the ordering rule the
+      # runbook gives an operator, applied here so it cannot be got wrong.
+      - name: Prepare everything the installer bundles
+        run: npm run prebuild
+
+      - name: Write the pairing seed from secrets
+        shell: bash
+        env:
+          WEBHOOK_URL: ${{ secrets.SHUTTLEZONE_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.SHUTTLEZONE_WEBHOOK_SECRET }}
+          API_TOKEN: ${{ secrets.SHUTTLEZONE_API_TOKEN }}
+          TUNNEL_HOSTNAME: ${{ secrets.SHUTTLEZONE_TUNNEL_HOSTNAME }}
+          TUNNEL_ID: ${{ secrets.SHUTTLEZONE_TUNNEL_ID }}
+          TUNNEL_CREDENTIALS_B64: ${{ secrets.SHUTTLEZONE_TUNNEL_CREDENTIALS_B64 }}
+          SELLER: ${{ inputs.seller }}
+        run: node .github/scripts/write-pairing-seed.js
+
+      - name: Check the pairing
+        run: npm run check:pairing
+
+      # Same flag beta.yml uses: an unsigned build must not demand a signed
+      # update signature, or a till would refuse the next unsigned build.
+      - name: Build
+        if: ${{ inputs.dry_run == false }}
+        run: npx electron-builder --win --x64 --publish never --config.win.verifyUpdateCodeSignature=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Native modules are compiled for the runner's Node, not for Electron's.
+      # This is the check that catches an installer whose database cannot load.
+      - name: Native binaries can load on a clean Windows
+        if: ${{ inputs.dry_run == false }}
+        run: node scripts/check-native-runtime.js
+
+      - name: Say what was built
+        if: ${{ inputs.dry_run == false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### Installer for \`${{ inputs.seller }}\`"
+            echo
+            echo '```'
+            ls -1 dist/*.exe 2>/dev/null || echo "(no .exe in dist/ - check the build log)"
+            echo '```'
+            echo
+            echo "Unsigned, as expected from CI. Windows SmartScreen will warn on first run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ inputs.dry_run == false }}
+        with:
+          name: ${{ inputs.seller }}-installer
+          # The .exe files only. The unpacked `win-unpacked/` directory beside
+          # them is several hundred MB and is not what gets sent to a shop.
+          path: |
+            dist/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Dry run
+        if: ${{ inputs.dry_run == true }}
+        shell: bash
+        run: |
+          echo "Dry run: the secrets are present and the seed passes check:pairing."
+          echo "Nothing was packaged. Re-run with dry_run off to build."

@@ -154,11 +154,12 @@
                                 <div class="form-group col-md-6" id="item_opening_wrap">
                                     <label class="form-control-placeholder" for="items_available_quantity">
                                         <lang class="lang_openquantity_title"> In stock (opening) </lang>
+                                        <span class="text-danger">*</span>
                                     </label>
                                     <input inputmode="decimal" type="text" class="form-control allow_decimal text-right clear_text_item"
                                         id="items_available_quantity" name="items_available_quantity" min="0"
                                         minlength="1" maxlength="10" value="0" placeholder="Available Quantity" data-t-placeholder="lang_availablequatity_title"
-                                        autocomplete="off">
+                                        autocomplete="off" required>
                                 </div>
                             </div>
                             <!-- Reorder point and Item Units moved out of Price & Stock
@@ -234,6 +235,26 @@
                                         style="width:100%;" aria-label="Items supplier pick" data-t-aria-label="lang_items_supplier_pick"></select>
                                     <input type="hidden" id="items_supplier" name="items_supplier">
                                     <input type="hidden" name="items_supplier_id" id="items_supplier_id">
+                                </div>
+                            </div>
+                            <!-- The second level of the category tree (ShuttleZone ask).
+                                 Its own row, directly under Category, because it only means
+                                 anything relative to the category above it: choose a
+                                 category and this offers that category's sub-categories.
+
+                                 Empty until then, and empty is fine - plenty of shops file
+                                 their products at one level, and nothing here is required.
+                                 The value sent is the NAME, the same way category_name is,
+                                 so a website reading the catalogue gets both levels without
+                                 resolving any ids. -->
+                            <div class="form-row items-picker-row" id="items_sub_category_row">
+                                <div class="form-group col-md-6">
+                                    <label class="form-control-placeholder items-label-inline" for="items_sub_category">
+                                        <lang class="lang_select_sub_category">Select Sub Category</lang>
+                                    </label>
+                                    <select id='items_sub_category' name="items_sub_category" style='width: 100%;'
+                                        class="select2 items_sub_category" aria-label="Items sub category" data-t-aria-label="lang_items_sub_category">
+                                    </select>
                                 </div>
                             </div>
                             <!-- IC4: the import path exists (items list > Import icon) but
@@ -594,6 +615,8 @@
                                              what it is, and so should this. -->
                                         <label class="form-control-placeholder d-block" for="item_upload_image">
                                             <lang class="lang_item_photos_title">Photos</lang>
+                                            <span class="text-danger">*</span>
+                                            <small class="text-muted"><lang class="lang_item_photos_hint">- at least one, up to 8</lang></small>
                                         </label>
                                         <div class="mb-3">
                                             <div class="Neon Neon-theme-dragdropbox">
@@ -608,7 +631,7 @@
                                                         </div>
                                                         <div class="Neon-input-text m-b-20">
                                                             <h3>
-                                                                <lang class="lang_maxfile_title"> Maximum 12 files here
+                                                                <lang class="lang_maxfile_title"> At least one photo, up to 8
                                                                 </lang>
                                                             </h3>
                                                         </div>

@@ -56,6 +56,133 @@ describe('cursor', () => {
     expect(v1.decodeCursor(null)).toBe(null);
     expect(v1.decodeCursor(Buffer.from('no-pipe-here').toString('base64url'))).toBe(null);
   });
+
+  /*
+   * The trap: encodeCursor used to write an EMPTY timestamp for a row whose
+   * updated_date is missing or not a Date, and decodeCursor rejects an empty
+   * timestamp - so a caller's next page answered 400 bad_cursor and the walk
+   * stopped dead with no way to resume. Every cursor this API ISSUES must be
+   * one this API ACCEPTS; that is the invariant, whatever is on the row.
+   */
+  test('a row with no usable updated_date still yields a cursor that decodes', () => {
+    for (const bad of [
+      { _id: 'a' },
+      { _id: 'b', updated_date: null },
+      { _id: 'c', updated_date: '' },
+      { _id: 'd', updated_date: '2026-08-18T10:00:00.000Z' },
+      { _id: 'e', updated_date: new Date('nonsense') },
+    ]) {
+      const raw = v1.encodeCursor(bad);
+      const back = v1.decodeCursor(raw);
+      expect(back).not.toBe(null);
+      expect(back.id).toBe(bad._id);
+    }
+  });
+
+  test('a dated row is still encoded exactly as before', () => {
+    const doc = { _id: 'abc123', updated_date: new Date('2026-08-18T10:00:00.000Z') };
+    const back = v1.decodeCursor(v1.encodeCursor(doc));
+    expect(back.ts.toISOString()).toBe('2026-08-18T10:00:00.000Z');
+    expect(back.id).toBe('abc123');
+  });
+});
+
+/*
+ * The other half of the same trap, and the half a cursor guard cannot fix: a
+ * row with NO updated_date can never satisfy `updated_date > <cursor>`, so it
+ * is invisible to every paginated walk. An integrator mirroring the catalogue
+ * would silently never see it.
+ */
+describe('updated_date repair', () => {
+  function fakeDb(rows) {
+    const store = rows.slice();
+    const calls = { find: 0, bulkWrite: 0 };
+    return {
+      databaseName: 'posnic_t_shop',
+      calls,
+      _rows: store,
+      collection: () => ({
+        find: (q, opts) => {
+          calls.find++;
+          const out = store.filter((r) => r.updated_date === undefined);
+          const chain = {
+            limit: () => chain,
+            projection: () => chain,
+            toArray: async () => out.map((r) => ({ _id: r._id, created_date: r.created_date })),
+          };
+          return chain;
+        },
+        bulkWrite: async (ops) => {
+          calls.bulkWrite++;
+          for (const op of ops) {
+            const row = store.find((r) => r._id === op.updateOne.filter._id);
+            if (row) Object.assign(row, op.updateOne.update.$set);
+          }
+          return { modifiedCount: ops.length };
+        },
+      }),
+    };
+  }
+
+  beforeEach(() => v1.resetUpdatedDateRepairs());
+
+  test('stamps created_date where it exists, now where it does not', async () => {
+    const created = new Date('2025-01-02T03:04:05.000Z');
+    const db = fakeDb([
+      { _id: 'old-with-created', created_date: created },
+      { _id: 'old-with-neither' },
+      { _id: 'fine', updated_date: new Date('2026-01-01T00:00:00.000Z') },
+    ]);
+    const n = await v1.repairUpdatedDates(db, 'items');
+    expect(n).toBe(2);
+    expect(db._rows.find((r) => r._id === 'old-with-created').updated_date).toEqual(created);
+    // A row with no dates at all gets "now": it costs one extra visit in the
+    // caller's next walk instead of being invisible forever.
+    expect(db._rows.find((r) => r._id === 'old-with-neither').updated_date).toBeInstanceOf(Date);
+    // The already-dated row is untouched.
+    expect(db._rows.find((r) => r._id === 'fine').updated_date.toISOString()).toBe(
+      '2026-01-01T00:00:00.000Z'
+    );
+  });
+
+  test('nothing to repair means no write at all', async () => {
+    const db = fakeDb([{ _id: 'fine', updated_date: new Date() }]);
+    expect(await v1.repairUpdatedDates(db, 'items')).toBe(0);
+    expect(db.calls.bulkWrite).toBe(0);
+  });
+
+  test('runs once per process per collection, then never again', async () => {
+    const db = fakeDb([{ _id: 'old' }]);
+    await v1.ensureUpdatedDates(db, 'items');
+    expect(db.calls.find).toBe(1);
+    await v1.ensureUpdatedDates(db, 'items');
+    await v1.ensureUpdatedDates(db, 'items');
+    // Guarded: the repeat calls do not even reach the database.
+    expect(db.calls.find).toBe(1);
+    // A different collection still gets its own pass.
+    await v1.ensureUpdatedDates(db, 'categories');
+    expect(db.calls.find).toBe(2);
+  });
+
+  test('a failing repair never throws at the caller, and is retried next time', async () => {
+    let attempts = 0;
+    const db = {
+      databaseName: 'shop',
+      collection: () => ({
+        find: () => ({
+          limit: () => ({
+            toArray: async () => {
+              attempts++;
+              throw new Error('not authorised');
+            },
+          }),
+        }),
+      }),
+    };
+    expect(await v1.ensureUpdatedDates(db, 'items')).toBe(0);
+    expect(await v1.ensureUpdatedDates(db, 'items')).toBe(0);
+    expect(attempts).toBe(2); // the key was released, so it tried again
+  });
 });
 
 describe('list query', () => {

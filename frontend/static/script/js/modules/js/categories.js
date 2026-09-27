@@ -505,6 +505,9 @@ PosnicPro.categories = {
                 PosnicPro.record_id = id;
                 $('#category_id').val(PosnicPro.record_id);
                 $('#category_name').val(data.name);
+                /* Its place in the tree, loaded with the edit so the picker
+                   shows where this category already sits. */
+                PosnicPro.categories.loadParentOptions(PosnicPro.record_id, data.parent_id || '');
                 PosnicPro.categories.setCatTileColor(data.tile_color || '');
                 PosnicPro.categories.setCatTileShape(data.tile_shape || '');
                 $('#category_discount_amount').val(data.discount_amount);
@@ -549,6 +552,8 @@ PosnicPro.categories = {
         $('.update-button').attr('disabled', 'disabled').removeClass('btn-outline-success');
         $('#get_category_image_value').val('category.svg');
         $('#category_id').val('');
+        /* A new category starts as a top level unless the shop says otherwise. */
+        PosnicPro.categories.loadParentOptions('', '');
         $('#categories_new .alert').remove();
         $('#category_value_check').val('');
         $('#show_last_created_category').hide();
@@ -606,6 +611,51 @@ PosnicPro.categories = {
         $("#category_image_upload_form").find('.has-error').removeClass("haserror");
         $('#category_image_upload').attr('src', 'static/images/default/category.svg');
         $('#category_description').html('');
+        /* Back to "top level", or a new category would silently inherit the
+           parent of whatever was edited before it. */
+        PosnicPro.categories.loadParentOptions('', '');
+    },
+
+    /*
+     * Fill the parent picker.
+     *
+     * A shop adds its own sub-categories by picking the category it belongs
+     * under; leaving it empty makes a top level. Only categories that are
+     * THEMSELVES top level are offered, and never the one being edited - a
+     * category cannot be its own parent, and a third level is a shelf the site
+     * has no URL for.
+     */
+    loadParentOptions: function (editingId, selectedParentId) {
+        var $parent = $('#category_parent');
+        if (!$parent.length) { return; }
+        $parent.empty().append('<option value=""></option>');
+        PosnicPro.get({ url: 'categories/getCategoryAjaxList', data: 'query=' }, function (response) {
+            $.each(response.suggestions || [], function (i, cat) {
+                if (cat.parent_id) { return; }
+                if (String(cat.id) === String(editingId || '')) { return; }
+                $parent.append($('<option>').attr('value', cat.id).text(cat.name));
+            });
+            PosnicPro.categories.setParentSelection(selectedParentId);
+        }, function () {
+            /* No list means no parent can be chosen, and empty already means
+               "top level" - so the form stays usable rather than broken. */
+            $parent.val('');
+        });
+    },
+
+    setParentSelection: function (parentId) {
+        var $parent = $('#category_parent');
+        if (!$parent.length) { return; }
+        var wanted = String(parentId || '');
+        /* A parent the list does not carry - an inactive one, or a response
+           that has not arrived yet - stays selectable, so opening an existing
+           sub-category never silently moves it to the top level. */
+        if (wanted && !$parent.find('option[value="' + wanted + '"]').length) {
+            $parent.append($('<option>').attr('value', wanted).text(
+                PosnicPro.i18n.t('lang_current_parent', 'Current parent')
+            ));
+        }
+        $parent.val(wanted);
     },
     validForm: function () {
 

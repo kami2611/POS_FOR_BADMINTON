@@ -36,6 +36,31 @@ If you would rather not receive it, the installer can be built without a bundled
 MongoDB and pointed at one you already run; see `download-mongodb.bat` and
 `MONGODB_URI`.
 
+## Cloudflare `cloudflared`
+
+**Shipped as:** `resources/cloudflared/cloudflared.exe` on Windows (and the
+host-platform equivalent in a development tree)
+**Version:** pinned in `builds/cloudflared/cloudflared.lock.json`, which also
+records the SHA-256 of the exact binary a build ships
+**Copyright:** © Cloudflare, Inc.
+**Licence:** Apache License 2.0
+**Source:** <https://github.com/cloudflare/cloudflared>
+**Full text:** <https://github.com/cloudflare/cloudflared/blob/master/LICENSE>
+
+**Only present in an installer built for a specific shop's website.** A stock
+Posnic build does not contain it and does not start it.
+
+When a shop is paired with a website that reads its catalogue, that website has
+to be able to reach the till - which sits on a shop LAN behind a router, with no
+public address of its own. `cloudflared` is the client that gives it one,
+connecting outbound to Cloudflare's network so the website can call in. The
+binary is redistributed unmodified, and this notice is the attribution Apache-2.0
+asks for.
+
+Turning it on changes which parties are in the path of a shop's data. That is
+recorded in [docs/SUBPROCESSORS.md](docs/SUBPROCESSORS.md) and
+[docs/PRIVACY.md](docs/PRIVACY.md); read those before enabling a paired build.
+
 ## Noto receipt fonts
 
 **Shipped as:** `src/fonts/NotoSans*.ttf` inside `app.asar`

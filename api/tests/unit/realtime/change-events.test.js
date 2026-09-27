@@ -13,6 +13,7 @@
 const { EventEmitter } = require('events');
 const { changeEvents, entityFromPath, ENTITIES } = require('../../../src/realtime/change-events');
 const bus = require('../../../src/realtime/event-bus');
+const webhooks = require('../../../src/realtime/webhooks');
 
 const fakeReq = (method, path, dbName = 'shop_one') => ({
   method,
@@ -84,6 +85,50 @@ describe('changeEvents', () => {
       res.emit('finish');
     }
     expect(sink.lines.length).toBe(0);
+  });
+
+  /*
+   * The receiver has to be able to tell WHICH shop is speaking, or a
+   * mis-paired connection would publish one shop's stock on another shop's
+   * website while both sides looked perfectly healthy.
+   */
+  test('the shop names itself: seller_id is the licence, seller_name the display name', async () => {
+    const spy = jest.spyOn(webhooks, 'publish').mockResolvedValue(1);
+    try {
+      const req = fakeReq('POST', '/api/items');
+      req.tenantContext = { licenseId: 'lic_123', branchName: 'Kamran Sports' };
+      req.user = { license: 'lic_123' };
+      const res = fakeRes(200);
+      await run(req, res);
+      res.emit('finish');
+      expect(spy).toHaveBeenCalledWith(
+        req.db,
+        'shop_one',
+        expect.objectContaining({
+          entity: 'items',
+          seller_id: 'lic_123',
+          seller_name: 'Kamran Sports',
+        })
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('an install that cannot identify itself says so rather than guessing', async () => {
+    const spy = jest.spyOn(webhooks, 'publish').mockResolvedValue(1);
+    try {
+      const req = fakeReq('POST', '/api/sales');
+      req.tenantContext = {}; // no licence resolved, no user
+      const res = fakeRes(200);
+      await run(req, res);
+      res.emit('finish');
+      const sent = spy.mock.calls[0][2];
+      expect(sent.seller_id).toBe('');
+      expect(sent.seller_name).toBe('');
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('the signal goes to the writing shop, not the others', async () => {

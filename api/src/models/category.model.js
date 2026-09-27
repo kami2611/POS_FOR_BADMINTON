@@ -22,6 +22,28 @@ const categorySchema = new mongoose.Schema(
       minlength: 2,
       maxlength: 100,
     },
+    /*
+     * The second level (ShuttleZone integration ask I4.7).
+     *
+     * A nullable self-reference, exactly one level deep: a top-level category
+     * has none, and a category whose parent_id points at another category is
+     * that parent's leaf. The leaf is ALSO denormalised onto the item as a
+     * plain string (items.sub_category), the same way category_name already
+     * sits beside category_id, so a reader gets both levels in one document
+     * and a rename cannot orphan the item.
+     *
+     * One deliberate non-change: the unique index on {name, branch_id} below
+     * still means a name is unique across the whole branch, not per parent.
+     * Widening it is a data-integrity decision of its own (two categories
+     * called "Shirts" under different parents would make any name lookup
+     * ambiguous), and nothing here needs it - the seeded tree has no repeated
+     * leaf names. See docs/POS_SYNC.md.
+     */
+    parent_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Category',
+      default: null,
+    },
     discount_amount: {
       type: Number,
       default: 0,

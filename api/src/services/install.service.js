@@ -286,6 +286,24 @@ class InstallService {
         console.log('Clean catalogue selected. No starter products inserted.');
       }
 
+      /*
+       * The category tree, on BOTH paths (ShuttleZone ask I4.7).
+       *
+       * Deliberately outside the demo-data branch above: the tree is not
+       * samples, it is the vocabulary a shopkeeper files products under, and
+       * the website's shelves are named with the same words. A shop that
+       * declined starter products still needs it - otherwise its products
+       * reach the website's top-level pages and stop there.
+       */
+      await this._seedTaxonomyTree({
+        branchId,
+        branchName: data.register_companyname.trim(),
+        userId,
+        username: data.register_username,
+        licenseId,
+        now,
+      });
+
       return {
         status: true,
         data: recovery
@@ -1689,6 +1707,98 @@ class InstallService {
     console.log(
       `📈 Demo activity: ${sales.length} sales, ${quotes.length} quotes, ${purchases.length} purchases`
     );
+  }
+
+  /**
+   * Seed the shop's two-level category tree.
+   *
+   * The tree comes from api/src/json/pos-taxonomy.json, which ShuttleZone
+   * generates from its own taxonomy (`--emit`). That is the whole point: the
+   * leaves a shopkeeper picks here are the same words the website's
+   * sub-category pages are named with, so an item filed under "Beginner
+   * Rackets" lands on the website's beginner rackets shelf without anybody
+   * mapping anything by hand.
+   *
+   * Idempotent by name, so a reinstall, a repair run or a re-run of the
+   * installer adds what is missing and never doubles the tree.
+   *
+   * Never fatal: a shop with no categories is still a working till, and the
+   * shopkeeper can always make their own - which is exactly what a
+   * seller-created category is, and ShuttleZone holds those for review.
+   */
+  async _seedTaxonomyTree(params = {}) {
+    try {
+      const { branchId, branchName, userId, username, licenseId, now } = params;
+      const file = path.join(__dirname, '../json/pos-taxonomy.json');
+      if (!fs.existsSync(file)) {
+        console.warn('[taxonomy] no pos-taxonomy.json in this build - skipping');
+        return { status: false, reason: 'no taxonomy file' };
+      }
+      const tree = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!Array.isArray(tree) || !tree.length) return { status: false, reason: 'empty taxonomy' };
+
+      const categories = await this.repository.getCollection('categories');
+      const existing = await categories
+        .find({ license: licenseId }, { projection: { name: 1 } })
+        .toArray();
+      const have = new Set(existing.map((c) => String(c.name || '').toLowerCase()));
+
+      const base = {
+        branch_id: branchId,
+        branch_name: branchName,
+        discount_percentage: 0.0,
+        discount_amount: 0,
+        description: '',
+        image: '',
+        created_date: now,
+        created_by: username,
+        created_by_id: userId,
+        updated_date: now,
+        updated_by: username,
+        updated_by_id: username,
+        license: licenseId,
+        is_active: true,
+      };
+
+      let parents = 0;
+      let leaves = 0;
+      for (const row of tree) {
+        const parentName = String((row && row.category) || '').trim();
+        if (!parentName) continue;
+
+        let parentId = null;
+        if (have.has(parentName.toLowerCase())) {
+          const found = await categories.findOne(
+            { license: licenseId, name: parentName },
+            { projection: { _id: 1 } }
+          );
+          parentId = (found && found._id) || null;
+        } else {
+          const inserted = await categories.insertOne({
+            ...base,
+            name: parentName,
+            parent_id: null,
+          });
+          parentId = inserted.insertedId;
+          have.add(parentName.toLowerCase());
+          parents++;
+        }
+
+        for (const rawLeaf of row.subCategories || []) {
+          const leaf = String(rawLeaf || '').trim();
+          if (!leaf || have.has(leaf.toLowerCase())) continue;
+          await categories.insertOne({ ...base, name: leaf, parent_id: parentId });
+          have.add(leaf.toLowerCase());
+          leaves++;
+        }
+      }
+
+      console.log(`🌿 Category tree seeded: ${parents} categories, ${leaves} sub-categories`);
+      return { status: true, parents, leaves };
+    } catch (error) {
+      console.error('Error in _seedTaxonomyTree:', error);
+      return { status: false, reason: error.message };
+    }
   }
 
   async _insertDemoData(params) {
