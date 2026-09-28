@@ -104,24 +104,51 @@ function ingressRules({ hostname, port }) {
   return rules;
 }
 
+/**
+ * One scalar, ready to sit after `key:` in the config below.
+ *
+ * SINGLE-QUOTED, and that is the whole reason this is a function rather than a
+ * template. A double-quoted YAML string processes backslash escapes, so the
+ * Windows path this is handed on a real install -
+ * C:\Users\shop\AppData\Roaming\Posnic\shuttlezone-seed\tunnel-credentials.json
+ * - is read as the start of a \U unicode escape and cloudflared refuses the
+ * ENTIRE file:
+ *
+ *   yaml: line 4: did not find expected hexadecimal number
+ *
+ * That is what a shop saw: the seed applied, MongoDB started, the API answered
+ * and the dashboard loaded, while the tunnel restarted every fifteen seconds
+ * against a config it could not parse. In a single-quoted scalar the only
+ * escape is a doubled '' for a literal quote, so the path arrives as written.
+ *
+ * Hand-written rather than dumped with js-yaml on purpose. js-yaml is a
+ * devDependency here, and scripts/check-advisories.js records why it stays one:
+ * "we import js-yaml nowhere ourselves" is what keeps 4.x's unfixed advisory
+ * out of a shipped build. Three scalars and a list do not justify importing a
+ * parser into the asar to emit them.
+ */
+function yamlScalar(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
 /** Render the config file cloudflared is started with. */
 function buildConfigYaml({ tunnelId, credentialsFile, hostname, port, metricsPort }) {
   const lines = [
     `# Written by Posnic at launch for this shop's website pairing.`,
     `# Regenerated on every start, because the local API port is not fixed.`,
-    `tunnel: ${tunnelId}`,
-    `credentials-file: "${credentialsFile}"`,
+    `tunnel: ${yamlScalar(tunnelId)}`,
+    `credentials-file: ${yamlScalar(credentialsFile)}`,
     `no-autoupdate: true`,
-    `metrics: 127.0.0.1:${metricsPort}`,
+    `metrics: ${yamlScalar(`127.0.0.1:${metricsPort}`)}`,
     `ingress:`,
   ];
   for (const rule of ingressRules({ hostname, port })) {
     if (rule.hostname) {
-      lines.push(`  - hostname: ${rule.hostname}`);
-      lines.push(`    path: ${rule.path}`);
-      lines.push(`    service: ${rule.service}`);
+      lines.push(`  - hostname: ${yamlScalar(rule.hostname)}`);
+      lines.push(`    path: ${yamlScalar(rule.path)}`);
+      lines.push(`    service: ${yamlScalar(rule.service)}`);
     } else {
-      lines.push(`  - service: ${rule.service}`);
+      lines.push(`  - service: ${yamlScalar(rule.service)}`);
     }
   }
   lines.push('');

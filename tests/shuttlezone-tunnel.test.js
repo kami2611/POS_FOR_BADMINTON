@@ -38,6 +38,12 @@ const path = require('path');
 
 const tunnel = require('../src/shuttlezone-tunnel');
 
+/* A devDependency, and test-only on purpose: the module writes this config by
+   hand rather than dumping it, and yamlScalar() there says why. Parsing here is
+   what makes the assertions below about what cloudflared READS rather than about
+   the punctuation we happened to write. */
+const YAML = require('js-yaml');
+
 const TUNNEL_ID = 'abc12345-1111-2222-3333-444455556666';
 const GOOD = {
   tunnel: {
@@ -119,28 +125,74 @@ test('the ingress is the website surface and a 404, in that order', () => {
 });
 
 test('the generated config names the live port, not a remembered one', () => {
-  const yaml = tunnel.buildConfigYaml({
-    tunnelId: TUNNEL_ID,
-    credentialsFile: 'C:/seeds/karachi.json',
-    hostname: 'shop.example.com',
-    port: 42590,
-    metricsPort: 51000,
-  });
-  assert.match(yaml, /^tunnel: abc12345-1111/m);
-  assert.match(yaml, /service: http:\/\/127\.0\.0\.1:42590/g);
-  assert.match(yaml, /no-autoupdate: true/);
-  assert.match(yaml, /metrics: 127\.0\.0\.1:51000/);
-  assert.match(yaml, /service: http_status:404/);
+  const config = YAML.load(
+    tunnel.buildConfigYaml({
+      tunnelId: TUNNEL_ID,
+      credentialsFile: 'C:/seeds/karachi.json',
+      hostname: 'shop.example.com',
+      port: 42590,
+      metricsPort: 51000,
+    })
+  );
+
+  assert.strictEqual(config.tunnel, TUNNEL_ID);
+  assert.strictEqual(config['no-autoupdate'], true);
+  assert.strictEqual(config.metrics, '127.0.0.1:51000');
+  assert.deepStrictEqual(
+    config.ingress.map((rule) => rule.service),
+    ['http://127.0.0.1:42590', 'http://127.0.0.1:42590', 'http_status:404']
+  );
+
   /* A second launch on a moved port rewrites this; the port must not be baked. */
-  const moved = tunnel.buildConfigYaml({
+  const movedText = tunnel.buildConfigYaml({
     tunnelId: TUNNEL_ID,
     credentialsFile: 'C:/seeds/karachi.json',
     hostname: 'shop.example.com',
     port: 42017,
     metricsPort: 51001,
   });
-  assert.match(moved, /127\.0\.0\.1:42017/);
-  assert.doesNotMatch(moved, /42590/);
+  const moved = YAML.load(movedText);
+  assert.strictEqual(moved.ingress[0].service, 'http://127.0.0.1:42017');
+  assert.ok(!movedText.includes('42590'), 'the previous port was left behind');
+});
+
+/*
+ * THE WINDOWS PATH IS WHAT THIS PIN EXISTS FOR.
+ *
+ * The credentials file is an absolute path, and on Windows path.join gives it
+ * backslashes - C:\Users\shop\AppData\Roaming\Posnic\shuttlezone-seed\
+ * tunnel-credentials.json. Written into a DOUBLE-quoted YAML string, the \U in
+ * \Users begins a unicode escape and cloudflared refuses the whole file:
+ *
+ *   yaml: line 4: did not find expected hexadecimal number
+ *
+ * so the tunnel restarted every fifteen seconds under a log line, on a till
+ * where everything else worked. The test above passed a forward-slash path,
+ * which parses under either quoting, and that is why it did not catch this.
+ *
+ * Parsed rather than pattern-matched: what has to be true is the path
+ * cloudflared reads back, not the quotes around it.
+ */
+test('a Windows credentials path survives as written', () => {
+  const windowsPath =
+    'C:\\Users\\shop\\AppData\\Roaming\\Posnic\\shuttlezone-seed\\tunnel-credentials.json';
+
+  const config = YAML.load(
+    tunnel.buildConfigYaml({
+      tunnelId: TUNNEL_ID,
+      credentialsFile: windowsPath,
+      hostname: 'shop.example.com',
+      port: 42590,
+      metricsPort: 51000,
+    })
+  );
+
+  assert.strictEqual(config['credentials-file'], windowsPath);
+  assert.strictEqual(config.tunnel, TUNNEL_ID);
+  assert.deepStrictEqual(
+    config.ingress.map((rule) => rule.path || '(catch-all)'),
+    ['/api/v1/.*', '/uploads/.*', '(catch-all)']
+  );
 });
 
 test('the management API is not reachable through the tunnel', () => {
@@ -318,11 +370,17 @@ test('the process is launched with the generated config, and the config names th
   assert.strictEqual(argv[2], path.join(devRoot, 'shuttlezone-tunnel', 'config.yml'));
   assert.strictEqual(options.windowsHide, true, 'no console window on a shopkeeper till');
 
-  const yaml = fs.readFileSync(argv[2], 'utf8');
-  assert.match(yaml, /127\.0\.0\.1:42590/);
-  assert.match(yaml, /hostname: karachi-sports\.example\.com/);
-  assert.match(yaml, /service: http_status:404/);
-  assert.match(yaml, /credentials-file: ".*karachi-sports\.json"/);
+  /* Parsed, not pattern-matched. The file is read by cloudflared, so what has
+     to be true is that it parses and holds the path the tunnel was pointed at. */
+  const config = YAML.load(fs.readFileSync(argv[2], 'utf8'));
+  assert.strictEqual(
+    config['credentials-file'],
+    path.join(seedDir, 'karachi-sports.json'),
+    'cloudflared must read back the credentials path it was given'
+  );
+  assert.strictEqual(config.ingress[0].service, 'http://127.0.0.1:42590');
+  assert.strictEqual(config.ingress[0].hostname, 'karachi-sports.example.com');
+  assert.strictEqual(config.ingress[config.ingress.length - 1].service, 'http_status:404');
 
   subject.stop();
   assert.strictEqual(subject.child, null, 'stop must not leave a process behind');
