@@ -6559,20 +6559,10 @@
                     "maxLength": 200,
                     "description": "Item name must be between 1 and 200 characters"
                   },
-                  "selling_price": {
-                    "type": "number",
-                    "minimum": 0,
-                    "description": "Selling price must be a positive number"
-                  },
                   "company_price": {
                     "type": "number",
                     "minimum": 0,
                     "description": "Company price must be a positive number"
-                  },
-                  "available_quantity": {
-                    "type": "number",
-                    "minimum": 0,
-                    "description": "Available quantity must be a non-negative number"
                   },
                   "barcode_id": {
                     "type": "string",
@@ -8115,20 +8105,10 @@
                     "maxLength": 200,
                     "description": "Item name cannot be empty"
                   },
-                  "selling_price": {
-                    "type": "number",
-                    "minimum": 0,
-                    "description": "Selling price must be a positive number"
-                  },
                   "company_price": {
                     "type": "number",
                     "minimum": 0,
                     "description": "Company price must be a positive number"
-                  },
-                  "available_quantity": {
-                    "type": "number",
-                    "minimum": 0,
-                    "description": "Available quantity must be a non-negative number"
                   },
                   "barcode_id": {
                     "type": "string",
