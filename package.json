@@ -118,6 +118,7 @@
       "src/browser-cloud-auth.js",
       "src/cloud-shop-identity.js",
       "src/connector-runtime.js",
+      "src/shuttlezone-tunnel.js",
       "src/window-chrome.js",
       "src/window-theme.js",
       "src/window-theme.css",

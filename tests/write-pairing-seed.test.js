@@ -16,7 +16,10 @@ const assert = require('node:assert');
 
 const { buildPairing, REQUIRED_SECRETS } = require('../.github/scripts/write-pairing-seed');
 
-const TUNNEL_ID = 'b5d86f35-79a4-499f-b55d-99c31cabc7e4';
+/* Synthetic, like everything else here. A real tunnel id was used at first,
+   which is the one kind of value this file must not carry: the repository is
+   public, and the id belongs to a named shop's tunnel. */
+const TUNNEL_ID = '11111111-2222-3333-4444-555555555555';
 const CREDENTIALS = {
   AccountTag: 'a'.repeat(32),
   TunnelSecret: 'c2VjcmV0',

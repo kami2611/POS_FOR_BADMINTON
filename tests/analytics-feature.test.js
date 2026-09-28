@@ -55,6 +55,14 @@ test('the save door coerces the toggle and refuses a malformed id', () => {
 
 test('PRIVACY.md tells the truth about the switch', () => {
   const privacy = read('docs/PRIVACY.md');
-  assert.match(privacy, /Google Analytics \| Yes \|/);
+  /*
+   * The CELLS, not the spaces between them. docs/ is prettier-formatted, so
+   * the table is re-aligned to its widest cell whenever anyone edits the file
+   * - adding the paired-build row padded every column - and a pin written
+   * against a single space between pipes fails on ordinary tidying rather than
+   * on a change to what the table says. What is being held here is that the
+   * row exists and reads "Yes".
+   */
+  assert.match(privacy, /Google Analytics\s*\| Yes\s*\|/);
   assert.match(privacy, /refuses Google's domains outright/);
 });

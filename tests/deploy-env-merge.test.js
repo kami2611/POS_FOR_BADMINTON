@@ -123,6 +123,25 @@ test('running the real step keeps every key it did not set', (t) => {
     return;
   }
 
+  /*
+   * GNU sed, not BSD. The step de-duplicates with `sed -i "/^$k=/d" file`,
+   * which is what the instance's sed accepts. BSD sed - the one macOS ships -
+   * reads the next argument as a backup SUFFIX, so `-i` swallows the
+   * expression and the file path is then taken as the script:
+   *
+   *   sed: 1: "/var/folders/...": invalid command code f
+   *
+   * The script is right for the machine it runs on; this is about the laptop
+   * running it. Skipped there rather than rewritten into a form the instance
+   * does not use - CI is ubuntu, so the behavioural half still runs on every
+   * pull request, and macOS still gets the static checks above.
+   */
+  const sed = spawnSync('sed', ['--version'], { encoding: 'utf8' });
+  if (!/GNU/.test(sed.stdout || '')) {
+    t.skip('GNU sed is not available; the deploy step runs it on the instance');
+    return;
+  }
+
   const run = stepRun('deploy-api.yml', 'Write storage env')
     /* GitHub substitutes these before bash ever sees them. */
     .replace(/\$\{\{[^}]*\}\}/g, 'placeholder')
