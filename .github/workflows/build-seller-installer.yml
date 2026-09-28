@@ -149,15 +149,23 @@ jobs:
       - name: Prepare everything the installer bundles
         run: npm run prebuild
 
+      # ONE NAME, END TO END. write-pairing-seed.js reads these variables by the
+      # same names the secrets have - SHUTTLEZONE_WEBHOOK_URL and the rest - so
+      # the `env:` keys below are the secret names, not a shorter vocabulary of
+      # this step's own. They were short once, and the failure is worth
+      # remembering because nothing about it looks wrong: GitHub substitutes an
+      # empty string for a name that is not there, so the script saw six unset
+      # variables while all six secrets were present, and the run stopped at
+      # "missing 6 secrets" with every value masked and set.
       - name: Write the pairing seed from secrets
         shell: bash
         env:
-          WEBHOOK_URL: ${{ secrets.SHUTTLEZONE_WEBHOOK_URL }}
-          WEBHOOK_SECRET: ${{ secrets.SHUTTLEZONE_WEBHOOK_SECRET }}
-          API_TOKEN: ${{ secrets.SHUTTLEZONE_API_TOKEN }}
-          TUNNEL_HOSTNAME: ${{ secrets.SHUTTLEZONE_TUNNEL_HOSTNAME }}
-          TUNNEL_ID: ${{ secrets.SHUTTLEZONE_TUNNEL_ID }}
-          TUNNEL_CREDENTIALS_B64: ${{ secrets.SHUTTLEZONE_TUNNEL_CREDENTIALS_B64 }}
+          SHUTTLEZONE_WEBHOOK_URL: ${{ secrets.SHUTTLEZONE_WEBHOOK_URL }}
+          SHUTTLEZONE_WEBHOOK_SECRET: ${{ secrets.SHUTTLEZONE_WEBHOOK_SECRET }}
+          SHUTTLEZONE_API_TOKEN: ${{ secrets.SHUTTLEZONE_API_TOKEN }}
+          SHUTTLEZONE_TUNNEL_HOSTNAME: ${{ secrets.SHUTTLEZONE_TUNNEL_HOSTNAME }}
+          SHUTTLEZONE_TUNNEL_ID: ${{ secrets.SHUTTLEZONE_TUNNEL_ID }}
+          SHUTTLEZONE_TUNNEL_CREDENTIALS_B64: ${{ secrets.SHUTTLEZONE_TUNNEL_CREDENTIALS_B64 }}
           SELLER: ${{ inputs.seller }}
         run: node .github/scripts/write-pairing-seed.js
 

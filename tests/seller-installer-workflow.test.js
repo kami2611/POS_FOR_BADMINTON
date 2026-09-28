@@ -32,6 +32,8 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
+const { REQUIRED_SECRETS } = require('../.github/scripts/write-pairing-seed');
+
 const ROOT = path.join(__dirname, '..');
 const FILE = '.github/workflows/build-seller-installer.yml';
 const workflow = fs.readFileSync(path.join(ROOT, FILE), 'utf8');
@@ -130,4 +132,58 @@ test('no seller name is baked in as a default', () => {
   const sellerInput = config.slice(config.indexOf('seller:'), config.indexOf('dry_run:'));
   assert.ok(!/default:/.test(sellerInput), 'the seller input must not have a default');
   assert.match(sellerInput, /required:\s*true/);
+});
+
+/*
+ * THE STEP HANDS THE SCRIPT THE NAMES THE SCRIPT READS.
+ *
+ * The two halves were written apart. The workflow set WEBHOOK_URL, API_TOKEN
+ * and so on; write-pairing-seed.js read SHUTTLEZONE_WEBHOOK_URL and the rest.
+ * Both halves are individually reasonable and the gap between them is a
+ * rename, so nothing about it looks wrong in review - and the first run of this
+ * workflow got all the way through the MongoDB download and the bundle before
+ * stopping here.
+ *
+ * What makes it worth a test rather than a fix: GitHub substitutes an empty
+ * string for a secret name that does not exist, so all six secrets can be set
+ * and correctly masked in the log while the script sees six empty variables and
+ * exits at
+ *
+ *     [pairing] missing 6 secrets: SHUTTLEZONE_WEBHOOK_URL, ...
+ *
+ * The step's `env:` keys are the contract, so they are read from the script's
+ * own REQUIRED_SECRETS rather than copied into a second list here.
+ */
+test('the seed step passes the script the variables it reads', () => {
+  const step = config.slice(config.indexOf('Write the pairing seed from secrets'));
+  const env = step.slice(step.indexOf('env:'), step.indexOf('run:'));
+
+  for (const name of REQUIRED_SECRETS) {
+    assert.match(
+      env,
+      new RegExp(`^\\s+${name}:\\s*\\$\\{\\{\\s*secrets\\.${name}\\s*\\}\\}`, 'm'),
+      `the seed step does not set ${name} from secrets.${name}. ` +
+        'write-pairing-seed.js reads that exact variable by name, so a rename here ' +
+        'fails only on a runner, as "missing 6 secrets" with every secret present.'
+    );
+  }
+
+  /* The label is an input rather than a secret, and the script reads it under
+     its own short name. */
+  assert.match(env, /^\s+SELLER:\s*\$\{\{\s*inputs\.seller\s*\}\}/m);
+
+  /* Nothing else: a stray key here is a value the script will never look at,
+     and the secret it was meant to carry arrives as an empty string. */
+  const keys = env
+    .split('\n')
+    .map((line) => line.match(/^\s+([A-Z0-9_]+):/))
+    .filter(Boolean)
+    .map((match) => match[1])
+    .filter((key) => key !== 'SELLER');
+
+  assert.deepStrictEqual(
+    keys.sort(),
+    [...REQUIRED_SECRETS].sort(),
+    'the env block and REQUIRED_SECRETS have drifted apart'
+  );
 });
