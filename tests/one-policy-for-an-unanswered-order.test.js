@@ -133,10 +133,27 @@ test('and the shop-side rule is actually started, not merely written', () => {
    * The family of bug this whole change is fixing: a module that decides
    * perfectly and is called by nobody. A wiring test is the only thing that
    * can say otherwise.
+   *
+   * The rule is started through the shared boot-timers module now, so that the
+   * desktop boot (src/server.js) starts it as well as the server boot. Both
+   * halves of that wiring are asserted: the server starts the timers, and the
+   * timers start this rule. Weakening it to only the first would let the rule
+   * fall out of the shared list with nothing to say so.
    */
   const fs = require('node:fs');
   const server = fs.readFileSync(path.join(ROOT, 'api', 'server.js'), 'utf8');
-  assert.match(server, /require\('\.\/src\/services\/unanswered-orders'\)\.start\(\)/);
+  assert.match(
+    server,
+    /startBootTimers\s*\(/,
+    'api/server.js no longer starts the boot timers, so nothing starts the shop rule'
+  );
+
+  const timers = fs.readFileSync(path.join(ROOT, 'api', 'src', 'boot-timers.js'), 'utf8');
+  assert.match(
+    timers,
+    /require\('\.\/services\/unanswered-orders'\)\.start\(\)/,
+    'the shared boot timers no longer start the unanswered-order rule'
+  );
 
   const main = fs.readFileSync(path.join(ROOT, 'src', 'main.js'), 'utf8');
   assert.match(main, /process\.on\('posnic:order-resolved'/,

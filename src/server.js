@@ -519,6 +519,30 @@ module.exports = async function startServer(options = {}) {
 
     // Do not redirect the Electron window until Express accepts requests.
     await serverReady;
+
+    /*
+     * The background timers, the same set api/server.js starts.
+     *
+     * The desktop build boots THIS file, not api/server.js: it requires
+     * api/app.js in-process and listens here. That difference is easy to miss
+     * and it was expensive. `realtime/scheduler` is the only caller of the
+     * ShuttleZone pairing, so an installer built for a seller provisioned
+     * neither its API token nor its webhook subscription, and the website's
+     * own Test connection was answered 401 - while every local test passed,
+     * because `npm run dev` runs api/server.js instead.
+     *
+     * Now both boot paths call the same function, so they cannot disagree
+     * again. The require is by absolute path because this file sits at the
+     * resources root at runtime while boot-timers.js lives inside the api
+     * tree that was extracted beside it.
+     */
+    try {
+      require(path.join(apiPath, 'src', 'boot-timers')).startBootTimers();
+    } catch (bootErr) {
+      /* A till still sells without its timers; the API is already listening. */
+      console.warn('[boot] timers not started:', bootErr && bootErr.message);
+    }
+
     reportProgress({
       stage: 'ready',
       text: 'Loading Interface...',

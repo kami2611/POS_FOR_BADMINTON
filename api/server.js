@@ -106,36 +106,22 @@ const startServer = async () => {
       console.log('🚀 =====================================');
 
       /*
-       * THE SHOP'S DECLARED DEFAULT, LOOKING FOR ORDERS NOBODY ANSWERED.
+       * The background timers, in one place shared with the desktop boot.
        *
-       * Started here rather than on the till, because a shop served from the
-       * cloud has no till and its held orders would otherwise sit for ever.
-       * Does nothing at all until a shop has actually asked for a rule; see
-       * src/services/unanswered-orders.js.
+       * This file is not the only way this API starts. The packaged till boots
+       * through src/server.js, which requires api/app.js directly and never
+       * reaches this function - and the two used to disagree about which
+       * timers ran, which silently cost a paired installer its ShuttleZone
+       * token. The list lives in src/boot-timers.js now so both entry points
+       * start exactly the same work. See that file for what each timer is.
        */
       try {
-        require('./src/services/unanswered-orders').start();
-        console.log('✅ Unanswered-order rule running');
+        require('./src/boot-timers').startBootTimers();
       } catch (e) {
-        /* A shop still takes orders without it. Never fatal at boot. */
-        console.warn('[unanswered-orders] not started:', e && e.message);
-      }
-
-      /*
-       * CHANGE SIGNALS LEAVING THE BUILDING BY THEMSELVES.
-       *
-       * Webhook retries used to drain only when somebody used the till, so a
-       * shop that edited its catalogue and then closed for the night left its
-       * website stale - and nothing on either side looked broken. Runs beside
-       * the other boot timers; see src/realtime/scheduler.js for what it does
-       * and, more importantly, what it deliberately does not.
-       */
-      try {
-        require('./src/realtime/scheduler').start();
-        console.log('✅ Webhook delivery scheduler running');
-      } catch (e) {
-        /* A shop still sells without it. Never fatal at boot. */
-        console.warn('[webhooks] scheduler not started:', e && e.message);
+        /* startBootTimers already handles a failing timer individually;
+           reaching here means the module itself would not load, which must
+           still not stop the API coming up. */
+        console.warn('[boot] timers not started:', e && e.message);
       }
     });
 
