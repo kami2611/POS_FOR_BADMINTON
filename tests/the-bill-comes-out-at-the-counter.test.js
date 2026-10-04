@@ -995,8 +995,8 @@ test('a real sale reaches the paper with its items and its total on it', () => {
 
   assert.match(paper, /Chicken Biryani/, 'the items never reached the paper');
   assert.match(paper, /Butter Naan/, 'a line was lost');
-  assert.match(paper, /440\.00/, 'a line amount never reached the paper');
-  assert.match(paper, /TOTAL\s+578\.00/, 'the total printed as zero - the blank-bill bug');
+  assert.match(paper, /440/, 'a line amount never reached the paper');
+  assert.match(paper, /TOTAL\s+578/, 'the total printed as zero - the blank-bill bug');
   assert.match(paper, /Kirana Store/, 'the shop has no name on its own bill');
   assert.match(paper, /INV-2291/, 'the bill has no number to refer to');
 });
@@ -1080,7 +1080,7 @@ test('a shop whose branch row could not be read still gets a bill', () => {
      trade: the items and the total are what the guest is paying against. */
   const paper = onPaper(renderSale(buildBillPayload(A_REAL_SALE, {}), { paperWidth: '48' }));
   assert.match(paper, /Chicken Biryani/);
-  assert.match(paper, /578\.00/);
+  assert.match(paper, /578/);
 });
 
 test('an Indian shop sees its tax split the way its paper always splits it', () => {

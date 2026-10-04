@@ -796,7 +796,26 @@ function renderSale(sale, options = {}, renderer) {
    * narrows the item name column, which wraps; it cannot overflow the line.
    */
   const symbol = sale.currency ? String(sale.currency) : '';
-  const money = (n) => symbol + Number(n || 0).toFixed(2);
+  /*
+   * A whole amount prints without its decimal tail.
+   *
+   * The owner, reading a printed bill: "remove the fraction from the price in
+   * print receipt. e.g price 12000.00. remove the ending .00 from price."
+   *
+   * So 12000.00 prints as 12000, and 12000.50 still prints as 12000.50 - only
+   * the tail that says nothing is dropped. The kitchen ticket already prints
+   * this way (see escpos-kot.js), and a bill whose prices disagree with the
+   * ticket printed beside it is a support call.
+   *
+   * The amount column is right-aligned, so every amount still ENDS in the same
+   * column. What cannot survive is the decimal-point alignment the column used
+   * to have: there is no point to line up once whole amounts carry none.
+   * escpos-columns.test.js asserts the property that is left, and says why.
+   */
+  const money = (n) => {
+    const value = Number(n || 0);
+    return symbol + (Number.isInteger(value) ? String(value) : value.toFixed(2));
+  };
 
   /*
    * The logo goes above the name, where a letterhead goes.

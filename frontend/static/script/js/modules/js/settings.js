@@ -5293,6 +5293,30 @@ PosnicPro.integrations = {
         'receiving', 'expense', 'branch', 'user', 'report', 'dashboard'],
     ENTITIES: ['sales', 'items', 'receivings', 'customers', 'suppliers',
         'categories', 'registers', 'expenses', 'shifts', 'easytables'],
+    /*
+     * What the ShuttleZone row says it keeps in step with.
+     *
+     * Hardcoded, and deliberately NOT derived from the subscription's own
+     * `events`. The wire carries entity names - items, categories, sales,
+     * receivings - because that is what the change seam publishes, and none of
+     * those words tells a shopkeeper anything. They invite the worse question:
+     * why is my website being told about sales at all?
+     *
+     * The mapping is not one-to-one either - a sale and a receiving both move
+     * stock - so a list computed from `h.events` could not be made to read like
+     * this one without a translation table that would then drift. Four fixed
+     * labels describe the EFFECT, which is what the shop is being asked to
+     * trust, and being constant there is nothing to keep in sync.
+     *
+     * This changes the LABEL, not the subscription: the real event list still
+     * leaves the building, and the row stays read-only either way.
+     */
+    SYNCED_FACTS: [
+        ['lang_int_sync_selling_price', 'Selling price'],
+        ['lang_int_sync_stock', 'Stock'],
+        ['lang_int_sync_title', 'Title'],
+        ['lang_int_sync_images', 'Images'],
+    ],
     load: function () {
         PosnicPro.integrations.loadTokens();
         PosnicPro.integrations.loadHooks();
@@ -5486,10 +5510,17 @@ PosnicPro.integrations = {
                      */
                     var locked = h.locked === true;
                     var events = h.events || [];
+                    /*
+                     * A locked row names the four facts the website keeps in step
+                     * with, not the entities the wire carries - see SYNCED_FACTS
+                     * above for why those two are not the same list. Checked and
+                     * disabled either way: this row is a statement, not a control.
+                     */
                     var eventsCell = locked
-                        ? events.map(function (e) {
+                        ? PosnicPro.integrations.SYNCED_FACTS.map(function (fact) {
                             return '<label class="d-block mb-0" style="font-weight:400;">' +
-                                '<input type="checkbox" checked disabled> ' + esc(e) + '</label>';
+                                '<input type="checkbox" checked disabled> ' +
+                                esc(PosnicPro.i18n.t(fact[0], fact[1])) + '</label>';
                         }).join('')
                         : esc(events.join(', ') || 'all');
                     var note = locked
@@ -6227,10 +6258,15 @@ PosnicPro.features = {
     },
 
     loadIntroCountries: function () {
+        /* Pakistan is the default for a shop that has never told us where it is.
+           The last argument wins only when everything before it is empty, which is
+           exactly the fresh-install case - a shop that has chosen a country keeps
+           its own answer. */
         var selected = PosnicPro.features._value(
             PosnicPro.local.get('country_setting'),
             PosnicPro.local.get('countryname'),
-            PosnicPro.local.get('country_value')
+            PosnicPro.local.get('country_value'),
+            'Pakistan'
         );
         if (PosnicPro.features.copyIntroOptions('#setting_country', '#feature_intro_country', selected)) {
             PosnicPro.features.loadIntroStates();
@@ -6253,7 +6289,7 @@ PosnicPro.features = {
     },
 
     loadIntroStates: function (countryId, selected) {
-        var picked = PosnicPro.features._value(selected, PosnicPro.local.get('state_setting'), PosnicPro.local.get('statename'));
+        var picked = PosnicPro.features._value(selected, PosnicPro.local.get('state_setting'), PosnicPro.local.get('statename'), 'Punjab');
         var id = PosnicPro.features._value(countryId, $('#feature_intro_country option:selected').data('setting-id'), PosnicPro.local.get('countryid'));
         if (!id) {
             $('#feature_intro_state').html('<option value="' + PosnicPro.features._esc(picked) + '">' + PosnicPro.features._esc(picked || 'State / region') + '</option>');
@@ -6277,7 +6313,7 @@ PosnicPro.features = {
     },
 
     loadIntroCurrencies: function () {
-        var selected = PosnicPro.features._value($('#currency_setting').val(), PosnicPro.local.get('currency_setting'));
+        var selected = PosnicPro.features._value($('#currency_setting').val(), PosnicPro.local.get('currency_setting'), 'PKR');
         if (PosnicPro.features.copyIntroOptions('#currency_setting', '#feature_intro_currency', selected)) {
             return;
         }
@@ -6298,7 +6334,7 @@ PosnicPro.features = {
     },
 
     loadIntroTimezones: function () {
-        var selected = PosnicPro.features._value(PosnicPro.timeZone());
+        var selected = PosnicPro.features._value(PosnicPro.timeZone(), 'Asia/Karachi');
         if (PosnicPro.features.copyIntroOptions('#time_zone', '#feature_intro_timezone', selected)) {
             return;
         }
@@ -6473,7 +6509,17 @@ PosnicPro.features = {
     },
 
     showIntroStep: function (step) {
-        var steps = ['sample', 'features', 'settings'];
+        /*
+         * ONE step. The "Install sample data?" and feature-picker steps that
+         * came before it are gone from the markup (see modals/feature_intro.html):
+         * a new shop was being asked three questions before it could ring up a
+         * sale, and the first two are unanswerable on day one. Both remain
+         * reachable from Manage > Features for a shop that wants them.
+         *
+         * This list is what drives the step, so removing the sections alone would
+         * have left the assistant scrolling through steps with no content.
+         */
+        var steps = ['settings'];
         var index = Math.max(0, Math.min(steps.length - 1, Number(step) || 0));
         PosnicPro.features._introStep = index;
         $('[data-intro-step]').each(function () {
@@ -6484,7 +6530,10 @@ PosnicPro.features = {
             $(this).toggleClass('is-active', dot === index);
             $(this).toggleClass('is-done', dot < index);
         });
-        $('#feature_intro_step_label').text('Step ' + (index + 1) + ' of ' + steps.length);
+        /* "of 1" is noise, so a single-step assistant just says where it is. */
+        $('#feature_intro_step_label').text(
+            steps.length > 1 ? 'Step ' + (index + 1) + ' of ' + steps.length : 'Step 1'
+        );
         $('#feature_intro_back').prop('hidden', index === 0).attr('hidden', index === 0 ? 'hidden' : null);
         $('#feature_intro_next').prop('hidden', index === steps.length - 1).attr('hidden', index === steps.length - 1 ? 'hidden' : null);
         $('#feature_intro_save, #feature_intro_tour')

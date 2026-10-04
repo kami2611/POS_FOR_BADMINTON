@@ -2881,14 +2881,17 @@ input:checked + .slider:before {
 .rs-act { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 9px; }
 
 /* Item images: a compact drop strip, not a hall - thumbnails stay
-   small and zoom on tap/hover through the existing preview. */
-#item_tab_details .Neon.Neon-theme-dragdropbox { min-height: 0 !important; padding: 6px 0 !important; }
-#item_tab_details .Neon-input-inner { padding: 4px 0 !important; }
-#item_tab_details .Neon-input-icon { display: none; }
-#item_tab_details .Neon-input-text h3 { font-size: 13px !important; margin: 0 0 6px !important; }
-#item_tab_details .Neon-input-text { margin-bottom: 6px !important; }
+   small and zoom on tap/hover through the existing preview.
+   Scoped to the FORM (#items_new), not to a tab. The dropzone used to live on
+   the Details tab and now sits on the Item tab (owner ask); these rules are
+   about the control, so scoping them to the pane it happened to be on is how
+   moving it silently loses them. */
+#items_new .Neon.Neon-theme-dragdropbox { min-height: 0 !important; padding: 6px 0 !important; }
+#items_new .Neon-input-inner { padding: 4px 0 !important; }
+#items_new .Neon-input-icon { display: none; }
+#items_new .Neon-input-text { margin-bottom: 6px !important; }
 #item-display-preview img,
-#item_tab_details .imagezoom { width: 56px !important; height: 56px !important; object-fit: cover; border-radius: 8px; transition: transform 0.12s ease; cursor: zoom-in; }
+#items_new .imagezoom { width: 56px !important; height: 56px !important; object-fit: cover; border-radius: 8px; transition: transform 0.12s ease; cursor: zoom-in; }
 #item-display-preview img:hover { transform: scale(1.6); z-index: 3; position: relative; }
 
 /* Sale grid: every card's media slot is the SAME square - photo,
@@ -3383,18 +3386,31 @@ input:checked + .slider:before {
 /* The dropzone was sized like a landing page: an <h3> caption and a button to
    match. It is one control among many on a tab, so it reads as one. */
 #items_new .Neon-theme-dragdropbox { max-width: 640px; }
-#items_new .Neon-input-dragDrop { padding: 14px 12px; }
+/* The dashed box and the button keep the compact shape the uploader had when it
+   lived in the narrow Details column. One rule, one home: these were split
+   across a #item_tab_details block until the uploader moved to the Item tab
+   (owner ask) and the tab-scoped half stopped applying. */
+#items_new .Neon-input-dragDrop {
+    width: 100%;
+    max-width: 100%;
+    margin: 0 0 10px;
+    padding: 12px;
+    border: 1px dashed #d4dbe6;
+    border-radius: 9px;
+    background: #fafbfd;
+}
 #items_new .Neon-input-text h3 {
     font-size: 13px;
     font-weight: 500;
-    margin-bottom: 0;
+    margin: 0 0 6px;
 }
 #items_new .Neon-input-text.m-b-20 { margin-bottom: 8px !important; }
 #items_new .Neon-input-icon i { font-size: 22px; }
 #items_new .Neon-input-choose-btn {
-    padding: 3px 14px;
-    font-size: 12.5px;
+    padding: 5px 12px;
+    font-size: 12px;
     line-height: 1.6;
+    border-radius: 6px;
 }
 
 /* Thumbnails in a row that wraps, rather than however they happened to fall.
@@ -3574,22 +3590,8 @@ td.payable-total, td.pay_amount_total, td.discount-percentage-line-heigth { padd
    different widths, which is the same complaint as Details. The shared 420px
    cap above still applies, and now applies EVENLY because the columns match. */
 
-/* Details tab: description and the uploader sit side by side as equals,
-   and the uploader stops being a big empty box with a big blue button. */
-#item_tab_details .Neon-input-dragDrop {
-    width: 100%;
-    max-width: 100%;
-    margin: 0 0 10px;
-    padding: 12px;
-    border: 1px dashed #d4dbe6;
-    border-radius: 9px;
-    background: #fafbfd;
-}
-#item_tab_details .Neon-input-choose-btn {
-    padding: 5px 12px;
-    font-size: 12px;
-    border-radius: 6px;
-}
+/* The description has the Details tab to itself since the uploader moved to the
+   Item tab (owner ask), so it keeps a floor rather than a fixed height. */
 #item_tab_details #items_description { min-height: 132px; }
 
 /* Uploaded images as a tidy grid instead of a ragged run of tiles. */

@@ -1145,10 +1145,21 @@ const processSale = async (data, id = '', process = 'Add', context = {}) => {
         data.table_number !== undefined && data.table_number !== null
           ? String(data.table_number).trim()
           : existingSale?.table_number || '',
+      /*
+       * No invented default.
+       *
+       * This used to fall back to the literal 'Dine-in', so EVERY sale in EVERY shop -
+       * a sports shop, a bakery - was stored as a table meal, and the bill then printed
+       * it, because a value that is always present is a value that always prints.
+       *
+       * An empty string is the honest answer for a shop that never chose an order type.
+       * It is also what keeps the line off a bill that nobody asked to have it on; the
+       * print renderers no longer show an order type at all.
+       */
       dine_type:
         data.dine_type !== undefined && data.dine_type !== null
           ? String(data.dine_type).trim()
-          : existingSale?.dine_type || 'Dine-in',
+          : existingSale?.dine_type || '',
       person_count:
         data.person_count !== undefined && data.person_count !== null
           ? data.person_count

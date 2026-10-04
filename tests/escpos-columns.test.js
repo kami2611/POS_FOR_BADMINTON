@@ -90,14 +90,26 @@ for (const roll of ['58', '80']) {
       'amounts must end flush, got ' + JSON.stringify(ends));
   });
 
-  test(`the decimal point is in one column (${roll})`, () => {
-    // 188.00 and 40.00 have different widths; right-alignment is what makes
-    // the decimals line up, and it is the decimals a person scans down.
+  test(`a whole amount prints without its decimal tail (${roll})`, () => {
+    /*
+     * Owner ask: "remove the ending .00 from price". So 188 prints as 188 while
+     * 12.50 keeps its decimals.
+     *
+     * This replaces a test that asserted every amount's decimal POINT sat in one
+     * column. That property cannot survive the change - once whole amounts carry
+     * no point there is none to align - and leaving the old assertion in would
+     * have been worse than deleting it: lastIndexOf('.') returns -1 for every
+     * row, so the set of positions still holds one value and the test passes
+     * while testing nothing. What is real, and is asserted above, is that every
+     * amount still ENDS in the same column.
+     */
     const lines = itemLines(SALE, roll);
-    const dots = lines.map((l) => l.lastIndexOf('.'));
+    const amounts = lines.map((l) => l.trim().split(/\s+/).pop());
 
-    assert.strictEqual(new Set(dots).size, 1,
-      'decimal points must line up, got ' + JSON.stringify(dots));
+    assert.ok(
+      amounts.every((a) => !/\.\d\d$/.test(a)),
+      'a whole amount still carries its decimal tail: ' + JSON.stringify(amounts),
+    );
   });
 
   test(`no line is wider than the paper (${roll})`, () => {
@@ -151,7 +163,7 @@ test('a long name runs on underneath without moving the numbers', () => {
   const text = decode(renderSale(long, { paperWidth: '58' }));
   const lines = text.split('\n');
 
-  const withNumbers = lines.filter((l) => /\d\.\d\d$/.test(l.replace(/\s+$/, '')));
+  const withNumbers = lines.filter((l) => /\d$/.test(l.replace(/\s+$/, '')));
   const ends = withNumbers.map((l) => l.replace(/\s+$/, '').length);
   assert.strictEqual(new Set(ends).size, 1, 'numbers stay in column while the name wraps');
 

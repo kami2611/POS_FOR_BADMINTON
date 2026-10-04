@@ -74,7 +74,11 @@ for (const layout of ['80', '58', 'a4']) {
         assert.equal(result.find('.footer-image-caption').text(), branch.footer_image_caption);
         assert.equal(result.find('.footer-content').text(), branch.footer_print);
         assert.match(result.text(), /Gift Wrap Roll/);
-        assert.match(result.find('.print-total').text(), /1,520\.00/);
+        /* A whole amount carries no decimal tail on the bill. See the rule test
+           below, which pins both halves of it. */
+        assert.equal(result.find('.print-total').text().includes('.00'), false,
+            'a whole amount should print without its trailing .00');
+        assert.match(result.find('.print-total').text(), /1,520/);
         assert.match(result.text(), /Delivery/);
         assert.match(result.text(), /Handle with care/);
         assert.equal(result.find('.receipt-brand-url').text(), 'https://www.posnic.com');
@@ -90,6 +94,37 @@ for (const layout of ['80', '58', 'a4']) {
         dom.window.close();
     });
 }
+
+/*
+ * ONE rule for every amount on the printed bill.
+ *
+ * A whole amount prints WITHOUT its decimal tail - 32000, not 32000.00 - and a real
+ * fraction keeps two decimals. The thermal bill has always worked this way (see
+ * money() in src/escpos-receipt.js, added after the owner asked for exactly this) and
+ * the HTML bill now matches it, applied in one pass at the end of renderSaleDocument
+ * rather than at each of the thirty-odd places that write an amount. Half-converting
+ * the bill is worse than either state, so both halves are asserted here.
+ */
+test('a whole amount prints without its decimal tail, a real fraction keeps it', () => {
+    const { dom, $, branch, data, preview } = till();
+
+    /* The bill separates the currency from the number with `&nbsp;`, so the text
+       carries a non-breaking space. Fold it, or the comparison fails on a
+       character nobody can see. */
+    const totalText = (root) => root.find('.print-total').text().replace(/\u00a0/g, ' ');
+
+    data.items_total = 1520;
+    const whole = $('<div>').html(preview.documentFor(branch, data, '80'));
+    assert.equal(totalText(whole), 'Rs. 1,520',
+        'a whole amount loses the .00 entirely');
+
+    data.items_total = 1520.5;
+    const fractional = $('<div>').html(preview.documentFor(branch, data, '80'));
+    assert.equal(totalText(fractional), 'Rs. 1,520.50',
+        'a real fraction is left exactly as it was');
+
+    dom.window.close();
+});
 
 test('custom template order and styles survive; disabled logo and customer stay hidden', () => {
     const { dom, $, branch, data, preview } = till();
@@ -226,7 +261,7 @@ test('desktop preview decodes actual receipt bytes, including logo, QR and euro 
     const doc = parse(renderSale(raw, { paperWidth: '58' }), 32);
     assert.equal(doc.columns, 32);
     assert.equal(doc.rows.filter(row => row.kind === 'raster').length, 2);
-    assert.match(asLines(doc).join('\n'), /€1520\.00/);
+    assert.match(asLines(doc).join('\n'), /€1520/);
     assert.match(asLines(doc).join('\n'), /Exchanges within seven days/);
     assert.equal(doc.rows.filter(row => row.kind === 'text' && row.text.includes('Gift')).length, 1);
     dom.window.close();
@@ -265,6 +300,6 @@ test('the guarded desktop preview handler never contacts hardware or opens the d
     const doc = await preview({ senderFrame: { url: 'http://localhost:5555/dashboard.html' } },
         { storeName: 'Shop', total: 25, items: [] }, { paperWidth: '58', openDrawer: true });
     assert.equal(doc.columns, 32);
-    assert.ok(doc.rows.some(row => row.text && row.text.includes('25.00')));
+    assert.ok(doc.rows.some(row => row.text && row.text.trim().endsWith('25')));
     await assert.rejects(async () => preview({ senderFrame: { url: 'https://example.com/' } }, {}, {}));
 });

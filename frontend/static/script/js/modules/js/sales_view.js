@@ -1384,18 +1384,23 @@ PosnicPro.sales.view = {
                 }
 
 
-                // Thermal & A4 print: show table number, order type and payment status with conditional hide
+                // Thermal & A4 print: show table number and payment status with conditional hide.
+                //
+                // The ORDER TYPE ("Dine in" / "Take away") is deliberately not read any
+                // more. It is a restaurant concept, and it was reaching every shop: a sale
+                // is stamped `dine_type: 'Dine-in'` when nobody chooses one, and this block
+                // then invented the same value a second time whenever there was a table and
+                // no type. So a sports shop printed "Dine-in" on every bill.
+                //
+                // The spot is removed rather than made opt-in. A line a shopper cannot
+                // interpret is worse than a line nobody misses, and the restaurant that
+                // wants it is a different product decision from the one being made here.
                 var isA4Print = isA4Layout;
                 var tableNumber = (data.table_number || '').toString().trim();
-                var orderType = (data.dine_type || '').toString().trim();
                 var paymentStatus = (typeof (data.payment_status) === 'undefined' || data.payment_status === null)
                     ? 'Paid'
                     : data.payment_status.toString().trim();
                 var paymentMode = (data.payment_mode || '').toString().trim();
-
-                if (!orderType && tableNumber) {
-                    orderType = 'Dine-in';
-                }
 
                 // Remove any previously injected rows before adding new ones (A4-specific helpers)
                 $('.print-table-number-row').remove();
@@ -1414,30 +1419,20 @@ PosnicPro.sales.view = {
                 }
                 if (!isA4Print) {
                     // ===== THERMAL / STANDARD LAYOUT =====
-                    // Place Table and Order Type just under #SID in the header, centered.
+                    // Place Table just under #SID in the header, centered.
                     var $printId = $('.print_view_id');
                     if ($printId.length) {
                         if (tableNumber) {
                             $printId.after('<div class="print-table-number-row" style="text-align:center;"><strong>Table - <span class="print-table-number">' + tableNumber + '</span></strong></div>');
                         }
-
-                        if (orderType) {
-                            var $insertAfter = tableNumber ? $('.print-table-number-row') : $printId;
-                            $insertAfter.after('<div class="print-order-type-row" style="text-align:center;"><span class="print-order-type">' + orderType + '</span></div>');
-                        }
                     }
                 } else {
                     // ===== A4 (REGULAR) LAYOUT =====
-                    // 1) Header: place Table and Order Type just under #SID in the header, right aligned.
+                    // 1) Header: place Table just under #SID in the header, right aligned.
                     var $a4PrintId = $('.print_view_id');
                     if ($a4PrintId.length) {
                         if (tableNumber) {
                             $a4PrintId.after('<span class="print-table-number-row" style="font-weight:bold; font-size:12px; display:block; text-align:right;">Table - <span class="print-table-number">' + tableNumber + '</span></span>');
-                        }
-                        if (orderType) {
-                            var orderHtml = '<span class="print-order-type-row" style="font-size:12px; display:block; text-align:right;">' + orderType + '</span>';
-                            var $insertAfterA4 = tableNumber ? $('.print-table-number-row') : $a4PrintId;
-                            $insertAfterA4.after(orderHtml);
                         }
                     }
                 }
@@ -2059,6 +2054,40 @@ PosnicPro.sales.view = {
                         + '</div></div>';
                     $('.print-modal-a4-body').append(_x);
                 }
+
+                /*
+                 * ── One rule for every amount on the bill ──
+                 *
+                 * A whole amount prints without its decimal tail: 32000, not 32000.00.
+                 * 32000.50 still prints as 32000.50 - only the tail that says nothing is
+                 * dropped.
+                 *
+                 * This is the rule the THERMAL bill already follows (see money() in
+                 * src/escpos-receipt.js, added after the owner asked for exactly this),
+                 * and the two have to agree: a bill whose prices are shaped differently
+                 * from the ticket printed beside it is a support call.
+                 *
+                 * Applied ONCE here, at the end, rather than at each of the thirty-odd
+                 * places above that write an amount. Changing them one by one is how half
+                 * a bill ends up normalised and half not, and a bill that is half-right is
+                 * worse than either. Running last also means an amount added above is
+                 * covered without anybody having to remember to cover it.
+                 */
+                var tidyAmounts = function (container) {
+                    if (!container || !container.length) return;
+                    container.find('*').each(function () {
+                        var $el = jQuery(this);
+                        /* Leaves only. Rewriting an element that has children would throw
+                           its markup away, and every amount on this bill is a leaf. */
+                        if ($el.children().length) return;
+                        var text = $el.text();
+                        if (text.indexOf('.00') === -1) return;
+                        var tidied = text.replace(/(\d)\.00(?=\D|$)/g, '$1');
+                        if (tidied !== text) $el.text(tidied);
+                    });
+                };
+                tidyAmounts($printContainer);
+                tidyAmounts($('.print-modal-a4-body'));
 
     },
     /*Perticular Returned printing the sales data held by this function*/

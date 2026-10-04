@@ -108,7 +108,7 @@ test('amounts end flush against the right margin', () => {
   for (const width of ['58', '80']) {
     const cols = COLUMNS[width];
     const { lines } = decode(renderSale(SALE, { paperWidth: width }));
-    for (const amount of ['644.66', '703.00', '150.03', '480.00', '29.01']) {
+    for (const amount of ['644.66', '703', '150.03', '480', '29.01']) {
       const line = lines.find((l) => l.endsWith(amount));
       assert.ok(line, `${width}mm: no line ends with ${amount}`);
       assert.strictEqual(line.length, cols,

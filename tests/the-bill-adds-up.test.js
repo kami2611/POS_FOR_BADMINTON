@@ -148,10 +148,10 @@ test('the rate reaches the paper, under a column that says what it is', () => {
   assert.match(text, /ITEM\s+RATE\s+QTY\s+AMOUNT/, 'the rate column is not headed');
   assert.match(
     text,
-    /Paneer Starter\s+200\.00\s+2\s+400\.00/,
+    /Paneer Starter\s+200\.00\s+2\s+400/,
     'the line does not read as rate, quantity, amount'
   );
-  assert.match(text, /Subtotal\s+535\.00/);
+  assert.match(text, /Subtotal\s+535/);
 });
 
 /* ------------------------------------------------- what it no longer prints */
@@ -361,7 +361,7 @@ test('THE HSN COLUMN APPEARS ONLY WHERE THERE ARE CODES', () => {
 
   const text = paper({ ...buildBillPayload(AT(20), on), title: 'TAX INVOICE' });
   assert.match(text, /ITEM\s+HSN\s+RATE\s+QTY\s+AMOUNT/, 'the column is not headed');
-  assert.match(text, /Malabar Paratha\s+996332\s+100\.00\s+4\s+400\.00/);
+  assert.match(text, /Malabar Paratha\s+996332\s+100\.00\s+4\s+400/);
 });
 
 test('a sale from before the code was stored prints no empty stripe', () => {

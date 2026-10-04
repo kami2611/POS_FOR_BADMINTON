@@ -40,7 +40,7 @@ test('Arabic names, units, customer, taxes, payments and footer survive layout o
     const plan = layout(sale, { paperWidth });
     const dom = new JSDOM(plan.body);
     const text = dom.window.document.body.textContent;
-    for (const expected of ['شاي بالنعناع', '2 كوب', 'Coffee', 'القاهرة', 'عبدالله', 'طاولة', 'ضريبة', 'نقداً', 'شكراً لزيارتكم', 'ج.م 60.00']) assert.ok(text.includes(expected), expected);
+    for (const expected of ['شاي بالنعناع', '2 كوب', 'Coffee', 'القاهرة', 'عبدالله', 'طاولة', 'ضريبة', 'نقداً', 'شكراً لزيارتكم', 'ج.م 60']) assert.ok(text.includes(expected), expected);
     assert.equal(plan.width, paperWidth === '58' ? 384 : 576);
     assert.equal(dom.window.document.querySelector('td.name div').dir, 'auto');
     dom.window.close();

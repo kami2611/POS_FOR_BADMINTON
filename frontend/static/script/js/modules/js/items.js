@@ -3562,8 +3562,12 @@ PosnicPro.items = {
                     PosnicPro.alert('error', fileNameArray + "Each file must be under 5 MB.");
                     return false;
                 }
-                if ($('#item-display-preview').find('div').length > 11) {
-                    PosnicPro.alert('error', PosnicPro.i18n.t('lang_you_can_upload_up_to_12_files', 'You can upload up to 12 files.'));
+                /* EIGHT, which is what the form advertises and what the website
+                   mirrors. This said twelve, so a shop could attach more photos
+                   than its own storefront would ever show: the extra ones were
+                   uploaded, stored, and never seen by anybody. */
+                if ($('#item-display-preview').find('div').length >= 8) {
+                    PosnicPro.alert('error', PosnicPro.i18n.t('lang_maxfile_title', 'At least one photo, up to 8'));
                     return false;
                 }
 

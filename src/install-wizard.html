@@ -791,30 +791,22 @@
                 </div>
             </div>
 
-            <!-- Cloud enrollment is separate from everyday local staff login. -->
-            <div class="form-section" id="step0" style="display:block;">
-                <div class="mode-head"><h2>Your shop, ready anywhere</h2><p>Start with Posnic Cloud, or keep your shop on this computer.</p></div>
-                <div class="mode-cards">
-                    <div class="mode-card is-primary" id="modeCloud">
-                        <span class="mode-flag">Recommended</span>
-                        <div class="mode-title-row"><h3>Posnic Cloud</h3><span class="mode-badge">14-day free trial</span></div>
-                        <p class="mode-headline">One shop across your desktop and the cloud.</p>
-                        <p>Connect securely in your browser. Your till keeps working when the internet drops.</p>
-                        <ul class="mode-points"><li>Sync sales, stock and customers across your branches</li><li>View your business from a browser, anywhere</li><li>Use local staff login after the first download</li></ul>
-                        <button type="button" class="btn btn-primary" id="chooseCloudBtn">Start cloud trial</button>
-                        <a href="#" id="signupLink" class="mode-link">Sign in to an existing cloud account</a>
-                        <a href="#" id="choosePairLink" class="mode-link">Have a pairing code?</a>
-                    </div>
-                    <div class="mode-card" id="modeLocal">
-                        <div class="mode-title-row"><h3>Community Edition</h3><span class="mode-badge neutral">Free</span></div>
-                        <p class="mode-headline">Keep your shop on this computer.</p>
-                        <p>Set up and sign in without an internet connection or cloud account.</p>
-                        <ul class="mode-points"><li>Run your till fully offline</li><li>Connect counters and phones over your shop Wi-Fi</li><li>Manage your own local backups</li></ul>
-                        <button type="button" class="btn btn-outline" id="chooseLocalBtn">Set up offline</button>
-                    </div>
-                </div>
-                <p class="mode-footnote">Cloud needs internet for authorization and the first download. After that, staff sign in locally and changes sync when you reconnect.</p>
-            </div>
+            <!--
+                The edition-choice screen stood here.
+
+                It asked a first-time shop to choose between "Posnic Cloud" and
+                "Community Edition" before it had given a name, an email or a
+                password - and for this product the answer is never in doubt. A
+                shop set up from a seller's installer is paired with its website
+                over ShuttleZone (the tunnel half of the pairing seed), and every
+                feature the cloud card listed as its advantage is available
+                locally. The question only created a way to get it wrong and land
+                in a cloud flow with no account behind it.
+
+                The shop form below is now what a new install opens on.
+                `stepCloud` and its handlers are left in place, but nothing in
+                this wizard reaches them any more.
+            -->
 
             <div class="form-section" id="stepCloud" style="display:none;">
                 <h2>Connect to Posnic Cloud</h2>
@@ -850,12 +842,14 @@
                 <div class="btn-container"><button type="button" class="btn btn-secondary" id="cloudBackBtn">Back</button></div>
             </div>
 
-            <!-- Quick local setup: one form, everything else defaulted -->
-            <div class="form-section" id="stepQuick" style="display: none;">
+            <!-- Quick local setup: one form, everything else defaulted.
+                 This is the FIRST thing a new install shows, which is why it is
+                 the one section rendered visible rather than hidden. -->
+            <div class="form-section" id="stepQuick" style="display: block;">
                 <h2>🏪 Set Up Your Shop</h2>
                 <div class="form-group">
                     <label>Business Name <span class="required">*</span></label>
-                    <input type="text" id="qBusinessName" autocomplete="organization" placeholder="e.g. Sri Ganesh Stores">
+                    <input type="text" id="qBusinessName" autocomplete="organization" placeholder="e.g. XYZ Sports">
                 </div>
                 <div class="form-group">
                     <label>Business Address</label>
@@ -875,7 +869,8 @@
                     <div class="form-group">
                         <label>Business Type</label>
                         <select id="qBusinessType">
-                            <option value="supermarket" selected>🛒 Supermarket / Kirana Store</option>
+                            <option value="sports" selected>🏸 Sports Shop</option>
+                            <option value="supermarket">🛒 Supermarket / Kirana Store</option>
                             <option value="textile">🧵 Textile / Garment Shop</option>
                             <option value="electrical">💡 Electrical Shop</option>
                             <option value="hardware">🔧 Hardware Shop</option>
@@ -893,7 +888,6 @@
                 </div>
                 <div id="qError" style="display:none;color:#dc3545;margin:8px 0;"></div>
                 <div class="btn-container">
-                    <button type="button" class="btn btn-secondary" id="qBackBtn">← Back</button>
                     <button type="button" class="btn btn-primary" id="qCreateBtn">Create My Store →</button>
                 </div>
                 <p style="font-size:12px;color:#94a3b8;margin-top:14px;">
@@ -1347,14 +1341,10 @@ const form = document.getElementById('installForm');
         // Step 0: installation mode (local shop vs Posnic Cloud)
         // ------------------------------------------------------------------
         function showSection(id) {
-            ['step0', 'stepCloud', 'stepCloudSignup', 'stepQuick', 'stepProgress', 'stepRecovery', 'step1', 'step2', 'step3', 'step4'].forEach((name) => {
+            ['stepCloud', 'stepCloudSignup', 'stepQuick', 'stepProgress', 'stepRecovery', 'step1', 'step2', 'step3', 'step4'].forEach((name) => {
                 const el = document.getElementById(name);
                 if (el) el.style.display = name === id ? 'block' : 'none';
             });
-            /* Only the edition choice is a comparison and needs two columns.
-               Every other step is a form, and a form stretched to 940px reads
-               worse than one at 600. */
-            document.body.classList.toggle('choosing', id === 'step0');
         }
         function finishInstallation(data) {
             const goToLogin = () => {
@@ -1397,8 +1387,12 @@ const form = document.getElementById('installForm');
                 goToLogin();
             };
         }
-        document.getElementById('chooseLocalBtn').addEventListener('click', () => showSection('stepQuick'));
-        document.getElementById('qBackBtn').addEventListener('click', () => showSection('step0'));
+        /*
+         * No listeners for the edition-choice cards: those buttons are gone with
+         * the screen that held them, and `getElementById(...).addEventListener`
+         * on a missing element throws - which would kill this whole init block
+         * and leave the wizard with a dead "Create My Store" button.
+         */
 
         // ------------------------------------------------------------------
         // Quick local setup: one form; DB credentials auto-generated, backups
@@ -1635,11 +1629,8 @@ const form = document.getElementById('installForm');
             showSection('stepCloud');
             await runCloudSetup(() => window.electronAPI.cloud.authorize(intent), true);
         }
-        document.getElementById('chooseCloudBtn').addEventListener('click', () => startBrowserCloud('signup'));
         document.getElementById('browserSignInBtn').addEventListener('click', () => startBrowserCloud('login'));
-        document.getElementById('signupLink').addEventListener('click', (e) => { e.preventDefault(); startBrowserCloud('login'); });
         document.getElementById('cloudSignupLink').addEventListener('click', (e) => { e.preventDefault(); startBrowserCloud('signup'); });
-        document.getElementById('choosePairLink').addEventListener('click', (e) => { e.preventDefault(); showSection('stepCloud'); document.getElementById('pairCode').focus(); });
         document.getElementById('cancelBrowserBtn').addEventListener('click', () => window.electronAPI.cloud.cancelAuthorization());
         window.addEventListener('beforeunload', () => window.electronAPI?.cloud?.cancelAuthorization());
         document.getElementById('reopenBrowserBtn').addEventListener('click', async () => {
@@ -1658,7 +1649,7 @@ const form = document.getElementById('installForm');
             }));
         });
 
-        document.getElementById('cloudBackBtn').addEventListener('click', () => showSection('step0'));
+        document.getElementById('cloudBackBtn').addEventListener('click', () => showSection('stepQuick'));
         /*
          * The server address is support's business, not the customer's.
          * Hidden by default; the visible copy writes into the real field so
